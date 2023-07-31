@@ -1,0 +1,9 @@
+[package]
+name = "neatworks"
+version = "0.0.0"
+edition = "2021"
+description = "A collection and development framework of neat academic works"
+license = "AGPL-3.0-only"
+repository = "https://github.com/sgdxbc/neatworks"
+homepage = "https://github.com/sgdxbc/neatworks"
+documentation = "https://github.com/sgdxbc/neatworks"
