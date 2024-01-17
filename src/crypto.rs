@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
+    ops::Deref,
 };
 
 use serde::{Deserialize, Serialize};
@@ -71,7 +72,7 @@ impl DigestHash for u64 {
 // TODO add impl for i*, NonZero*, etc
 
 #[derive(Debug, Clone)]
-pub struct CryptoEngine<I> {
+pub struct Crypto<I> {
     secret_key: secp256k1::SecretKey,
     public_keys: HashMap<I, secp256k1::PublicKey>,
     secp: secp256k1::Secp256k1<secp256k1::All>,
@@ -80,7 +81,27 @@ pub struct CryptoEngine<I> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Signature(secp256k1::ecdsa::Signature);
 
-impl<I> CryptoEngine<I> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Signed<M> {
+    inner: M,
+    signature: Signature,
+}
+
+impl<M> Deref for Signed<M> {
+    type Target = M;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<M> Signed<M> {
+    pub fn into_inner(self) -> M {
+        self.inner
+    }
+}
+
+impl<I> Crypto<I> {
     pub fn new(
         secret_key: secp256k1::SecretKey,
         public_keys: HashMap<I, secp256k1::PublicKey>,
@@ -92,25 +113,24 @@ impl<I> CryptoEngine<I> {
         }
     }
 
-    pub fn sign(&self, message: &impl DigestHash) -> Signature {
+    pub fn sign<M: DigestHash>(&self, message: M) -> Signed<M> {
         let digest = secp256k1::Message::from_digest(message.sha256());
-        Signature(self.secp.sign_ecdsa(&digest, &self.secret_key))
+        Signed {
+            inner: message,
+            signature: Signature(self.secp.sign_ecdsa(&digest, &self.secret_key)),
+        }
     }
 
-    pub fn verify(
-        &self,
-        index: &I,
-        message: &impl DigestHash,
-        signature: &Signature,
-    ) -> anyhow::Result<()>
+    pub fn verify<M: DigestHash>(&self, index: &I, signed: &Signed<M>) -> anyhow::Result<()>
     where
         I: Eq + Hash,
     {
         let Some(public_key) = self.public_keys.get(index) else {
             anyhow::bail!("no identifier for index")
         };
-        let digest = secp256k1::Message::from_digest(message.sha256());
-        self.secp.verify_ecdsa(&digest, &signature.0, public_key)?;
+        let digest = secp256k1::Message::from_digest(signed.inner.sha256());
+        self.secp
+            .verify_ecdsa(&digest, &signed.signature.0, public_key)?;
         Ok(())
     }
 }
