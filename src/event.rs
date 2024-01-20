@@ -6,11 +6,15 @@ use std::{
 
 use tokio::task::JoinHandle;
 
-#[derive(Debug, Clone)]
-pub struct Sender<M>(tokio::sync::mpsc::UnboundedSender<Option<M>>);
+pub trait SendEvent<M> {
+    fn send(&self, event: M) -> anyhow::Result<()>;
+}
 
-impl<M> Sender<M> {
-    pub fn send(&self, event: impl Into<M>) -> anyhow::Result<()> {
+#[derive(Debug, Clone)]
+pub struct SessionSender<M>(tokio::sync::mpsc::UnboundedSender<Option<M>>);
+
+impl<M: Into<N>, N> SendEvent<M> for SessionSender<N> {
+    fn send(&self, event: M) -> anyhow::Result<()> {
         self.0
             .send(Some(event.into()))
             .map_err(|_| anyhow::anyhow!("receiver closed"))
@@ -46,8 +50,8 @@ impl<M> Default for Session<M> {
 }
 
 impl<M> Session<M> {
-    pub fn sender(&self) -> Sender<M> {
-        Sender(self.sender.clone())
+    pub fn sender(&self) -> SessionSender<M> {
+        SessionSender(self.sender.clone())
     }
 
     pub async fn run(

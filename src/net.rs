@@ -1,7 +1,20 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{hash::Hash, net::SocketAddr, sync::Arc};
 
-pub trait SendBuf<A> {
-    fn send(&self, dest: A, buf: Vec<u8>) -> anyhow::Result<()>;
+use serde::{de::DeserializeOwned, Serialize};
+
+pub trait Addr: Send + Sync + Clone + Eq + Hash + Serialize + DeserializeOwned {}
+impl<T: Send + Sync + Clone + Eq + Hash + Serialize + DeserializeOwned> Addr for T {}
+
+pub trait SendMessage<M> {
+    type Addr: Addr;
+
+    fn send(&self, dest: Self::Addr, message: M) -> anyhow::Result<()>;
+}
+
+pub trait SendBuf {
+    type Addr: Addr;
+
+    fn send(&self, dest: Self::Addr, buf: Vec<u8>) -> anyhow::Result<()>;
 }
 
 #[derive(Debug, Clone)]
@@ -20,8 +33,10 @@ impl Udp {
     }
 }
 
-impl SendBuf<SocketAddr> for Udp {
-    fn send(&self, dest: SocketAddr, buf: Vec<u8>) -> anyhow::Result<()> {
+impl SendBuf for Udp {
+    type Addr = SocketAddr;
+
+    fn send(&self, dest: Self::Addr, buf: Vec<u8>) -> anyhow::Result<()> {
         let socket = self.0.clone();
         tokio::spawn(async move { socket.send_to(&buf, dest).await.unwrap() });
         Ok(())
