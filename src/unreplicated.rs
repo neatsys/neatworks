@@ -4,17 +4,11 @@ use bincode::Options;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    app::App,
     event::{SendEvent, TimerEngine},
     net::{Addr, SendBuf, SendMessage},
+    replication::Request,
 };
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Request<A> {
-    client_id: u32,
-    client_addr: A,
-    seq: u32,
-    op: Vec<u8>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reply {
@@ -124,7 +118,7 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
             seq: self.seq,
             op: self.invoke.as_ref().unwrap().op.clone(),
         };
-        self.net.send(0, request)
+        self.net.send(0, &request)
     }
 }
 
@@ -155,28 +149,22 @@ impl<S, N, A> Replica<S, N, A> {
     }
 }
 
-impl<S, N> Replica<S, N, N::Addr>
-where
-    N: ToClientNet,
-{
+impl<S: App, N: ToClientNet> Replica<S, N, N::Addr> {
     fn on_ingress(&mut self, request: Request<N::Addr>) -> anyhow::Result<()> {
         if let Some(on_request) = self.on_request.get(&request.client_id) {
             if on_request(&request, &self.net)? {
                 return Ok(());
             }
         }
-        // TODO app
+        let result = self.app.execute(&request.op)?;
         let seq = request.seq;
-        let reply = Reply {
-            seq,
-            result: Default::default(),
-        };
+        let reply = Reply { seq, result };
         let on_request = move |request: &Request<N::Addr>, net: &N| {
             if request.seq < seq {
                 return Ok(true);
             }
             if request.seq == seq {
-                net.send(request.client_addr.clone(), reply.clone())?;
+                net.send(request.client_addr.clone(), &reply)?;
                 Ok(true)
             } else {
                 Ok(false)
@@ -193,23 +181,23 @@ where
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct Message<T>(T);
+#[derive(Debug)]
+pub struct MessageNet<T>(T);
 
-impl<T: SendBuf> SendMessage<Request<T::Addr>> for Message<T> {
+impl<T: SendBuf> SendMessage<Request<T::Addr>> for MessageNet<T> {
     type Addr = T::Addr;
 
-    fn send(&self, dest: Self::Addr, message: Request<T::Addr>) -> anyhow::Result<()> {
-        let buf = bincode::options().serialize(&message)?;
+    fn send(&self, dest: Self::Addr, message: &Request<T::Addr>) -> anyhow::Result<()> {
+        let buf = bincode::options().serialize(message)?;
         self.0.send(dest, buf)
     }
 }
 
-impl<T: SendBuf> SendMessage<Reply> for Message<T> {
+impl<T: SendBuf> SendMessage<Reply> for MessageNet<T> {
     type Addr = T::Addr;
 
-    fn send(&self, dest: Self::Addr, message: Reply) -> anyhow::Result<()> {
-        let buf = bincode::options().serialize(&message)?;
+    fn send(&self, dest: Self::Addr, message: &Reply) -> anyhow::Result<()> {
+        let buf = bincode::options().serialize(message)?;
         self.0.send(dest, buf)
     }
 }

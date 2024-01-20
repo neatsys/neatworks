@@ -8,7 +8,7 @@ impl<T: Send + Sync + Clone + Eq + Hash + Serialize + DeserializeOwned> Addr for
 pub trait SendMessage<M> {
     type Addr: Addr;
 
-    fn send(&self, dest: Self::Addr, message: M) -> anyhow::Result<()>;
+    fn send(&self, dest: Self::Addr, message: &M) -> anyhow::Result<()>;
 }
 
 pub trait SendBuf {
