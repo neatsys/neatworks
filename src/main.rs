@@ -38,7 +38,9 @@ async fn main() -> anyhow::Result<()> {
             session: Default::default(),
             benchmark_result: Default::default(),
         });
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+    let ip = std::env::args().nth(1);
+    let ip = ip.as_deref().unwrap_or("0.0.0.0");
+    let listener = tokio::net::TcpListener::bind(format!("{ip}:3000")).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(async { ctrl_c().await.unwrap() })
         .await?;
@@ -133,6 +135,7 @@ where
     let throughput = concurrent.latencies.len() as f32;
     let latency =
         concurrent.latencies.into_iter().sum::<Duration>() / (throughput.floor() as u32 + 1);
+    sessions.shutdown().await;
     benchmark_result.lock().unwrap().replace(BenchmarkResult {
         throughput,
         latency,
@@ -173,17 +176,24 @@ async fn replica_session<M: Send + 'static>(
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let mut session = Session::new();
-    let recv_session = spawn({
+    let mut recv_session = spawn({
         let sender = session.sender();
         async move { net.recv_session(|buf| on_buf(&sender, buf)).await }
     });
-    let state_session = spawn(async move { session.run(&mut state).await });
-    tokio::select! {
-        result = recv_session => result??,
-        result = state_session => result??,
-        () = cancel.cancelled() => return Ok(()),
+    let mut state_session = spawn(async move { session.run(&mut state).await });
+    'select: {
+        tokio::select! {
+            result = &mut recv_session => result??,
+            result = &mut state_session => result??,
+            () = cancel.cancelled() => break 'select,
+        }
+        return Err(anyhow::anyhow!("unexpected shutdown"));
     }
-    Err(anyhow::anyhow!("unexpected shutdown"))
+    recv_session.abort();
+    let _ = recv_session.await;
+    state_session.abort();
+    let _ = state_session.await;
+    Ok(())
 }
 
 async fn stop_replica(State(state): State<AppState>) {
