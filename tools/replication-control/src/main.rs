@@ -59,11 +59,16 @@ async fn benchmark_session(control_client: reqwest::Client) -> anyhow::Result<()
     watchdog_sessions.spawn(watchdog_session(control_client.clone(), client_url.into()));
     let result = 'select: {
         tokio::select! {
-            result = result_session(control_client, client_url.into()) => break 'select result?,
+            result = result_session(control_client.clone(), client_url.into()) => break 'select result?,
             result = watchdog_sessions.join_next() => result.unwrap()??,
         }
         return Err(anyhow::anyhow!("unexpected shutdown"));
     };
+    control_client
+        .post(format!("{replica_url}/stop-replica"))
+        .send()
+        .await?
+        .error_for_status()?;
     println!("{result:?}");
     Ok(())
 }

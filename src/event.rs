@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fmt::Debug,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -11,11 +12,17 @@ pub trait SendEvent<M> {
 }
 
 pub trait OnEvent<M> {
-    fn on_event(&mut self, event: M, time: TimerEngine<'_, M>) -> anyhow::Result<()>;
+    fn on_event(&mut self, event: M, timer: TimerEngine<'_, M>) -> anyhow::Result<()>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SessionSender<M>(tokio::sync::mpsc::UnboundedSender<Option<M>>);
+
+impl<M> Clone for SessionSender<M> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
 
 impl<M: Into<N>, N> SendEvent<M> for SessionSender<N> {
     fn send(&self, event: M) -> anyhow::Result<()> {
@@ -25,13 +32,21 @@ impl<M: Into<N>, N> SendEvent<M> for SessionSender<N> {
     }
 }
 
-#[derive(Debug)]
 pub struct Session<M> {
     sender: tokio::sync::mpsc::UnboundedSender<Option<M>>,
     receiver: tokio::sync::mpsc::UnboundedReceiver<Option<M>>,
     timer_id: u32,
     timers: HashMap<u32, JoinHandle<()>>,
     timeouts: Arc<Mutex<Vec<(u32, M)>>>,
+}
+
+impl<M> Debug for Session<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("timer_id", &self.timer_id)
+            .field("timers", &self.timers)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<M> Session<M> {
@@ -74,8 +89,8 @@ impl<M> Session<M> {
                     TimerEngine {
                         timer_id: &mut self.timer_id,
                         timers: &mut self.timers,
-                        timeouts: self.timeouts.clone(),
-                        sender: self.sender.clone(),
+                        timeouts: &self.timeouts,
+                        sender: &self.sender,
                     },
                 )?
             }
@@ -85,8 +100,8 @@ impl<M> Session<M> {
                     TimerEngine {
                         timer_id: &mut self.timer_id,
                         timers: &mut self.timers,
-                        timeouts: self.timeouts.clone(),
-                        sender: self.sender.clone(),
+                        timeouts: &self.timeouts,
+                        sender: &self.sender,
                     },
                 )?
             }
@@ -100,8 +115,8 @@ impl<M> Session<M> {
 pub struct TimerEngine<'a, M> {
     timer_id: &'a mut u32,
     timers: &'a mut HashMap<u32, JoinHandle<()>>,
-    timeouts: Arc<Mutex<Vec<(u32, M)>>>,
-    sender: tokio::sync::mpsc::UnboundedSender<Option<M>>,
+    timeouts: &'a Arc<Mutex<Vec<(u32, M)>>>,
+    sender: &'a tokio::sync::mpsc::UnboundedSender<Option<M>>,
 }
 
 impl<M> TimerEngine<'_, M> {
