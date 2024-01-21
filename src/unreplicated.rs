@@ -1,11 +1,11 @@
-use std::{collections::HashMap, fmt::Debug, time::Duration};
+use std::{collections::HashMap, fmt::Debug, net::SocketAddr, time::Duration};
 
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     app::App,
-    event::{SendEvent, TimerEngine},
+    event::{OnEvent, SendEvent, TimerEngine},
     net::{Addr, SendBuf, SendMessage},
     replication::Request,
 };
@@ -61,6 +61,20 @@ impl<N, U, A> Client<N, U, A> {
     }
 }
 
+impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> OnEvent<ClientEvent> for Client<N, U, A> {
+    fn on_event(
+        &mut self,
+        event: ClientEvent,
+        timer: TimerEngine<'_, ClientEvent>,
+    ) -> anyhow::Result<()> {
+        match event {
+            ClientEvent::Invoke(op) => self.on_invoke(op, timer),
+            ClientEvent::ResendTimeout => self.on_resend_timeout(),
+            ClientEvent::Ingress(reply) => self.on_ingress(reply, timer),
+        }
+    }
+}
+
 impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
     fn on_invoke(
         &mut self,
@@ -97,18 +111,6 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
         };
         timer.unset(invoke.resend_timer)?;
         self.upcall.send((self.id, reply.result))
-    }
-
-    pub fn on_event(
-        &mut self,
-        event: ClientEvent,
-        timer: TimerEngine<'_, ClientEvent>,
-    ) -> anyhow::Result<()> {
-        match event {
-            ClientEvent::Invoke(op) => self.on_invoke(op, timer),
-            ClientEvent::ResendTimeout => self.on_resend_timeout(),
-            ClientEvent::Ingress(reply) => self.on_ingress(reply, timer),
-        }
     }
 
     fn do_send(&self) -> anyhow::Result<()> {
@@ -149,6 +151,16 @@ impl<S, N, A> Replica<S, N, A> {
     }
 }
 
+impl<S: App, N: ToClientNet> OnEvent<ReplicaEvent<N::Addr>> for Replica<S, N, N::Addr> {
+    fn on_event(
+        &mut self,
+        event: ReplicaEvent<N::Addr>,
+        _: TimerEngine<'_, ReplicaEvent<N::Addr>>,
+    ) -> anyhow::Result<()> {
+        self.on_ingress(event)
+    }
+}
+
 impl<S: App, N: ToClientNet> Replica<S, N, N::Addr> {
     fn on_ingress(&mut self, request: Request<N::Addr>) -> anyhow::Result<()> {
         if let Some(on_request) = self.on_request.get(&request.client_id) {
@@ -175,16 +187,29 @@ impl<S: App, N: ToClientNet> Replica<S, N, N::Addr> {
             .insert(request.client_id, Box::new(on_request));
         Ok(())
     }
-
-    pub fn on_event(&mut self, event: ReplicaEvent<N::Addr>) -> anyhow::Result<()> {
-        self.on_ingress(event)
-    }
 }
 
 #[derive(Debug)]
-pub struct MessageNet<T>(T);
+pub struct ToClientMessageNet<T>(pub T);
 
-impl<T: SendBuf> SendMessage<Request<T::Addr>> for MessageNet<T> {
+impl<T: SendBuf> SendMessage<Reply> for ToClientMessageNet<T> {
+    type Addr = T::Addr;
+
+    fn send(&self, dest: Self::Addr, message: &Reply) -> anyhow::Result<()> {
+        let buf = bincode::options().serialize(message)?;
+        self.0.send(dest, buf)
+    }
+}
+
+pub fn to_client_on_buf(sender: &impl SendEvent<Reply>, buf: &[u8]) -> anyhow::Result<()> {
+    let message = bincode::options().allow_trailing_bytes().deserialize(buf)?;
+    sender.send(message)
+}
+
+#[derive(Debug)]
+pub struct ToReplicaMessageNet<T>(pub T);
+
+impl<T: SendBuf> SendMessage<Request<T::Addr>> for ToReplicaMessageNet<T> {
     type Addr = T::Addr;
 
     fn send(&self, dest: Self::Addr, message: &Request<T::Addr>) -> anyhow::Result<()> {
@@ -193,11 +218,10 @@ impl<T: SendBuf> SendMessage<Request<T::Addr>> for MessageNet<T> {
     }
 }
 
-impl<T: SendBuf> SendMessage<Reply> for MessageNet<T> {
-    type Addr = T::Addr;
-
-    fn send(&self, dest: Self::Addr, message: &Reply) -> anyhow::Result<()> {
-        let buf = bincode::options().serialize(message)?;
-        self.0.send(dest, buf)
-    }
+pub fn to_replica_on_buf(
+    sender: &impl SendEvent<Request<SocketAddr>>,
+    buf: &[u8],
+) -> anyhow::Result<()> {
+    let message = bincode::options().allow_trailing_bytes().deserialize(buf)?;
+    sender.send(message)
 }

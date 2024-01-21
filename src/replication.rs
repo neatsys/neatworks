@@ -40,8 +40,8 @@ impl<M> Concurrent<M> {
         client_id: u32,
         sender: SessionSender<M>,
     ) -> anyhow::Result<()> {
-        let evicted = self.client_senders.insert(client_id, sender);
-        if evicted.is_none() {
+        let replaced = self.client_senders.insert(client_id, sender);
+        if replaced.is_none() {
             Ok(())
         } else {
             Err(anyhow::anyhow!("duplicated client id"))
@@ -77,16 +77,23 @@ pub struct ReplicaNet<N> {
     replica_addrs: Vec<SocketAddr>,
 }
 
+impl<N> ReplicaNet<N> {
+    pub fn new(socket_net: N, replica_addrs: Vec<SocketAddr>) -> Self {
+        Self {
+            socket_net,
+            replica_addrs,
+        }
+    }
+}
+
 impl<N: SendMessage<M, Addr = SocketAddr>, M> SendMessage<M> for ReplicaNet<N> {
     type Addr = u8;
 
     fn send(&self, dest: Self::Addr, message: &M) -> anyhow::Result<()> {
-        self.socket_net.send(
-            *self
-                .replica_addrs
-                .get(dest as usize)
-                .ok_or(anyhow::anyhow!("unknown replica id {dest}"))?,
-            message,
-        )
+        let dest = self
+            .replica_addrs
+            .get(dest as usize)
+            .ok_or(anyhow::anyhow!("unknown replica id {dest}"))?;
+        self.socket_net.send(*dest, message)
     }
 }

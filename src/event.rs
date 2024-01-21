@@ -10,6 +10,10 @@ pub trait SendEvent<M> {
     fn send(&self, event: M) -> anyhow::Result<()>;
 }
 
+pub trait OnEvent<M> {
+    fn on_event(&mut self, event: M, time: TimerEngine<'_, M>) -> anyhow::Result<()>;
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionSender<M>(tokio::sync::mpsc::UnboundedSender<Option<M>>);
 
@@ -54,10 +58,7 @@ impl<M> Session<M> {
         SessionSender(self.sender.clone())
     }
 
-    pub async fn run(
-        &mut self,
-        mut on_event: impl FnMut(M, TimerEngine<'_, M>) -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
+    pub async fn run(&mut self, state: &mut impl OnEvent<M>) -> anyhow::Result<()> {
         loop {
             let event = self
                 .receiver
@@ -68,7 +69,7 @@ impl<M> Session<M> {
             let mut timeouts = self.timeouts.lock().unwrap();
             for (timer_id, event) in timeouts.drain(..) {
                 self.timers.remove(&timer_id).unwrap();
-                on_event(
+                state.on_event(
                     event,
                     TimerEngine {
                         timer_id: &mut self.timer_id,
@@ -79,7 +80,7 @@ impl<M> Session<M> {
                 )?
             }
             if let Some(event) = event {
-                on_event(
+                state.on_event(
                     event,
                     TimerEngine {
                         timer_id: &mut self.timer_id,
