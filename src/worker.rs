@@ -1,6 +1,9 @@
 use std::fmt::Debug;
 
-use tokio::task::JoinSet;
+use tokio::{
+    sync::mpsc::{UnboundedReceiver, UnboundedSender},
+    task::JoinSet,
+};
 
 use crate::event::SessionSender;
 
@@ -9,7 +12,7 @@ pub type Work<S, M> = Box<dyn FnOnce(&S, &SessionSender<M>) -> anyhow::Result<()
 #[derive(Debug)]
 pub struct SpawnExecutor<S, M> {
     state: S,
-    receiver: tokio::sync::mpsc::UnboundedReceiver<Work<S, M>>,
+    receiver: UnboundedReceiver<Work<S, M>>,
     handles: JoinSet<anyhow::Result<()>>,
 }
 
@@ -37,4 +40,4 @@ impl<S, M> SpawnExecutor<S, M> {
 }
 
 #[derive(Debug, Clone)]
-pub struct SpawnWorker<S, M>(tokio::sync::mpsc::UnboundedSender<Work<S, M>>);
+pub struct SpawnWorker<S, M>(UnboundedSender<Work<S, M>>);

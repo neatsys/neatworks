@@ -7,7 +7,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    event::{OnEvent, SendEvent, SessionSender, TimerEngine},
+    event::{OnEvent, SendEvent, SessionSender, Timer},
     net::{SendBuf, SendMessage},
 };
 
@@ -79,7 +79,7 @@ where
     fn on_event(
         &mut self,
         event: ConcurrentEvent,
-        _: TimerEngine<'_, ConcurrentEvent>,
+        _: Timer<'_, ConcurrentEvent>,
     ) -> anyhow::Result<()> {
         let (client_id, _result) = event;
         let Some(sender) = self.client_senders.get(&client_id) else {

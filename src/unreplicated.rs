@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     app::App,
-    event::{OnEvent, SendEvent, TimerEngine},
+    event::{OnEvent, SendEvent, Timer},
     net::{Addr, SendBuf, SendMessage},
     replication::Request,
 };
@@ -66,7 +66,7 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> OnEvent<ClientEvent> for Clie
     fn on_event(
         &mut self,
         event: ClientEvent,
-        timer: TimerEngine<'_, ClientEvent>,
+        timer: Timer<'_, ClientEvent>,
     ) -> anyhow::Result<()> {
         match event {
             ClientEvent::Invoke(op) => self.on_invoke(op, timer),
@@ -80,7 +80,7 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
     fn on_invoke(
         &mut self,
         op: Vec<u8>,
-        mut timer: TimerEngine<'_, ClientEvent>,
+        mut timer: Timer<'_, ClientEvent>,
     ) -> anyhow::Result<()> {
         if self.invoke.is_some() {
             anyhow::bail!("concurrent invocation")
@@ -102,7 +102,7 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
     fn on_ingress(
         &mut self,
         reply: Reply,
-        mut timer: TimerEngine<'_, ClientEvent>,
+        mut timer: Timer<'_, ClientEvent>,
     ) -> anyhow::Result<()> {
         if reply.seq != self.seq {
             return Ok(());
@@ -156,7 +156,7 @@ impl<S: App, N: ToClientNet> OnEvent<ReplicaEvent<N::Addr>> for Replica<S, N, N:
     fn on_event(
         &mut self,
         event: ReplicaEvent<N::Addr>,
-        _: TimerEngine<'_, ReplicaEvent<N::Addr>>,
+        _: Timer<'_, ReplicaEvent<N::Addr>>,
     ) -> anyhow::Result<()> {
         self.on_ingress(event)
     }
