@@ -22,7 +22,7 @@ impl<T: SendMessage<Reply>> ToClientNet for T {}
 pub trait ToReplicaNet<A>: SendMessage<Request<A>, Addr = u8> {}
 impl<T: SendMessage<Request<A>, Addr = u8>, A> ToReplicaNet<A> for T {}
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, derive_more::From)]
 pub enum ClientEvent {
     Invoke(Vec<u8>),
     Ingress(Reply),
@@ -30,6 +30,7 @@ pub enum ClientEvent {
 }
 
 pub trait ClientUpcall: SendEvent<(u32, Vec<u8>)> {}
+impl<T: SendEvent<(u32, Vec<u8>)>> ClientUpcall for T {}
 
 #[derive(Debug)]
 pub struct Client<N, U, A> {
@@ -209,10 +210,10 @@ pub fn to_client_on_buf(sender: &impl SendEvent<Reply>, buf: &[u8]) -> anyhow::R
 #[derive(Debug)]
 pub struct ToReplicaMessageNet<T>(pub T);
 
-impl<T: SendBuf> SendMessage<Request<T::Addr>> for ToReplicaMessageNet<T> {
+impl<T: SendBuf, A: Addr> SendMessage<Request<A>> for ToReplicaMessageNet<T> {
     type Addr = T::Addr;
 
-    fn send(&self, dest: Self::Addr, message: &Request<T::Addr>) -> anyhow::Result<()> {
+    fn send(&self, dest: Self::Addr, message: &Request<A>) -> anyhow::Result<()> {
         let buf = bincode::options().serialize(message)?;
         self.0.send(dest, buf)
     }

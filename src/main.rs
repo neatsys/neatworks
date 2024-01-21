@@ -1,9 +1,15 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    iter::repeat_with,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use augustus::{
     app::Null,
     event::{OnEvent, Session, SessionSender},
     net::Udp,
+    replication::{Concurrent, ConcurrentEvent, ReplicaNet},
     unreplicated,
 };
 use axum::{
@@ -15,7 +21,7 @@ use tokio::{
     runtime,
     signal::ctrl_c,
     spawn,
-    task::{spawn_blocking, JoinHandle},
+    task::{spawn_blocking, JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -23,6 +29,7 @@ use tokio_util::sync::CancellationToken;
 async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/ok", get(ok))
+        .route("/start-client", post(start_client))
         .route("/start-replica", post(start_replica))
         .route("/stop-replica", post(stop_replica))
         .with_state(Arc::new(AppState {
@@ -57,18 +64,68 @@ async fn ok(State(state): State<Arc<AppState>>) {
     }
 }
 
+async fn start_client(State(state): State<Arc<AppState>>) {
+    let mut session = state.session.lock().unwrap();
+    let cancel = CancellationToken::new();
+    let handle = spawn_blocking(|| {
+        let runtime = runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()?;
+        let replica_addrs = vec![SocketAddr::from(([127, 0, 0, 1], 3001))];
+        let new_state = |client_id, addr, net, upcall| {
+            unreplicated::Client::new(
+                client_id,
+                addr,
+                unreplicated::ToReplicaMessageNet(ReplicaNet::new(net, replica_addrs.clone())),
+                upcall,
+            )
+        };
+        runtime.block_on(client_session(new_state, unreplicated::to_client_on_buf))
+    });
+    let replaced = session.replace((handle, cancel));
+    assert!(replaced.is_none())
+}
+
+async fn client_session<S: OnEvent<M> + Send + 'static, M: Send + 'static>(
+    mut new_state: impl FnMut(u32, SocketAddr, Udp, SessionSender<ConcurrentEvent>) -> S,
+    on_buf: impl Fn(&SessionSender<M>, &[u8]) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
+) -> anyhow::Result<()>
+where
+    Vec<u8>: Into<M>,
+{
+    let mut concurrent = Concurrent::new();
+    let mut concurrent_session = Session::new();
+    let mut sessions = JoinSet::new();
+    for client_id in repeat_with(rand::random).take(1) {
+        let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+        let addr = socket.local_addr()?;
+        let net = Udp(socket.into());
+        let mut state = new_state(client_id, addr, net.clone(), concurrent_session.sender());
+        let mut session = Session::new();
+        concurrent.insert_client_sender(client_id, session.sender())?;
+        let sender = session.sender();
+        let on_buf = on_buf.clone();
+        sessions.spawn(async move { net.recv_session(|buf| on_buf(&sender, buf)).await });
+        sessions.spawn(async move { session.run(&mut state).await });
+    }
+    tokio::select! {
+        result = concurrent_session.run(&mut concurrent) => result?,
+        result = sessions.join_next() => result.unwrap()??,
+        () = tokio::time::sleep(Duration::from_secs(1)) => return Ok(()),
+    }
+    Err(anyhow::anyhow!("unexpected shutdown"))
+}
+
 async fn start_replica(State(state): State<Arc<AppState>>) {
     let mut session = state.session.lock().unwrap();
     let cancel = CancellationToken::new();
     let session_cancel = cancel.clone();
     let handle = spawn_blocking(move || {
-        let runtime = &runtime::Builder::new_current_thread()
+        let runtime = runtime::Builder::new_current_thread()
             .enable_all()
-            .build()
-            .unwrap();
-        let socket = runtime
-            .block_on(tokio::net::UdpSocket::bind("0.0.0.0:3001"))
-            .unwrap();
+            .build()?;
+        let socket = runtime.block_on(tokio::net::UdpSocket::bind("0.0.0.0:3001"))?;
         let net = Udp(socket.into());
         let state = unreplicated::Replica::new(Null, unreplicated::ToClientMessageNet(net.clone()));
         runtime.block_on(replica_session(
@@ -97,7 +154,7 @@ async fn replica_session<M: Send + 'static>(
     tokio::select! {
         result = recv_session => result??,
         result = state_session => result??,
-        () = cancel.cancelled() => return Ok(())
+        () = cancel.cancelled() => return Ok(()),
     }
     Err(anyhow::anyhow!("unexpected shutdown"))
 }

@@ -3,8 +3,8 @@ use std::{collections::HashMap, net::SocketAddr};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    event::{SendEvent, SessionSender},
-    net::SendMessage,
+    event::{OnEvent, SendEvent, SessionSender, TimerEngine},
+    net::{SendBuf, SendMessage},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,8 +61,17 @@ where
         }
         Ok(())
     }
+}
 
-    pub fn on_event(&mut self, event: ConcurrentEvent) -> anyhow::Result<()> {
+impl<M> OnEvent<ConcurrentEvent> for Concurrent<M>
+where
+    Vec<u8>: Into<M>,
+{
+    fn on_event(
+        &mut self,
+        event: ConcurrentEvent,
+        _: TimerEngine<'_, ConcurrentEvent>,
+    ) -> anyhow::Result<()> {
         let (client_id, _result) = event;
         let Some(sender) = self.client_senders.get(&client_id) else {
             anyhow::bail!("unknown client id {client_id}")
@@ -95,5 +104,17 @@ impl<N: SendMessage<M, Addr = SocketAddr>, M> SendMessage<M> for ReplicaNet<N> {
             .get(dest as usize)
             .ok_or(anyhow::anyhow!("unknown replica id {dest}"))?;
         self.socket_net.send(*dest, message)
+    }
+}
+
+impl<N: SendBuf<Addr = SocketAddr>> SendBuf for ReplicaNet<N> {
+    type Addr = u8;
+
+    fn send(&self, dest: Self::Addr, buf: Vec<u8>) -> anyhow::Result<()> {
+        let dest = self
+            .replica_addrs
+            .get(dest as usize)
+            .ok_or(anyhow::anyhow!("unknown replica id {dest}"))?;
+        self.socket_net.send(*dest, buf)
     }
 }
