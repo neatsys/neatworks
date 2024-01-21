@@ -1,4 +1,8 @@
-use std::{collections::HashMap, net::SocketAddr};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -18,12 +22,16 @@ pub struct Request<A> {
 #[derive(Debug)]
 pub struct Concurrent<M> {
     client_senders: HashMap<u32, SessionSender<M>>,
+    pub latencies: Vec<Duration>,
+    invoke_instants: HashMap<u32, Instant>,
 }
 
 impl<M> Concurrent<M> {
     pub fn new() -> Self {
         Self {
             client_senders: Default::default(),
+            latencies: Default::default(),
+            invoke_instants: Default::default(),
         }
     }
 }
@@ -55,9 +63,10 @@ impl<M> Concurrent<M>
 where
     Vec<u8>: Into<M>,
 {
-    pub fn launch(&self) -> anyhow::Result<()> {
-        for sender in self.client_senders.values() {
-            sender.send(Vec::new())? // TODO
+    pub fn launch(&mut self) -> anyhow::Result<()> {
+        for (client_id, sender) in &self.client_senders {
+            sender.send(Vec::new())?; // TODO
+            self.invoke_instants.insert(*client_id, Instant::now());
         }
         Ok(())
     }
@@ -76,7 +85,15 @@ where
         let Some(sender) = self.client_senders.get(&client_id) else {
             anyhow::bail!("unknown client id {client_id}")
         };
-        sender.send(Vec::new()) // TODO
+        sender.send(Vec::new())?; // TODO
+        let replaced_instant = self
+            .invoke_instants
+            .insert(client_id, Instant::now())
+            .ok_or(anyhow::anyhow!(
+                "missing invocation instant of client id {client_id}"
+            ))?;
+        self.latencies.push(replaced_instant.elapsed());
+        Ok(())
     }
 }
 

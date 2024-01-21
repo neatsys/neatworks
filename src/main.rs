@@ -15,8 +15,9 @@ use augustus::{
 use axum::{
     extract::State,
     routing::{get, post},
-    Router,
+    Json, Router,
 };
+use replication_control_messages::BenchmarkResult;
 use tokio::{
     runtime,
     signal::ctrl_c,
@@ -30,11 +31,13 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/ok", get(ok))
         .route("/start-client", post(start_client))
+        .route("/benchmark-result", get(benchmark_result))
         .route("/start-replica", post(start_replica))
         .route("/stop-replica", post(stop_replica))
-        .with_state(Arc::new(AppState {
-            session: Mutex::new(None),
-        }));
+        .with_state(AppState {
+            session: Default::default(),
+            benchmark_result: Default::default(),
+        });
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(async { ctrl_c().await.unwrap() })
@@ -42,12 +45,15 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct AppState {
-    session: Mutex<Option<(JoinHandle<anyhow::Result<()>>, CancellationToken)>>,
+    session: Arc<Mutex<Option<AppSession>>>,
+    benchmark_result: Arc<Mutex<Option<BenchmarkResult>>>,
 }
 
-async fn ok(State(state): State<Arc<AppState>>) {
+type AppSession = (JoinHandle<anyhow::Result<()>>, CancellationToken);
+
+async fn ok(State(state): State<AppState>) {
     let mut handle = None;
     {
         let mut session = state.session.lock().unwrap();
@@ -64,9 +70,10 @@ async fn ok(State(state): State<Arc<AppState>>) {
     }
 }
 
-async fn start_client(State(state): State<Arc<AppState>>) {
+async fn start_client(State(state): State<AppState>) {
     let mut session = state.session.lock().unwrap();
     let cancel = CancellationToken::new();
+    let benchmark_result = state.benchmark_result.clone();
     let handle = spawn_blocking(|| {
         let runtime = runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -81,7 +88,11 @@ async fn start_client(State(state): State<Arc<AppState>>) {
                 upcall,
             )
         };
-        runtime.block_on(client_session(new_state, unreplicated::to_client_on_buf))
+        runtime.block_on(client_session(
+            new_state,
+            unreplicated::to_client_on_buf,
+            benchmark_result,
+        ))
     });
     let replaced = session.replace((handle, cancel));
     assert!(replaced.is_none())
@@ -90,6 +101,7 @@ async fn start_client(State(state): State<Arc<AppState>>) {
 async fn client_session<S: OnEvent<M> + Send + 'static, M: Send + 'static>(
     mut new_state: impl FnMut(u32, SocketAddr, Udp, SessionSender<ConcurrentEvent>) -> S,
     on_buf: impl Fn(&SessionSender<M>, &[u8]) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
+    benchmark_result: Arc<Mutex<Option<BenchmarkResult>>>,
 ) -> anyhow::Result<()>
 where
     Vec<u8>: Into<M>,
@@ -109,15 +121,30 @@ where
         sessions.spawn(async move { net.recv_session(|buf| on_buf(&sender, buf)).await });
         sessions.spawn(async move { session.run(&mut state).await });
     }
-    tokio::select! {
-        result = concurrent_session.run(&mut concurrent) => result?,
-        result = sessions.join_next() => result.unwrap()??,
-        () = tokio::time::sleep(Duration::from_secs(1)) => return Ok(()),
+    concurrent.launch()?;
+    'select: {
+        tokio::select! {
+            result = concurrent_session.run(&mut concurrent) => result?,
+            result = sessions.join_next() => result.unwrap()??,
+            () = tokio::time::sleep(Duration::from_secs(1)) => break 'select,
+        }
+        return Err(anyhow::anyhow!("unexpected shutdown"));
     }
-    Err(anyhow::anyhow!("unexpected shutdown"))
+    let throughput = concurrent.latencies.len() as f32;
+    let latency =
+        concurrent.latencies.into_iter().sum::<Duration>() / (throughput.floor() as u32 + 1);
+    benchmark_result.lock().unwrap().replace(BenchmarkResult {
+        throughput,
+        latency,
+    });
+    Ok(())
 }
 
-async fn start_replica(State(state): State<Arc<AppState>>) {
+async fn benchmark_result(State(state): State<AppState>) -> Json<Option<BenchmarkResult>> {
+    state.benchmark_result.lock().unwrap().clone().into()
+}
+
+async fn start_replica(State(state): State<AppState>) {
     let mut session = state.session.lock().unwrap();
     let cancel = CancellationToken::new();
     let session_cancel = cancel.clone();
@@ -159,7 +186,7 @@ async fn replica_session<M: Send + 'static>(
     Err(anyhow::anyhow!("unexpected shutdown"))
 }
 
-async fn stop_replica(State(state): State<Arc<AppState>>) {
+async fn stop_replica(State(state): State<AppState>) {
     let (handle, cancel) = {
         let mut session = state.session.lock().unwrap();
         session.take().unwrap()
