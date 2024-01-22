@@ -5,9 +5,13 @@ use tokio::{
     task::JoinSet,
 };
 
-use crate::event::SessionSender;
+use crate::event::SendEvent;
 
-pub type Work<S, M> = Box<dyn FnOnce(&S, &SessionSender<M>) -> anyhow::Result<()> + Send + Sync>;
+pub type Work<S, M> = Box<dyn FnOnce(&S, &dyn SendEvent<M>) -> anyhow::Result<()> + Send + Sync>;
+
+pub trait Submit<S, M> {
+    fn submit(&self, work: Work<S, M>) -> anyhow::Result<()>;
+}
 
 #[derive(Debug)]
 pub struct SpawnExecutor<S, M> {
@@ -17,14 +21,17 @@ pub struct SpawnExecutor<S, M> {
 }
 
 impl<S, M> SpawnExecutor<S, M> {
-    pub async fn run(&mut self, sender: SessionSender<M>) -> anyhow::Result<()>
+    pub async fn run(
+        &mut self,
+        sender: impl SendEvent<M> + Clone + Send + 'static,
+    ) -> anyhow::Result<()>
     where
-        M: Send + 'static,
         S: Clone + Send + Sync + 'static,
+        M: 'static,
     {
         loop {
-            enum Select<S, M> {
-                Recv(Work<S, M>),
+            enum Select<S, E> {
+                Recv(Work<S, E>),
                 JoinNext(()),
             }
             if let Select::Recv(work) = tokio::select! {
@@ -41,3 +48,11 @@ impl<S, M> SpawnExecutor<S, M> {
 
 #[derive(Debug, Clone)]
 pub struct SpawnWorker<S, M>(UnboundedSender<Work<S, M>>);
+
+impl<S, M> Submit<S, M> for SpawnWorker<S, M> {
+    fn submit(&self, work: Work<S, M>) -> anyhow::Result<()> {
+        self.0
+            .send(work)
+            .map_err(|_| anyhow::anyhow!("receiver closed"))
+    }
+}

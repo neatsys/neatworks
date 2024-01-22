@@ -7,7 +7,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    event::{OnEvent, SendEvent, SessionSender, Timer},
+    event::{OnEvent, SendEvent, Timer},
     net::{SendBuf, SendMessage},
 };
 
@@ -20,13 +20,13 @@ pub struct Request<A> {
 }
 
 #[derive(Debug)]
-pub struct Concurrent<M> {
-    client_senders: HashMap<u32, SessionSender<M>>,
+pub struct Concurrent<E> {
+    client_senders: HashMap<u32, E>,
     pub latencies: Vec<Duration>,
     invoke_instants: HashMap<u32, Instant>,
 }
 
-impl<M> Concurrent<M> {
+impl<E> Concurrent<E> {
     pub fn new() -> Self {
         Self {
             client_senders: Default::default(),
@@ -36,18 +36,14 @@ impl<M> Concurrent<M> {
     }
 }
 
-impl<M> Default for Concurrent<M> {
+impl<E> Default for Concurrent<E> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<M> Concurrent<M> {
-    pub fn insert_client_sender(
-        &mut self,
-        client_id: u32,
-        sender: SessionSender<M>,
-    ) -> anyhow::Result<()> {
+impl<E> Concurrent<E> {
+    pub fn insert_client_sender(&mut self, client_id: u32, sender: E) -> anyhow::Result<()> {
         let replaced = self.client_senders.insert(client_id, sender);
         if replaced.is_none() {
             Ok(())
@@ -59,9 +55,9 @@ impl<M> Concurrent<M> {
 
 pub type ConcurrentEvent = (u32, Vec<u8>);
 
-impl<M> Concurrent<M>
+impl<E> Concurrent<E>
 where
-    Vec<u8>: Into<M>,
+    E: SendEvent<Vec<u8>>,
 {
     pub fn launch(&mut self) -> anyhow::Result<()> {
         for (client_id, sender) in &self.client_senders {
@@ -72,14 +68,14 @@ where
     }
 }
 
-impl<M> OnEvent<ConcurrentEvent> for Concurrent<M>
+impl<E> OnEvent<ConcurrentEvent> for Concurrent<E>
 where
-    Vec<u8>: Into<M>,
+    E: SendEvent<Vec<u8>>,
 {
     fn on_event(
         &mut self,
         event: ConcurrentEvent,
-        _: Timer<'_, ConcurrentEvent>,
+        _: &mut dyn Timer<ConcurrentEvent>,
     ) -> anyhow::Result<()> {
         let (client_id, _result) = event;
         let Some(sender) = self.client_senders.get(&client_id) else {
