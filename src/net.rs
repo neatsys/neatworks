@@ -1,5 +1,6 @@
 use std::{hash::Hash, net::SocketAddr, sync::Arc};
 
+use bincode::Options as _;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::event::SendEvent;
@@ -60,5 +61,29 @@ where
 
     fn send(&self, dest: Self::Addr, message: &M) -> anyhow::Result<()> {
         dest.0.send(message.clone())
+    }
+}
+
+#[derive(Debug)]
+pub struct MessageNet<T, M>(pub T, std::marker::PhantomData<M>);
+
+impl<T, M> MessageNet<T, M> {
+    pub fn new(raw_net: T) -> Self {
+        Self(raw_net, Default::default())
+    }
+}
+
+impl<T, M> From<T> for MessageNet<T, M> {
+    fn from(value: T) -> Self {
+        Self::new(value)
+    }
+}
+
+impl<T: SendBuf, M: Clone + Into<N>, N: Serialize> SendMessage<M> for MessageNet<T, N> {
+    type Addr = T::Addr;
+
+    fn send(&self, dest: Self::Addr, message: &M) -> anyhow::Result<()> {
+        let buf = bincode::options().serialize(&message.clone().into())?;
+        self.0.send(dest, buf)
     }
 }

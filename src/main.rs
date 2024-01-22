@@ -86,7 +86,7 @@ async fn start_client(State(state): State<AppState>) {
             unreplicated::Client::new(
                 client_id,
                 addr,
-                unreplicated::ToReplicaMessageNet(ReplicaNet::new(net, replica_addrs.clone())),
+                unreplicated::ToReplicaMessageNet::new(ReplicaNet::new(net, replica_addrs.clone())),
                 upcall,
             )
         };
@@ -157,7 +157,8 @@ async fn start_replica(State(state): State<AppState>) {
             .build()?;
         let socket = runtime.block_on(tokio::net::UdpSocket::bind("0.0.0.0:3001"))?;
         let net = Udp(socket.into());
-        let state = unreplicated::Replica::new(Null, unreplicated::ToClientMessageNet(net.clone()));
+        let state =
+            unreplicated::Replica::new(Null, unreplicated::ToClientMessageNet::new(net.clone()));
         runtime.block_on(replica_session(
             state,
             unreplicated::to_replica_on_buf,

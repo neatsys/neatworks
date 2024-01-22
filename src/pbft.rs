@@ -1,19 +1,44 @@
-use std::{collections::HashMap, fmt::Debug, net::SocketAddr, time::Duration};
+use std::{collections::HashMap, time::Duration};
 
 use bincode::Options as _;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    app::App,
+    crypto::Signed,
     event::{OnEvent, SendEvent, Timer, TimerId},
     net::{Addr, MessageNet, SendMessage},
     replication::Request,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrePrepare {
+    view_num: u32,
+    op_num: u32,
+    digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Prepare {
+    view_num: u32,
+    op_num: u32,
+    digest: [u8; 32],
+    replica_id: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Commit {
+    view_num: u32,
+    op_num: u32,
+    digest: [u8; 32],
+    replica_id: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reply {
     seq: u32,
     result: Vec<u8>,
+    view_num: u32,
+    replica_id: u8,
 }
 
 pub trait ToClientNet: SendMessage<Reply> {}
@@ -38,6 +63,9 @@ pub struct Client<N, U, A> {
     addr: A,
     seq: u32,
     invoke: Option<ClientInvoke>,
+    view_num: u32,
+    num_replica: usize,
+    num_faulty: usize,
 
     net: N,
     upcall: U,
@@ -47,16 +75,20 @@ pub struct Client<N, U, A> {
 struct ClientInvoke {
     op: Vec<u8>,
     resend_timer: TimerId,
+    replies: HashMap<u8, Reply>,
 }
 
 impl<N, U, A> Client<N, U, A> {
-    pub fn new(id: u32, addr: A, net: N, upcall: U) -> Self {
+    pub fn new(id: u32, addr: A, net: N, upcall: U, num_replica: usize, num_faulty: usize) -> Self {
         Self {
             id,
             addr,
             net,
             upcall,
+            num_replica,
+            num_faulty,
             seq: 0,
+            view_num: 0,
             invoke: Default::default(),
         }
     }
@@ -85,6 +117,7 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
         let invoke = ClientInvoke {
             op,
             resend_timer: timer.set(Duration::from_millis(1000), ClientEvent::ResendTimeout)?,
+            replies: Default::default(),
         };
         self.invoke = Some(invoke);
         self.do_send()
@@ -103,11 +136,24 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
         if reply.seq != self.seq {
             return Ok(());
         }
-        let Some(invoke) = self.invoke.take() else {
+        let Some(invoke) = self.invoke.as_mut() else {
             return Ok(());
         };
-        timer.unset(invoke.resend_timer)?;
-        self.upcall.send((self.id, reply.result))
+        invoke.replies.insert(reply.replica_id, reply.clone());
+        if invoke
+            .replies
+            .values()
+            .filter(|inserted_reply| inserted_reply.result == reply.result)
+            .count()
+            == self.num_faulty + 1
+        {
+            self.view_num = reply.view_num;
+            let invoke = self.invoke.take().unwrap();
+            timer.unset(invoke.resend_timer)?;
+            self.upcall.send((self.id, reply.result))
+        } else {
+            Ok(())
+        }
     }
 
     fn do_send(&self) -> anyhow::Result<()> {
@@ -117,72 +163,9 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
             seq: self.seq,
             op: self.invoke.as_ref().unwrap().op.clone(),
         };
-        self.net.send(0, &request)
-    }
-}
-
-pub type ReplicaEvent<A> = Request<A>;
-
-pub struct Replica<S, N, A> {
-    on_request: HashMap<u32, OnRequest<A, N>>,
-    app: S,
-
-    net: N,
-}
-
-type OnRequest<A, N> = Box<dyn Fn(&Request<A>, &N) -> anyhow::Result<bool> + Send + Sync>;
-
-impl<S, N, A> Debug for Replica<S, N, A> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Replica").finish_non_exhaustive()
-    }
-}
-
-impl<S, N, A> Replica<S, N, A> {
-    pub fn new(app: S, net: N) -> Self {
-        Self {
-            app,
-            net,
-            on_request: Default::default(),
-        }
-    }
-}
-
-impl<S: App, N: ToClientNet> OnEvent<ReplicaEvent<N::Addr>> for Replica<S, N, N::Addr> {
-    fn on_event(
-        &mut self,
-        event: ReplicaEvent<N::Addr>,
-        _: &mut dyn Timer<ReplicaEvent<N::Addr>>,
-    ) -> anyhow::Result<()> {
-        self.on_ingress(event)
-    }
-}
-
-impl<S: App, N: ToClientNet> Replica<S, N, N::Addr> {
-    fn on_ingress(&mut self, request: Request<N::Addr>) -> anyhow::Result<()> {
-        if let Some(on_request) = self.on_request.get(&request.client_id) {
-            if on_request(&request, &self.net)? {
-                return Ok(());
-            }
-        }
-        let result = self.app.execute(&request.op)?;
-        let seq = request.seq;
-        let reply = Reply { seq, result };
-        let on_request = move |request: &Request<N::Addr>, net: &N| {
-            if request.seq < seq {
-                return Ok(true);
-            }
-            if request.seq == seq {
-                net.send(request.client_addr.clone(), &reply)?;
-                Ok(true)
-            } else {
-                Ok(false)
-            }
-        };
-        on_request(&request, &self.net)?;
-        self.on_request
-            .insert(request.client_id, Box::new(on_request));
-        Ok(())
+        // TODO broadcast on resend
+        self.net
+            .send((self.view_num as usize % self.num_replica) as _, &request)
     }
 }
 
@@ -193,12 +176,27 @@ pub fn to_client_on_buf(sender: &impl SendEvent<Reply>, buf: &[u8]) -> anyhow::R
     sender.send(message)
 }
 
-pub type ToReplicaMessageNet<T, A> = MessageNet<T, Request<A>>;
+#[derive(Debug, Clone, Serialize, Deserialize, derive_more::From)]
+pub enum ToReplica<A> {
+    Request(Request<A>),
+    PrePrepare(Signed<PrePrepare>, Vec<Request<A>>),
+    Prepare(Signed<Prepare>),
+    Commit(Signed<Commit>),
+}
 
-pub fn to_replica_on_buf(
-    sender: &impl SendEvent<Request<SocketAddr>>,
+pub type ToReplicaMessageNet<T, A> = MessageNet<T, ToReplica<A>>;
+
+pub fn to_replica_on_buf<A: Addr>(
+    sender: &(impl SendEvent<Request<A>>
+          + SendEvent<(Signed<PrePrepare>, Vec<Request<A>>)>
+          + SendEvent<Signed<Prepare>>
+          + SendEvent<Signed<Commit>>),
     buf: &[u8],
 ) -> anyhow::Result<()> {
-    let message = bincode::options().allow_trailing_bytes().deserialize(buf)?;
-    sender.send(message)
+    match bincode::options().allow_trailing_bytes().deserialize(buf)? {
+        ToReplica::Request(message) => sender.send(message),
+        ToReplica::PrePrepare(message, requests) => sender.send((message, requests)),
+        ToReplica::Prepare(message) => sender.send(message),
+        ToReplica::Commit(message) => sender.send(message),
+    }
 }

@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
-    ops::Deref,
 };
 
 use serde::{Deserialize, Serialize};
@@ -81,18 +80,11 @@ pub struct Crypto<I> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Signature(secp256k1::ecdsa::Signature);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, derive_more::Deref)]
 pub struct Signed<M> {
+    #[deref]
     inner: M,
     signature: Signature,
-}
-
-impl<M> Deref for Signed<M> {
-    type Target = M;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
 }
 
 impl<M> Signed<M> {
