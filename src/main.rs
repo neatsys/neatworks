@@ -141,7 +141,7 @@ where
         let mut state = new_state(
             client_id,
             addr,
-            ReplicaNet::new(net.clone(), replica_addrs.clone()),
+            ReplicaNet::new(net.clone(), replica_addrs.clone(), None),
             concurrent_session.sender(),
         );
         let mut session = Session::new();

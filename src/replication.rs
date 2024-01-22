@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     event::{OnEvent, SendEvent, Timer},
-    net::{SendBuf, SendMessage},
+    net::{Buf, SendBuf},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
 pub struct Request<A> {
     pub client_id: u32,
     pub client_addr: A,
@@ -97,37 +97,57 @@ where
 pub struct ReplicaNet<N> {
     socket_net: N,
     replica_addrs: Vec<SocketAddr>,
+    all_except: Option<usize>,
 }
 
 impl<N> ReplicaNet<N> {
-    pub fn new(socket_net: N, replica_addrs: Vec<SocketAddr>) -> Self {
+    pub fn new(
+        socket_net: N,
+        replica_addrs: Vec<SocketAddr>,
+        replica_id: impl Into<Option<u8>>,
+    ) -> Self {
         Self {
             socket_net,
             replica_addrs,
+            all_except: replica_id.into().map(|id| id as usize),
         }
     }
 }
 
-impl<N: SendMessage<M, Addr = SocketAddr>, M> SendMessage<M> for ReplicaNet<N> {
-    type Addr = u8;
+// impl<N: SendMessage<M, Addr = SocketAddr>, M> SendMessage<M> for ReplicaNet<N> {
+//     type Addr = u8;
 
-    fn send(&self, dest: Self::Addr, message: &M) -> anyhow::Result<()> {
-        let dest = self
-            .replica_addrs
-            .get(dest as usize)
-            .ok_or(anyhow::anyhow!("unknown replica id {dest}"))?;
-        self.socket_net.send(*dest, message)
-    }
-}
+//     fn send(&self, dest: Self::Addr, message: &M) -> anyhow::Result<()> {
+//         let dest = self
+//             .replica_addrs
+//             .get(dest as usize)
+//             .ok_or(anyhow::anyhow!("unknown replica id {dest}"))?;
+//         self.socket_net.send(*dest, message)
+//     }
+
+//     fn send_to_all(&self, message: &M) -> anyhow::Result<()> {
+//         todo!()
+//     }
+// }
 
 impl<N: SendBuf<Addr = SocketAddr>> SendBuf for ReplicaNet<N> {
     type Addr = u8;
 
-    fn send(&self, dest: Self::Addr, buf: Vec<u8>) -> anyhow::Result<()> {
+    fn send(&self, dest: Self::Addr, buf: impl Buf) -> anyhow::Result<()> {
         let dest = self
             .replica_addrs
             .get(dest as usize)
             .ok_or(anyhow::anyhow!("unknown replica id {dest}"))?;
         self.socket_net.send(*dest, buf)
+    }
+
+    fn send_to_all(&self, buf: impl Buf) -> anyhow::Result<()> {
+        for (id, dest) in self.replica_addrs.iter().enumerate() {
+            if self.all_except == Some(id) {
+                continue;
+            }
+            self.socket_net.send(*dest, buf.clone())?
+        }
+        Ok(())
     }
 }

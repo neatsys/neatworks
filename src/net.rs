@@ -1,23 +1,31 @@
 use std::{hash::Hash, net::SocketAddr, sync::Arc};
 
 use bincode::Options as _;
+use bytes::Bytes;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::event::SendEvent;
 
-pub trait Addr: Send + Sync + Clone + Eq + Hash + Serialize + DeserializeOwned {}
-impl<T: Send + Sync + Clone + Eq + Hash + Serialize + DeserializeOwned> Addr for T {}
+pub trait Addr: Send + Sync + Clone + Eq + Hash + Serialize + DeserializeOwned + 'static {}
+impl<T: Send + Sync + Clone + Eq + Hash + Serialize + DeserializeOwned + 'static> Addr for T {}
 
 pub trait SendMessage<M> {
     type Addr: Addr;
 
     fn send(&self, dest: Self::Addr, message: &M) -> anyhow::Result<()>;
+
+    fn send_to_all(&self, message: &M) -> anyhow::Result<()>;
 }
+
+pub trait Buf: AsRef<[u8]> + Send + Sync + Clone + 'static {}
+impl<T: AsRef<[u8]> + Send + Sync + Clone + 'static> Buf for T {}
 
 pub trait SendBuf {
     type Addr: Addr;
 
-    fn send(&self, dest: Self::Addr, buf: Vec<u8>) -> anyhow::Result<()>;
+    fn send(&self, dest: Self::Addr, buf: impl Buf) -> anyhow::Result<()>;
+
+    fn send_to_all(&self, buf: impl Buf) -> anyhow::Result<()>;
 }
 
 #[derive(Debug, Clone)]
@@ -39,10 +47,14 @@ impl Udp {
 impl SendBuf for Udp {
     type Addr = SocketAddr;
 
-    fn send(&self, dest: Self::Addr, buf: Vec<u8>) -> anyhow::Result<()> {
+    fn send(&self, dest: Self::Addr, buf: impl Buf) -> anyhow::Result<()> {
         let socket = self.0.clone();
-        tokio::spawn(async move { socket.send_to(&buf, dest).await.unwrap() });
+        tokio::spawn(async move { socket.send_to(buf.as_ref(), dest).await.unwrap() });
         Ok(())
+    }
+
+    fn send_to_all(&self, _: impl Buf) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!("boradcast is not supported"))
     }
 }
 
@@ -61,6 +73,10 @@ where
 
     fn send(&self, dest: Self::Addr, message: &M) -> anyhow::Result<()> {
         dest.0.send(message.clone())
+    }
+
+    fn send_to_all(&self, _: &M) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!("boradcast is not supported"))
     }
 }
 
@@ -83,7 +99,12 @@ impl<T: SendBuf, M: Clone + Into<N>, N: Serialize> SendMessage<M> for MessageNet
     type Addr = T::Addr;
 
     fn send(&self, dest: Self::Addr, message: &M) -> anyhow::Result<()> {
-        let buf = bincode::options().serialize(&message.clone().into())?;
+        let buf = Bytes::from(bincode::options().serialize(&message.clone().into())?);
         self.0.send(dest, buf)
+    }
+
+    fn send_to_all(&self, message: &M) -> anyhow::Result<()> {
+        let buf = Bytes::from(bincode::options().serialize(&message.clone().into())?);
+        self.0.send_to_all(buf)
     }
 }

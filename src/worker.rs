@@ -9,10 +9,6 @@ use crate::event::SendEvent;
 
 pub type Work<S, M> = Box<dyn FnOnce(&S, &dyn SendEvent<M>) -> anyhow::Result<()> + Send + Sync>;
 
-pub trait Submit<S, M> {
-    fn submit(&self, work: Work<S, M>) -> anyhow::Result<()>;
-}
-
 #[derive(Debug)]
 pub struct SpawnExecutor<S, M> {
     state: S,
@@ -46,11 +42,13 @@ impl<S, M> SpawnExecutor<S, M> {
     }
 }
 
+pub type Worker<S, M> = SpawnWorker<S, M>;
+
 #[derive(Debug, Clone)]
 pub struct SpawnWorker<S, M>(UnboundedSender<Work<S, M>>);
 
-impl<S, M> Submit<S, M> for SpawnWorker<S, M> {
-    fn submit(&self, work: Work<S, M>) -> anyhow::Result<()> {
+impl<S, M> SpawnWorker<S, M> {
+    pub fn submit(&self, work: Work<S, M>) -> anyhow::Result<()> {
         self.0
             .send(work)
             .map_err(|_| anyhow::anyhow!("receiver closed"))

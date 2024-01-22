@@ -23,6 +23,38 @@ impl<T: DigestHasher> Hasher for ImplHasher<'_, T> {
         self.0.write(bytes)
     }
 
+    fn write_u16(&mut self, i: u16) {
+        self.0.write(&i.to_le_bytes())
+    }
+
+    fn write_u32(&mut self, i: u32) {
+        self.0.write(&i.to_le_bytes())
+    }
+
+    fn write_u64(&mut self, i: u64) {
+        self.0.write(&i.to_le_bytes())
+    }
+
+    fn write_usize(&mut self, i: usize) {
+        self.0.write(&i.to_le_bytes())
+    }
+
+    fn write_i16(&mut self, i: i16) {
+        self.0.write(&i.to_le_bytes())
+    }
+
+    fn write_i32(&mut self, i: i32) {
+        self.0.write(&i.to_le_bytes())
+    }
+
+    fn write_i64(&mut self, i: i64) {
+        self.0.write(&i.to_le_bytes())
+    }
+
+    fn write_isize(&mut self, i: isize) {
+        self.0.write(&i.to_le_bytes())
+    }
+
     fn finish(&self) -> u64 {
         unimplemented!()
     }
@@ -40,35 +72,7 @@ pub trait DigestHash: Hash {
     }
 }
 
-impl DigestHash for u8 {}
-
-impl<T: DigestHash> DigestHash for Vec<T> {
-    fn hash(&self, state: &mut impl DigestHasher) {
-        for element in self {
-            DigestHash::hash(element, state)
-        }
-    }
-}
-
-impl DigestHash for u16 {
-    fn hash(&self, state: &mut impl DigestHasher) {
-        ImplHasher(state).write(&self.to_le_bytes())
-    }
-}
-
-impl DigestHash for u32 {
-    fn hash(&self, state: &mut impl DigestHasher) {
-        ImplHasher(state).write(&self.to_le_bytes())
-    }
-}
-
-impl DigestHash for u64 {
-    fn hash(&self, state: &mut impl DigestHasher) {
-        ImplHasher(state).write(&self.to_le_bytes())
-    }
-}
-
-// TODO add impl for i*, NonZero*, etc
+impl<T: Hash> DigestHash for T {}
 
 #[derive(Debug, Clone)]
 pub struct Crypto<I> {
@@ -138,7 +142,6 @@ mod tests {
             a: u32,
             bs: Vec<u8>,
         }
-        impl DigestHash for Foo {}
         let foo = Foo {
             a: 42,
             bs: b"hello".to_vec(),

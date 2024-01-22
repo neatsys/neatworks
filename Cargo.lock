@@ -44,6 +44,7 @@ dependencies = [
  "anyhow",
  "axum",
  "bincode",
+ "bytes",
  "derive_more",
  "rand",
  "replication-control-messages",
