@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     app::App,
-    event::{OnEvent, SendEvent, Timer},
+    event::{OnEvent, SendEvent, Timer, TimerId},
     net::{Addr, SendBuf, SendMessage},
     replication::Request,
 };
@@ -46,7 +46,7 @@ pub struct Client<N, U, A> {
 #[derive(Debug)]
 struct ClientInvoke {
     op: Vec<u8>,
-    resend_timer: u32,
+    resend_timer: TimerId,
 }
 
 impl<N, U, A> Client<N, U, A> {

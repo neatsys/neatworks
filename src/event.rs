@@ -13,10 +13,12 @@ pub trait OnEvent<M> {
     fn on_event(&mut self, event: M, timer: &mut dyn Timer<M>) -> anyhow::Result<()>;
 }
 
-pub trait Timer<M> {
-    fn set_internal(&mut self, duration: Duration, event: M) -> anyhow::Result<u32>;
+pub type TimerId = u32;
 
-    fn unset(&mut self, timer_id: u32) -> anyhow::Result<()>;
+pub trait Timer<M> {
+    fn set_internal(&mut self, duration: Duration, event: M) -> anyhow::Result<TimerId>;
+
+    fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()>;
 }
 
 impl<M> dyn Timer<M> + '_ {
@@ -27,7 +29,7 @@ impl<M> dyn Timer<M> + '_ {
 
 #[derive(Debug, derive_more::From)]
 enum SessionEvent<M> {
-    Timer(u32, M),
+    Timer(TimerId, M),
     Other(M),
 }
 
@@ -40,6 +42,14 @@ impl<M> Clone for SessionSender<M> {
     }
 }
 
+impl<M> PartialEq for SessionSender<M> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.same_channel(&other.0)
+    }
+}
+
+impl<M> Eq for SessionSender<M> {}
+
 impl<M: Into<N>, N> SendEvent<M> for SessionSender<N> {
     fn send(&self, event: M) -> anyhow::Result<()> {
         self.0
@@ -51,8 +61,8 @@ impl<M: Into<N>, N> SendEvent<M> for SessionSender<N> {
 pub struct Session<M> {
     sender: UnboundedSender<SessionEvent<M>>,
     receiver: UnboundedReceiver<SessionEvent<M>>,
-    timer_id: u32,
-    timers: HashMap<u32, JoinHandle<()>>,
+    timer_id: TimerId,
+    timers: HashMap<TimerId, JoinHandle<()>>,
 }
 
 impl<M> Debug for Session<M> {
@@ -139,13 +149,13 @@ impl<M> Session<M> {
 
 #[derive(Debug)]
 pub struct SessionTimer<'a, M> {
-    timer_id: &'a mut u32,
-    timers: &'a mut HashMap<u32, JoinHandle<()>>,
+    timer_id: &'a mut TimerId,
+    timers: &'a mut HashMap<TimerId, JoinHandle<()>>,
     sender: &'a UnboundedSender<SessionEvent<M>>,
 }
 
 impl<M: Send + 'static> Timer<M> for SessionTimer<'_, M> {
-    fn set_internal(&mut self, duration: Duration, event: M) -> anyhow::Result<u32> {
+    fn set_internal(&mut self, duration: Duration, event: M) -> anyhow::Result<TimerId> {
         *self.timer_id += 1;
         let timer_id = *self.timer_id;
         let sender = self.sender.clone();
@@ -157,7 +167,7 @@ impl<M: Send + 'static> Timer<M> for SessionTimer<'_, M> {
         Ok(timer_id)
     }
 
-    fn unset(&mut self, timer_id: u32) -> anyhow::Result<()> {
+    fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()> {
         self.timers
             .remove(&timer_id)
             .ok_or(anyhow::anyhow!("timer not exists"))?
