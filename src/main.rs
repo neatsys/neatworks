@@ -9,6 +9,7 @@ use augustus::{
     app::Null,
     event::{OnEvent, Session, SessionSender},
     net::Udp,
+    pbft,
     replication::{Concurrent, ConcurrentEvent, ReplicaNet},
     unreplicated,
 };
@@ -17,7 +18,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use replication_control_messages::BenchmarkResult;
+use replication_control_messages::{BenchmarkResult, Protocol};
 use tokio::{
     runtime,
     signal::ctrl_c,
@@ -72,42 +73,64 @@ async fn ok(State(state): State<AppState>) {
     }
 }
 
-async fn start_client(State(state): State<AppState>) {
+async fn start_client(State(state): State<AppState>, Json(protocol): Json<Protocol>) {
     let mut session = state.session.lock().unwrap();
     let cancel = CancellationToken::new();
     let benchmark_result = state.benchmark_result.clone();
-    let handle = spawn_blocking(|| {
-        let runtime = runtime::Builder::new_multi_thread()
+    let handle = spawn_blocking(move || {
+        let runtime = &runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
             .build()?;
-        let replica_addrs = vec![SocketAddr::from(([127, 0, 0, 1], 3001))];
-        let new_state = |client_id, addr, net, upcall| {
-            unreplicated::Client::new(
-                client_id,
-                addr,
-                unreplicated::ToReplicaMessageNet::new(ReplicaNet::new(net, replica_addrs.clone())),
-                upcall,
-            )
-        };
-        runtime.block_on(client_session(
-            new_state,
-            unreplicated::to_client_on_buf,
-            benchmark_result,
-        ))
+        match protocol {
+            Protocol::Unreplicated => {
+                let new_state = |client_id, addr, net, upcall| {
+                    unreplicated::Client::new(
+                        client_id,
+                        addr,
+                        unreplicated::ToReplicaMessageNet::new(net),
+                        upcall,
+                    )
+                };
+                runtime.block_on(client_session(
+                    new_state,
+                    unreplicated::to_client_on_buf,
+                    benchmark_result,
+                ))
+            }
+            Protocol::Pbft => {
+                let new_state = |client_id, addr, net, upcall| {
+                    pbft::Client::new(
+                        client_id,
+                        addr,
+                        pbft::ToReplicaMessageNet::new(net),
+                        upcall,
+                        1,
+                        0,
+                    )
+                };
+                runtime.block_on(client_session(
+                    new_state,
+                    pbft::to_client_on_buf,
+                    benchmark_result,
+                ))
+            }
+        }
     });
     let replaced = session.replace((handle, cancel));
     assert!(replaced.is_none())
 }
 
 async fn client_session<S: OnEvent<M> + Send + 'static, M: Send + 'static>(
-    mut new_state: impl FnMut(u32, SocketAddr, Udp, SessionSender<ConcurrentEvent>) -> S,
+    mut new_state: impl FnMut(u32, SocketAddr, ReplicaNet<Udp>, SessionSender<ConcurrentEvent>) -> S,
     on_buf: impl Fn(&SessionSender<M>, &[u8]) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
     benchmark_result: Arc<Mutex<Option<BenchmarkResult>>>,
 ) -> anyhow::Result<()>
 where
     Vec<u8>: Into<M>,
 {
+    let replica_addrs = vec![SocketAddr::from(([127, 0, 0, 1], 3001))];
+
     let mut concurrent = Concurrent::new();
     let mut concurrent_session = Session::new();
     let mut sessions = JoinSet::new();
@@ -115,7 +138,12 @@ where
         let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
         let addr = socket.local_addr()?;
         let net = Udp(socket.into());
-        let mut state = new_state(client_id, addr, net.clone(), concurrent_session.sender());
+        let mut state = new_state(
+            client_id,
+            addr,
+            ReplicaNet::new(net.clone(), replica_addrs.clone()),
+            concurrent_session.sender(),
+        );
         let mut session = Session::new();
         concurrent.insert_client_sender(client_id, session.sender())?;
         let sender = session.sender();

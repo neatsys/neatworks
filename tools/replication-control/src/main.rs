@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use replication_control_messages::BenchmarkResult;
+use replication_control_messages::{BenchmarkResult, Protocol};
 use tokio::task::JoinSet;
 
 #[tokio::main(flavor = "current_thread")]
@@ -53,6 +53,7 @@ async fn benchmark_session(control_client: reqwest::Client) -> anyhow::Result<()
     let client_url = "http://127.0.0.101:3000";
     control_client
         .post(format!("{client_url}/start-client"))
+        .json(&Protocol::Unreplicated)
         .send()
         .await?
         .error_for_status()?;
