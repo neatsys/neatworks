@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fmt::Debug, time::Duration};
 
 use tokio::{
-    sync::mpsc::{UnboundedReceiver, UnboundedSender},
+    sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
 };
 
@@ -76,7 +76,7 @@ impl<M> Debug for Session<M> {
 
 impl<M> Session<M> {
     pub fn new() -> Self {
-        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, receiver) = unbounded_channel();
         Self {
             sender,
             receiver,

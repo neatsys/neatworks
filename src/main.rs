@@ -7,18 +7,20 @@ use std::{
 
 use augustus::{
     app::Null,
+    crypto::Crypto,
     event::{OnEvent, Session, SessionSender},
     net::Udp,
     pbft,
     replication::{Concurrent, ConcurrentEvent, ReplicaNet},
     unreplicated,
+    worker::{spawn_backend, SpawnExecutor},
 };
 use axum::{
     extract::State,
     routing::{get, post},
     Json, Router,
 };
-use replication_control_messages::{BenchmarkResult, Protocol};
+use replication_control_messages::{BenchmarkResult, ClientConfig, Protocol, ReplicaConfig};
 use tokio::{
     runtime,
     signal::ctrl_c,
@@ -73,7 +75,7 @@ async fn ok(State(state): State<AppState>) {
     }
 }
 
-async fn start_client(State(state): State<AppState>, Json(protocol): Json<Protocol>) {
+async fn start_client(State(state): State<AppState>, Json(config): Json<ClientConfig>) {
     let mut session = state.session.lock().unwrap();
     let cancel = CancellationToken::new();
     let benchmark_result = state.benchmark_result.clone();
@@ -82,7 +84,9 @@ async fn start_client(State(state): State<AppState>, Json(protocol): Json<Protoc
             .worker_threads(1)
             .enable_all()
             .build()?;
-        match protocol {
+        let num_replica = config.num_replica;
+        let num_faulty = config.num_faulty;
+        match config.protocol {
             Protocol::Unreplicated => {
                 let new_state = |client_id, addr, net, upcall| {
                     unreplicated::Client::new(
@@ -93,6 +97,7 @@ async fn start_client(State(state): State<AppState>, Json(protocol): Json<Protoc
                     )
                 };
                 runtime.block_on(client_session(
+                    config,
                     new_state,
                     unreplicated::to_client_on_buf,
                     benchmark_result,
@@ -105,11 +110,12 @@ async fn start_client(State(state): State<AppState>, Json(protocol): Json<Protoc
                         addr,
                         pbft::ToReplicaMessageNet::new(net),
                         upcall,
-                        1,
-                        0,
+                        num_replica,
+                        num_faulty,
                     )
                 };
                 runtime.block_on(client_session(
+                    config,
                     new_state,
                     pbft::to_client_on_buf,
                     benchmark_result,
@@ -122,6 +128,7 @@ async fn start_client(State(state): State<AppState>, Json(protocol): Json<Protoc
 }
 
 async fn client_session<S: OnEvent<M> + Send + 'static, M: Send + 'static>(
+    config: ClientConfig,
     mut new_state: impl FnMut(u32, SocketAddr, ReplicaNet<Udp>, SessionSender<ConcurrentEvent>) -> S,
     on_buf: impl Fn(&SessionSender<M>, &[u8]) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
     benchmark_result: Arc<Mutex<Option<BenchmarkResult>>>,
@@ -129,8 +136,6 @@ async fn client_session<S: OnEvent<M> + Send + 'static, M: Send + 'static>(
 where
     Vec<u8>: Into<M>,
 {
-    let replica_addrs = vec![SocketAddr::from(([127, 0, 0, 1], 3001))];
-
     let mut concurrent = Concurrent::new();
     let mut concurrent_session = Session::new();
     let mut sessions = JoinSet::new();
@@ -141,7 +146,7 @@ where
         let mut state = new_state(
             client_id,
             addr,
-            ReplicaNet::new(net.clone(), replica_addrs.clone(), None),
+            ReplicaNet::new(net.clone(), config.replica_addrs.clone(), None),
             concurrent_session.sender(),
         );
         let mut session = Session::new();
@@ -152,6 +157,9 @@ where
         sessions.spawn(async move { session.run(&mut state).await });
     }
     concurrent.launch()?;
+    // TODO escape with an error indicating the root problem instead of a disconnected channel error
+    // caused by the problem
+    // is it (easily) possible?
     'select: {
         tokio::select! {
             result = concurrent_session.run(&mut concurrent) => result?,
@@ -175,7 +183,7 @@ async fn benchmark_result(State(state): State<AppState>) -> Json<Option<Benchmar
     state.benchmark_result.lock().unwrap().clone().into()
 }
 
-async fn start_replica(State(state): State<AppState>) {
+async fn start_replica(State(state): State<AppState>, Json(config): Json<ReplicaConfig>) {
     let mut session = state.session.lock().unwrap();
     let cancel = CancellationToken::new();
     let session_cancel = cancel.clone();
@@ -185,14 +193,47 @@ async fn start_replica(State(state): State<AppState>) {
             .build()?;
         let socket = runtime.block_on(tokio::net::UdpSocket::bind("0.0.0.0:3001"))?;
         let net = Udp(socket.into());
-        let state =
-            unreplicated::Replica::new(Null, unreplicated::ToClientMessageNet::new(net.clone()));
-        runtime.block_on(replica_session(
-            state,
-            unreplicated::to_replica_on_buf,
-            net,
-            session_cancel,
-        ))
+        let crypto = Crypto::new_hardcoded_replication(config.num_replica, config.replica_id)?;
+        match config.protocol {
+            Protocol::Unreplicated => {
+                assert_eq!(config.replica_id, 0);
+                let state = unreplicated::Replica::new(
+                    Null,
+                    unreplicated::ToClientMessageNet::new(net.clone()),
+                );
+                let (_crypto_worker, crypto_executor) = spawn_backend(crypto);
+                runtime.block_on(replica_session(
+                    state,
+                    unreplicated::to_replica_on_buf,
+                    net,
+                    crypto_executor,
+                    session_cancel,
+                ))
+            }
+            Protocol::Pbft => {
+                let (crypto_worker, crypto_executor) = spawn_backend(crypto);
+                let state = pbft::Replica::new(
+                    config.replica_id,
+                    Null,
+                    pbft::ToReplicaMessageNet::new(ReplicaNet::new(
+                        net.clone(),
+                        config.replica_addrs,
+                        config.replica_id,
+                    )),
+                    pbft::ToClientMessageNet::new(net.clone()),
+                    crypto_worker,
+                    config.num_replica,
+                    config.num_faulty,
+                );
+                runtime.block_on(replica_session(
+                    state,
+                    pbft::to_replica_on_buf,
+                    net,
+                    crypto_executor,
+                    session_cancel,
+                ))
+            }
+        }
     });
     let replaced = session.replace((handle, cancel));
     assert!(replaced.is_none())
@@ -202,6 +243,7 @@ async fn replica_session<M: Send + 'static>(
     mut state: impl OnEvent<M> + Send + 'static,
     on_buf: impl Fn(&SessionSender<M>, &[u8]) -> anyhow::Result<()> + Send + Sync + 'static,
     net: Udp,
+    mut crypto_executor: SpawnExecutor<Crypto<u8>, M>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let mut session = Session::new();
@@ -209,18 +251,25 @@ async fn replica_session<M: Send + 'static>(
         let sender = session.sender();
         async move { net.recv_session(|buf| on_buf(&sender, buf)).await }
     });
+    let mut crypto_session = spawn({
+        let sender = session.sender();
+        async move { crypto_executor.run(sender).await }
+    });
     let mut state_session = spawn(async move { session.run(&mut state).await });
     'select: {
         tokio::select! {
             result = &mut recv_session => result??,
+            result = &mut crypto_session => result??,
             result = &mut state_session => result??,
             () = cancel.cancelled() => break 'select,
         }
         return Err(anyhow::anyhow!("unexpected shutdown"));
     }
     recv_session.abort();
-    let _ = recv_session.await;
+    crypto_session.abort();
     state_session.abort();
+    let _ = recv_session.await;
+    let _ = crypto_session.await;
     let _ = state_session.await;
     Ok(())
 }

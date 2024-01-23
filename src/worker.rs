@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 
 use tokio::{
-    sync::mpsc::{UnboundedReceiver, UnboundedSender},
+    sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
     task::JoinSet,
 };
 
@@ -53,4 +53,15 @@ impl<S, M> SpawnWorker<S, M> {
             .send(work)
             .map_err(|_| anyhow::anyhow!("receiver closed"))
     }
+}
+
+pub fn spawn_backend<S, M>(state: S) -> (SpawnWorker<S, M>, SpawnExecutor<S, M>) {
+    let (sender, receiver) = unbounded_channel();
+    let worker = SpawnWorker(sender);
+    let executor = SpawnExecutor {
+        receiver,
+        state,
+        handles: Default::default(),
+    };
+    (worker, executor)
 }

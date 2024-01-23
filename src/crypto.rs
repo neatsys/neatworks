@@ -123,7 +123,31 @@ impl<I> Crypto<I> {
             secp: secp256k1::Secp256k1::new(),
         }
     }
+}
 
+impl Crypto<u8> {
+    pub fn new_hardcoded_replication(num_replica: usize, replica_id: u8) -> anyhow::Result<Self> {
+        let secret_keys = (0..num_replica)
+            .map(|id| {
+                let mut k = [0; 32];
+                let k1 = format!("replica-{id}");
+                k[..k1.as_bytes().len()].copy_from_slice(k1.as_bytes());
+                secp256k1::SecretKey::from_slice(&k)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let secp = secp256k1::Secp256k1::signing_only();
+        Ok(Self::new(
+            secret_keys[replica_id as usize],
+            secret_keys
+                .into_iter()
+                .enumerate()
+                .map(|(id, secret_key)| (id as _, secret_key.public_key(&secp)))
+                .collect(),
+        ))
+    }
+}
+
+impl<I> Crypto<I> {
     pub fn sign<M: DigestHash>(&self, message: M) -> Signed<M> {
         let digest = secp256k1::Message::from_digest(message.sha256());
         Signed {
