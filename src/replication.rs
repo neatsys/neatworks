@@ -1,6 +1,8 @@
 use std::{
     collections::HashMap,
+    fmt::Debug,
     net::SocketAddr,
+    num::NonZeroUsize,
     time::{Duration, Instant},
 };
 
@@ -19,11 +21,21 @@ pub struct Request<A> {
     pub op: Vec<u8>,
 }
 
-#[derive(Debug)]
 pub struct Concurrent<E> {
     client_senders: HashMap<u32, E>,
     pub latencies: Vec<Duration>,
     invoke_instants: HashMap<u32, Instant>,
+    max_count: Option<(usize, ConcurrentStop)>,
+}
+
+type ConcurrentStop = Box<dyn FnOnce() -> anyhow::Result<()> + Send + Sync>;
+
+impl<E> Debug for Concurrent<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Concurrent")
+            .field("<count>", &self.latencies.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<E> Concurrent<E> {
@@ -32,6 +44,7 @@ impl<E> Concurrent<E> {
             client_senders: Default::default(),
             latencies: Default::default(),
             invoke_instants: Default::default(),
+            max_count: None,
         }
     }
 }
@@ -50,6 +63,10 @@ impl<E> Concurrent<E> {
         } else {
             Err(anyhow::anyhow!("duplicated client id"))
         }
+    }
+
+    pub fn insert_max_count(&mut self, count: NonZeroUsize, stop: ConcurrentStop) {
+        let _ = self.max_count.insert((count.into(), stop));
     }
 }
 
@@ -89,6 +106,11 @@ where
                 "missing invocation instant of client id {client_id}"
             ))?;
         self.latencies.push(replaced_instant.elapsed());
+        if let Some((count, _)) = &self.max_count {
+            if self.latencies.len() == *count {
+                (self.max_count.take().unwrap().1)()?
+            }
+        }
         Ok(())
     }
 }

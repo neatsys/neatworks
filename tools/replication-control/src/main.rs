@@ -8,7 +8,8 @@ async fn main() -> anyhow::Result<()> {
     let control_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(1))
         .build()?;
-    benchmark_session(control_client, Protocol::Unreplicated).await
+    // benchmark_session(control_client, Protocol::Unreplicated).await
+    benchmark_session(control_client, Protocol::Pbft).await
 }
 
 async fn watchdog_session(control_client: reqwest::Client, url: String) -> anyhow::Result<()> {
@@ -52,10 +53,10 @@ async fn benchmark_session(
         "http://127.0.0.4:3000",
     ];
     let replica_addrs = [
-        SocketAddr::from(([127, 0, 0, 1], 3000)),
-        SocketAddr::from(([127, 0, 0, 2], 3000)),
-        SocketAddr::from(([127, 0, 0, 3], 3000)),
-        SocketAddr::from(([127, 0, 0, 4], 3000)),
+        SocketAddr::from(([127, 0, 0, 1], 3001)),
+        SocketAddr::from(([127, 0, 0, 2], 3001)),
+        SocketAddr::from(([127, 0, 0, 3], 3001)),
+        SocketAddr::from(([127, 0, 0, 4], 3001)),
     ];
     let num_replica = match protocol {
         Protocol::Unreplicated => 1,

@@ -1,4 +1,4 @@
-use std::{hash::Hash, net::SocketAddr, sync::Arc};
+use std::{fmt::Debug, hash::Hash, net::SocketAddr, sync::Arc};
 
 use bincode::Options as _;
 use bytes::Bytes;
@@ -6,8 +6,14 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::event::SendEvent;
 
-pub trait Addr: Send + Sync + Clone + Eq + Hash + Serialize + DeserializeOwned + 'static {}
-impl<T: Send + Sync + Clone + Eq + Hash + Serialize + DeserializeOwned + 'static> Addr for T {}
+pub trait Addr:
+    Send + Sync + Clone + Eq + Hash + Debug + Serialize + DeserializeOwned + 'static
+{
+}
+impl<T: Send + Sync + Clone + Eq + Hash + Debug + Serialize + DeserializeOwned + 'static> Addr
+    for T
+{
+}
 
 pub trait SendMessage<M> {
     type Addr: Addr;

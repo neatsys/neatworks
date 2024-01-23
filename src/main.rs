@@ -137,6 +137,11 @@ where
     Vec<u8>: Into<M>,
 {
     let mut concurrent = Concurrent::new();
+    // let cancel = CancellationToken::new();
+    // concurrent.insert_max_count(std::num::NonZeroUsize::new(1).unwrap(), {
+    //     let cancel = cancel.clone();
+    //     Box::new(move || Ok(cancel.cancel()))
+    // });
     let mut concurrent_session = Session::new();
     let mut sessions = JoinSet::new();
     for client_id in repeat_with(rand::random).take(1) {
@@ -165,6 +170,7 @@ where
             result = concurrent_session.run(&mut concurrent) => result?,
             result = sessions.join_next() => result.unwrap()??,
             () = tokio::time::sleep(Duration::from_secs(1)) => break 'select,
+            // () = cancel.cancelled() => break 'select,
         }
         return Err(anyhow::anyhow!("unexpected shutdown"));
     }
@@ -191,7 +197,14 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
         let runtime = runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        let socket = runtime.block_on(tokio::net::UdpSocket::bind("0.0.0.0:3001"))?;
+        let socket = runtime.block_on(tokio::net::UdpSocket::bind(
+            config.replica_addrs[config.replica_id as usize],
+        ))?;
+        println!(
+            "Replica {} bind to address {:?}",
+            config.replica_id,
+            socket.local_addr()
+        );
         let net = Udp(socket.into());
         let crypto = Crypto::new_hardcoded_replication(config.num_replica, config.replica_id)?;
         match config.protocol {

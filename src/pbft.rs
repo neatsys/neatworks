@@ -292,6 +292,7 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
         event: ReplicaEvent<M::Addr>,
         _timer: &mut dyn Timer<ReplicaEvent<M::Addr>>,
     ) -> anyhow::Result<()> {
+        // println!("{event:?}");
         match event {
             ReplicaEvent::IngressRequest(request) => self.on_ingress_request(request),
             ReplicaEvent::SignedPrePrepare(pre_prepare, requests) => {
@@ -523,13 +524,13 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
     fn insert_prepare(&mut self, prepare: Signed<Prepare>) -> anyhow::Result<()> {
         let prepare_quorum = self.prepare_quorums.entry(prepare.op_num).or_default();
         prepare_quorum.insert(prepare.replica_id, prepare.clone());
-        if prepare_quorum.len() < self.num_replica - self.num_faulty {
-            return Ok(());
-        }
         let Some(entry) = self.log.get_mut(prepare.op_num as usize) else {
             // cannot match digest for now, postpone entering "prepared" until receiving pre-prepare
             return Ok(());
         };
+        if prepare_quorum.len() + 1 < self.num_replica - self.num_faulty {
+            return Ok(());
+        }
         assert!(entry.prepares.is_empty());
         entry.prepares = self
             .prepare_quorums
@@ -537,8 +538,8 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
             .unwrap()
             .into_iter()
             .collect();
-
         self.on_verified_prepare.remove(&prepare.op_num);
+
         let commit = Commit {
             view_num: self.view_num,
             op_num: prepare.op_num,
@@ -629,11 +630,13 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
             .unwrap()
             .into_iter()
             .collect();
+        self.on_verified_commit.remove(&commit.op_num);
 
         while let Some(entry) = self.log.get(self.commit_num as usize + 1) {
             if entry.commits.is_empty() {
                 break;
             }
+            self.commit_num += 1;
             for request in &entry.requests {
                 let result = self.app.execute(&request.op)?;
                 let seq = request.seq;
