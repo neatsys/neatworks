@@ -320,6 +320,8 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
         (self.id as usize % self.num_replica) == self.view_num as usize
     }
 
+    const NUM_CONCURRENT_PRE_PREPARE: u32 = 1;
+
     fn on_ingress_request(&mut self, request: Request<M::Addr>) -> anyhow::Result<()> {
         if let Some(on_request) = self.on_request.get(&request.client_id) {
             if on_request(&request, &self.client_net)? {
@@ -333,8 +335,34 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
         self.on_request
             .insert(request.client_id, Box::new(|_, _| Ok(true)));
         self.requests.push(request);
-        // TODO close batch
-        Ok(())
+        if self.op_num < self.commit_num + Self::NUM_CONCURRENT_PRE_PREPARE {
+            self.close_batch()
+        } else {
+            Ok(())
+        }
+    }
+
+    fn close_batch(&mut self) -> anyhow::Result<()> {
+        assert!(self.is_primary());
+        assert!(!self.requests.is_empty());
+        self.op_num += 1;
+        let requests = self
+            .requests
+            .drain(..self.requests.len().min(100))
+            .collect::<Vec<_>>();
+        let view_num = self.view_num;
+        let op_num = self.op_num;
+        self.crypto_worker.submit(Box::new(move |crypto, sender| {
+            let pre_prepare = PrePrepare {
+                view_num,
+                op_num,
+                digest: requests.sha256(),
+            };
+            sender.send(ReplicaEvent::SignedPrePrepare(
+                crypto.sign(pre_prepare),
+                requests,
+            ))
+        }))
     }
 
     fn on_signed_pre_prepare(
@@ -420,21 +448,11 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
             sender.send(ReplicaEvent::SignedPrepare(crypto.sign(prepare)))
         }))?;
 
-        if let Some(commit_quorum) = self.commit_quorums.get_mut(&pre_prepare.op_num) {
-            commit_quorum.retain(|_, commit| commit.digest == pre_prepare.digest)
-        }
         if let Some(prepare_quorum) = self.prepare_quorums.get_mut(&pre_prepare.op_num) {
             prepare_quorum.retain(|_, prepare| prepare.digest == pre_prepare.digest);
-            if prepare_quorum.len() >= self.num_replica - self.num_faulty {
-                assert!(self.log[pre_prepare.op_num as usize].prepares.is_empty());
-                self.log[pre_prepare.op_num as usize].prepares = self
-                    .prepare_quorums
-                    .remove(&pre_prepare.op_num)
-                    .unwrap()
-                    .into_iter()
-                    .collect();
-                self.prepared(pre_prepare.op_num)?
-            }
+        }
+        if let Some(commit_quorum) = self.commit_quorums.get_mut(&pre_prepare.op_num) {
+            commit_quorum.retain(|_, commit| commit.digest == pre_prepare.digest)
         }
         Ok(())
     }
@@ -479,6 +497,7 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
             on_verified.push(Box::new(do_verify));
             Ok(())
         } else {
+            // insert the dummy entry to indicate there's ongoing task
             self.on_verified_prepare.insert(op_num, Default::default());
             do_verify(self)
         }
@@ -518,20 +537,12 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
             .unwrap()
             .into_iter()
             .collect();
-        self.prepared(prepare.op_num)
-    }
 
-    fn prepared(&mut self, op_num: u32) -> anyhow::Result<()> {
-        self.on_verified_prepare.remove(&op_num);
-        let digest = self.log[op_num as usize]
-            .pre_prepare
-            .as_ref()
-            .unwrap()
-            .digest;
+        self.on_verified_prepare.remove(&prepare.op_num);
         let commit = Commit {
             view_num: self.view_num,
-            op_num,
-            digest,
+            op_num: prepare.op_num,
+            digest: prepare.digest,
             replica_id: self.id,
         };
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
@@ -648,6 +659,12 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
                 self.on_request
                     .insert(request.client_id, Box::new(on_request));
             }
+        }
+        while self.is_primary()
+            && !self.requests.is_empty()
+            && self.op_num <= self.commit_num + Self::NUM_CONCURRENT_PRE_PREPARE
+        {
+            self.close_batch()?
         }
         Ok(())
     }

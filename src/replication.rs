@@ -114,21 +114,10 @@ impl<N> ReplicaNet<N> {
     }
 }
 
+// intentionally removed the following impl to prevent accidentially duplicated
+// serialization on broadcast
+// always wrap a raw net with ReplicaNet first, then message net
 // impl<N: SendMessage<M, Addr = SocketAddr>, M> SendMessage<M> for ReplicaNet<N> {
-//     type Addr = u8;
-
-//     fn send(&self, dest: Self::Addr, message: &M) -> anyhow::Result<()> {
-//         let dest = self
-//             .replica_addrs
-//             .get(dest as usize)
-//             .ok_or(anyhow::anyhow!("unknown replica id {dest}"))?;
-//         self.socket_net.send(*dest, message)
-//     }
-
-//     fn send_to_all(&self, message: &M) -> anyhow::Result<()> {
-//         todo!()
-//     }
-// }
 
 impl<N: SendBuf<Addr = SocketAddr>> SendBuf for ReplicaNet<N> {
     type Addr = u8;

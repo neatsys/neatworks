@@ -6,6 +6,21 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+// Hashed based digest deriving solution
+// There's no well known solution for deriving digest methods to general
+// structural data i.e. structs and enums (as far as I know), which means to
+// compute digest for a structural data e.g. message type, one has to do either:
+//   specify the tranversal manually
+//   derive `Hash` and make use of it
+//   derive `Serialize` and make use of it
+//   derive `BorshSerialize`, which is similar to `Serialize` but has been
+//   claimed to be specially designed for this use case
+// currently the second approach is take. the benefit is `Hash` semantic
+// guarantees the desired reproducibility, and the main problem is the lack of
+// cross-platform compatibility, which is hardly concerned in this codebase
+// since it is written for benchmarks performed on unified systems and machines.
+// nevertheless, I manually addressed the endianness problem below
+
 pub trait DigestHasher {
     fn write(&mut self, bytes: &[u8]);
 }
