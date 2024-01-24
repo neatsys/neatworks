@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
     fmt::Debug,
-    net::SocketAddr,
     num::NonZeroUsize,
     time::{Duration, Instant},
 };
@@ -10,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     event::{OnEvent, SendEvent, Timer},
-    net::SendMessage,
+    net::{Addr, Buf, SendMessage},
 };
 
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]
@@ -116,18 +115,14 @@ where
 }
 
 #[derive(Debug, Clone)]
-pub struct ReplicaNet<N> {
+pub struct ReplicaNet<N, A> {
     socket_net: N,
-    replica_addrs: Vec<SocketAddr>,
+    replica_addrs: Vec<A>,
     all_except: Option<usize>,
 }
 
-impl<N> ReplicaNet<N> {
-    pub fn new(
-        socket_net: N,
-        replica_addrs: Vec<SocketAddr>,
-        replica_id: impl Into<Option<u8>>,
-    ) -> Self {
+impl<N, A> ReplicaNet<N, A> {
+    pub fn new(socket_net: N, replica_addrs: Vec<A>, replica_id: impl Into<Option<u8>>) -> Self {
         Self {
             socket_net,
             replica_addrs,
@@ -136,26 +131,32 @@ impl<N> ReplicaNet<N> {
     }
 }
 
-impl<N: SendMessage<SocketAddr, M>, M> SendMessage<u8, M> for ReplicaNet<N> {
+impl<N: SendMessage<A, M>, A: Addr, M> SendMessage<u8, M> for ReplicaNet<N, A> {
     fn send(&self, dest: u8, message: M) -> anyhow::Result<()> {
         let dest = self
             .replica_addrs
             .get(dest as usize)
             .ok_or(anyhow::anyhow!("unknown replica id {dest}"))?;
-        self.socket_net.send(*dest, message)
+        self.socket_net.send(dest.clone(), message)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AllReplica;
 
-impl<N: SendMessage<SocketAddr, M>, M: Clone> SendMessage<AllReplica, M> for ReplicaNet<N> {
-    fn send(&self, AllReplica: AllReplica, message: M) -> anyhow::Result<()> {
+// intentionally (seems unnecessarily) restrict message type to `Buf` instead
+// of just `Clone`
+// broadcast should be performed after serialization to avoid duplicated
+// serialization pitfall
+// in another word, always wrap a raw net with `ReplicaNet` first, then desired
+// message net
+impl<N: SendMessage<A, B>, A: Addr, B: Buf> SendMessage<AllReplica, B> for ReplicaNet<N, A> {
+    fn send(&self, AllReplica: AllReplica, message: B) -> anyhow::Result<()> {
         for (id, dest) in self.replica_addrs.iter().enumerate() {
             if self.all_except == Some(id) {
                 continue;
             }
-            self.socket_net.send(*dest, message.clone())?
+            self.socket_net.send(dest.clone(), message.clone())?
         }
         Ok(())
     }

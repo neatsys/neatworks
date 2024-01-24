@@ -130,7 +130,12 @@ async fn start_client(State(state): State<AppState>, Json(config): Json<ClientCo
 
 async fn client_session<S: OnEvent<M> + Send + 'static, M: Send + 'static>(
     config: ClientConfig,
-    mut new_state: impl FnMut(u32, SocketAddr, ReplicaNet<Udp>, SessionSender<ConcurrentEvent>) -> S,
+    mut new_state: impl FnMut(
+        u32,
+        SocketAddr,
+        ReplicaNet<Udp, SocketAddr>,
+        SessionSender<ConcurrentEvent>,
+    ) -> S,
     on_buf: impl Fn(&SessionSender<M>, &[u8]) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
     benchmark_result: Arc<Mutex<Option<BenchmarkResult>>>,
 ) -> anyhow::Result<()>

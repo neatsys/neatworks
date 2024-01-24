@@ -18,7 +18,37 @@ impl<T: Send + Sync + Clone + Eq + Hash + Debug + Serialize + DeserializeOwned +
 pub trait Buf: AsRef<[u8]> + Send + Sync + Clone + 'static {}
 impl<T: AsRef<[u8]> + Send + Sync + Clone + 'static> Buf for T {}
 
+// terms about nets that used in this codebase
+// raw net: implementation of `SendMessage<_, impl Buf>`
+// message net: implement `SendMessage<_, M>` for some structural message type
+// `M`, potentially through wrapping some raw net and adding serialization upon
+// it (and such implementation usually becomes a type alias of `MessageNet`
+// below)
+// socket net: implementation of `SendMessage<SocketAddr, _>`
+// the implementation that wraps a socket net and translates other address types
+// into `SocketAddr` can be called as routing net, i guess
+
+// the `A` parameter used to be an associated type, and later get lifted to
+// contravariant position to enable implementations to send to multiple address
+// types
+// there used to be a dediated trait for raw net, but later get merged into this
+// univeral trait
+// these result in the `Addr` and `Buf` traits are not directly mentioned in
+// sending trait anymore. nevertheless, constrait type parameters with them
+// manually when necessary
+
 pub trait SendMessage<A, M> {
+    // an alternative choice is to accept `message: &M` to avoid overhead of moving large messages,
+    // since structural messages needs to be serialized before sent, which usually can be done
+    // against borrowed messages
+    // the reasons against that choice is that, firstly this `SendMessage` is a general propose
+    // network abstraction, covering the implementations that does not serialize messages e.g.
+    // sending through in memory channels, thus demands message ownership
+    // secondly, even only considering serializing implementations, the implementation may serialize
+    // the message with certain extra fields e.g. tagging the type `M`. although these fields can be
+    // filled into byte buffer, we would prefer to instead performing transformation on the original
+    // message before serialization to do the trick, to e.g. enjoy type safety. certain
+    // transformation e.g. `Into` is easy to use and requires owned messages, so the trait follows
     fn send(&self, dest: A, message: M) -> anyhow::Result<()>;
 }
 
