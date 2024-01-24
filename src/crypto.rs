@@ -1,4 +1,5 @@
 use std::{
+    borrow::BorrowMut,
     collections::HashMap,
     hash::{Hash, Hasher},
 };
@@ -174,15 +175,15 @@ impl<I> Crypto<I> {
 }
 
 impl Crypto<PeerId> {
-    pub fn verify_with_public_key<'a, M: DigestHash>(
+    pub fn verify_with_public_key<M: DigestHash>(
         &self,
-        peer_id: impl Into<&'a mut Option<PeerId>>,
+        mut peer_id: impl BorrowMut<Option<PeerId>>,
         public_key: &PublicKey,
         signed: &Signed<M>,
     ) -> anyhow::Result<()> {
-        let claimed_peer_id = &mut *peer_id.into();
+        let claimed_peer_id = peer_id.borrow_mut();
         let peer_id = public_key.sha256();
-        if let Some(claimed_peer_id) = claimed_peer_id {
+        if let Some(claimed_peer_id) = claimed_peer_id.as_mut() {
             if claimed_peer_id != &peer_id {
                 anyhow::bail!("peer id mismatch")
             }
