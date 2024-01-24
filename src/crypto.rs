@@ -6,6 +6,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::kademlia::PeerId;
+
 // Hashed based digest deriving solution
 // There's no well known solution for deriving digest methods to general
 // structural data i.e. structs and enums (as far as I know), which means to
@@ -86,7 +88,6 @@ pub trait DigestHash: Hash {
         state.finalize().into()
     }
 }
-
 impl<T: Hash> DigestHash for T {}
 
 #[derive(Debug, Clone)]
@@ -96,8 +97,10 @@ pub struct Crypto<I> {
     secp: secp256k1::Secp256k1<secp256k1::All>,
 }
 
+pub type PublicKey = secp256k1::PublicKey;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Signature(secp256k1::ecdsa::Signature);
+pub struct Signature(pub secp256k1::ecdsa::Signature);
 
 #[derive(Debug, Clone, Serialize, Deserialize, derive_more::Deref)]
 pub struct Signed<M> {
@@ -163,6 +166,29 @@ impl<I> Crypto<I> {
         let Some(public_key) = self.public_keys.get(index) else {
             anyhow::bail!("no identifier for index")
         };
+        let digest = secp256k1::Message::from_digest(signed.inner.sha256());
+        self.secp
+            .verify_ecdsa(&digest, &signed.signature.0, public_key)?;
+        Ok(())
+    }
+}
+
+impl Crypto<PeerId> {
+    pub fn verify_with_public_key<'a, M: DigestHash>(
+        &self,
+        peer_id: impl Into<&'a mut Option<PeerId>>,
+        public_key: &PublicKey,
+        signed: &Signed<M>,
+    ) -> anyhow::Result<()> {
+        let claimed_peer_id = &mut *peer_id.into();
+        let peer_id = public_key.sha256();
+        if let Some(claimed_peer_id) = claimed_peer_id {
+            if claimed_peer_id != &peer_id {
+                anyhow::bail!("peer id mismatch")
+            }
+        }
+        *claimed_peer_id = Some(peer_id);
+
         let digest = secp256k1::Message::from_digest(signed.inner.sha256());
         self.secp
             .verify_ecdsa(&digest, &signed.signature.0, public_key)?;

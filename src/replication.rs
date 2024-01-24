@@ -65,7 +65,7 @@ impl<E> Concurrent<E> {
     }
 
     pub fn insert_max_count(&mut self, count: NonZeroUsize, stop: ConcurrentStop) {
-        let _ = self.max_count.insert((count.into(), stop));
+        self.max_count = Some((count.into(), stop));
     }
 }
 
