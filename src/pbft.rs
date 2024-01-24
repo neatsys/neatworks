@@ -8,7 +8,7 @@ use crate::{
     crypto::{Crypto, DigestHash as _, Signed},
     event::{OnEvent, SendEvent, Timer, TimerId},
     net::{Addr, MessageNet, SendMessage},
-    replication::Request,
+    replication::{AllReplica, Request},
     worker::Worker,
 };
 
@@ -43,21 +43,23 @@ pub struct Reply {
     replica_id: u8,
 }
 
-pub trait ToClientNet: SendMessage<Reply> {}
-impl<T: SendMessage<Reply>> ToClientNet for T {}
+pub trait ToClientNet<A>: SendMessage<A, Reply> {}
+impl<T: SendMessage<A, Reply>, A> ToClientNet<A> for T {}
 
 pub trait ToReplicaNet<A>:
-    SendMessage<Request<A>, Addr = u8>
-    + SendMessage<(Signed<PrePrepare>, Vec<Request<A>>), Addr = u8>
-    + SendMessage<Signed<Prepare>, Addr = u8>
-    + SendMessage<Signed<Commit>, Addr = u8>
+    SendMessage<u8, Request<A>>
+    + SendMessage<AllReplica, Request<A>>
+    + SendMessage<AllReplica, (Signed<PrePrepare>, Vec<Request<A>>)>
+    + SendMessage<AllReplica, Signed<Prepare>>
+    + SendMessage<AllReplica, Signed<Commit>>
 {
 }
 impl<
-        T: SendMessage<Request<A>, Addr = u8>
-            + SendMessage<(Signed<PrePrepare>, Vec<Request<A>>), Addr = u8>
-            + SendMessage<Signed<Prepare>, Addr = u8>
-            + SendMessage<Signed<Commit>, Addr = u8>,
+        T: SendMessage<u8, Request<A>>
+            + SendMessage<AllReplica, Request<A>>
+            + SendMessage<AllReplica, (Signed<PrePrepare>, Vec<Request<A>>)>
+            + SendMessage<AllReplica, Signed<Prepare>>
+            + SendMessage<AllReplica, Signed<Commit>>,
         A,
     > ToReplicaNet<A> for T
 {
@@ -136,12 +138,12 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
             replies: Default::default(),
         };
         self.invoke = Some(invoke);
-        self.do_send()
+        self.do_send((self.view_num as usize % self.num_replica) as u8)
     }
 
     fn on_resend_timeout(&self) -> anyhow::Result<()> {
         // TODO logging
-        self.do_send()
+        self.do_send(AllReplica)
     }
 
     fn on_ingress(
@@ -172,16 +174,17 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
         }
     }
 
-    fn do_send(&self) -> anyhow::Result<()> {
+    fn do_send<B>(&self, dest: B) -> anyhow::Result<()>
+    where
+        N: SendMessage<B, Request<A>>,
+    {
         let request = Request {
             client_id: self.id,
             client_addr: self.addr.clone(),
             seq: self.seq,
             op: self.invoke.as_ref().unwrap().op.clone(),
         };
-        // TODO broadcast on resend
-        self.net
-            .send((self.view_num as usize % self.num_replica) as _, &request)
+        self.net.send(dest, request)
     }
 }
 
@@ -284,13 +287,13 @@ impl<S, N, M, A> Replica<S, N, M, A> {
     }
 }
 
-impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'static>
-    OnEvent<ReplicaEvent<M::Addr>> for Replica<S, N, M, M::Addr>
+impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static, A: Addr>
+    OnEvent<ReplicaEvent<A>> for Replica<S, N, M, A>
 {
     fn on_event(
         &mut self,
-        event: ReplicaEvent<M::Addr>,
-        _timer: &mut dyn Timer<ReplicaEvent<M::Addr>>,
+        event: ReplicaEvent<A>,
+        _timer: &mut dyn Timer<ReplicaEvent<A>>,
     ) -> anyhow::Result<()> {
         // println!("{event:?}");
         match event {
@@ -314,8 +317,8 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
     }
 }
 
-impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'static>
-    Replica<S, N, M, M::Addr>
+impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static, A: Addr>
+    Replica<S, N, M, A>
 {
     fn is_primary(&self) -> bool {
         (self.id as usize % self.num_replica) == self.view_num as usize
@@ -323,7 +326,7 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
 
     const NUM_CONCURRENT_PRE_PREPARE: u32 = 1;
 
-    fn on_ingress_request(&mut self, request: Request<M::Addr>) -> anyhow::Result<()> {
+    fn on_ingress_request(&mut self, request: Request<A>) -> anyhow::Result<()> {
         if let Some(on_request) = self.on_request.get(&request.client_id) {
             if on_request(&request, &self.client_net)? {
                 return Ok(());
@@ -369,7 +372,7 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
     fn on_signed_pre_prepare(
         &mut self,
         pre_prepare: Signed<PrePrepare>,
-        requests: Vec<Request<M::Addr>>,
+        requests: Vec<Request<A>>,
     ) -> anyhow::Result<()> {
         if pre_prepare.view_num != self.view_num {
             return Ok(());
@@ -384,13 +387,13 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
         assert!(replaced.is_none());
         self.log[pre_prepare.op_num as usize].view_num = self.view_num;
         self.log[pre_prepare.op_num as usize].requests = requests.clone();
-        self.net.send_to_all(&(pre_prepare, requests))
+        self.net.send(AllReplica, (pre_prepare, requests))
     }
 
     fn on_ingress_pre_prepare(
         &mut self,
         pre_prepare: Signed<PrePrepare>,
-        requests: Vec<Request<M::Addr>>,
+        requests: Vec<Request<A>>,
     ) -> anyhow::Result<()> {
         if pre_prepare.view_num != self.view_num {
             if pre_prepare.view_num > self.view_num {
@@ -421,7 +424,7 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
     fn on_verified_pre_prepare(
         &mut self,
         pre_prepare: Signed<PrePrepare>,
-        requests: Vec<Request<M::Addr>>,
+        requests: Vec<Request<A>>,
     ) -> anyhow::Result<()> {
         if pre_prepare.view_num != self.view_num {
             return Ok(());
@@ -462,7 +465,7 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
         if prepare.view_num != self.view_num {
             return Ok(());
         }
-        self.net.send_to_all(&prepare)?;
+        self.net.send(AllReplica, prepare.clone())?;
         self.insert_prepare(prepare)?;
         Ok(())
     }
@@ -556,7 +559,7 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
         if commit.view_num != self.view_num {
             return Ok(());
         }
-        self.net.send_to_all(&commit)?;
+        self.net.send(AllReplica, commit.clone())?;
         self.insert_commit(commit)
     }
 
@@ -649,12 +652,12 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
                     replica_id: self.id,
                 };
                 let addr = request.client_addr.clone();
-                let on_request = move |request: &Request<M::Addr>, net: &M| {
+                let on_request = move |request: &Request<A>, net: &M| {
                     if request.seq < seq {
                         return Ok(true);
                     }
                     if request.seq == seq {
-                        net.send(addr.clone(), &reply)?;
+                        net.send(addr.clone(), reply.clone())?;
                         Ok(true)
                     } else {
                         Ok(false)

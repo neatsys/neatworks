@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     event::{OnEvent, SendEvent, Timer},
-    net::{Buf, SendBuf},
+    net::SendMessage,
 };
 
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]
@@ -136,28 +136,26 @@ impl<N> ReplicaNet<N> {
     }
 }
 
-// intentionally removed the following impl to prevent accidentially duplicated
-// serialization on broadcast
-// always wrap a raw net with ReplicaNet first, then message net
-// impl<N: SendMessage<M, Addr = SocketAddr>, M> SendMessage<M> for ReplicaNet<N> {
-
-impl<N: SendBuf<Addr = SocketAddr>> SendBuf for ReplicaNet<N> {
-    type Addr = u8;
-
-    fn send(&self, dest: Self::Addr, buf: impl Buf) -> anyhow::Result<()> {
+impl<N: SendMessage<SocketAddr, M>, M> SendMessage<u8, M> for ReplicaNet<N> {
+    fn send(&self, dest: u8, message: M) -> anyhow::Result<()> {
         let dest = self
             .replica_addrs
             .get(dest as usize)
             .ok_or(anyhow::anyhow!("unknown replica id {dest}"))?;
-        self.socket_net.send(*dest, buf)
+        self.socket_net.send(*dest, message)
     }
+}
 
-    fn send_to_all(&self, buf: impl Buf) -> anyhow::Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AllReplica;
+
+impl<N: SendMessage<SocketAddr, M>, M: Clone> SendMessage<AllReplica, M> for ReplicaNet<N> {
+    fn send(&self, AllReplica: AllReplica, message: M) -> anyhow::Result<()> {
         for (id, dest) in self.replica_addrs.iter().enumerate() {
             if self.all_except == Some(id) {
                 continue;
             }
-            self.socket_net.send(*dest, buf.clone())?
+            self.socket_net.send(*dest, message.clone())?
         }
         Ok(())
     }

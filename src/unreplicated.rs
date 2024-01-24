@@ -16,11 +16,11 @@ pub struct Reply {
     result: Vec<u8>,
 }
 
-pub trait ToClientNet: SendMessage<Reply> {}
-impl<T: SendMessage<Reply>> ToClientNet for T {}
+pub trait ToClientNet<A>: SendMessage<A, Reply> {}
+impl<T: SendMessage<A, Reply>, A> ToClientNet<A> for T {}
 
-pub trait ToReplicaNet<A>: SendMessage<Request<A>, Addr = u8> {}
-impl<T: SendMessage<Request<A>, Addr = u8>, A> ToReplicaNet<A> for T {}
+pub trait ToReplicaNet<A>: SendMessage<u8, Request<A>> {}
+impl<T: SendMessage<u8, Request<A>>, A> ToReplicaNet<A> for T {}
 
 #[derive(Debug, Clone, derive_more::From)]
 pub enum ClientEvent {
@@ -117,7 +117,7 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
             seq: self.seq,
             op: self.invoke.as_ref().unwrap().op.clone(),
         };
-        self.net.send(0, &request)
+        self.net.send(0, request)
     }
 }
 
@@ -148,18 +148,18 @@ impl<S, N, A> Replica<S, N, A> {
     }
 }
 
-impl<S: App, N: ToClientNet> OnEvent<ReplicaEvent<N::Addr>> for Replica<S, N, N::Addr> {
+impl<S: App, N: ToClientNet<A>, A: Addr> OnEvent<ReplicaEvent<A>> for Replica<S, N, A> {
     fn on_event(
         &mut self,
-        event: ReplicaEvent<N::Addr>,
-        _: &mut dyn Timer<ReplicaEvent<N::Addr>>,
+        event: ReplicaEvent<A>,
+        _: &mut dyn Timer<ReplicaEvent<A>>,
     ) -> anyhow::Result<()> {
         self.on_ingress(event)
     }
 }
 
-impl<S: App, N: ToClientNet> Replica<S, N, N::Addr> {
-    fn on_ingress(&mut self, request: Request<N::Addr>) -> anyhow::Result<()> {
+impl<S: App, N: ToClientNet<A>, A: Addr> Replica<S, N, A> {
+    fn on_ingress(&mut self, request: Request<A>) -> anyhow::Result<()> {
         if let Some(on_request) = self.on_request.get(&request.client_id) {
             if on_request(&request, &self.net)? {
                 return Ok(());
@@ -168,12 +168,12 @@ impl<S: App, N: ToClientNet> Replica<S, N, N::Addr> {
         let result = self.app.execute(&request.op)?;
         let seq = request.seq;
         let reply = Reply { seq, result };
-        let on_request = move |request: &Request<N::Addr>, net: &N| {
+        let on_request = move |request: &Request<A>, net: &N| {
             if request.seq < seq {
                 return Ok(true);
             }
             if request.seq == seq {
-                net.send(request.client_addr.clone(), &reply)?;
+                net.send(request.client_addr.clone(), reply.clone())?;
                 Ok(true)
             } else {
                 Ok(false)

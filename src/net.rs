@@ -15,23 +15,11 @@ impl<T: Send + Sync + Clone + Eq + Hash + Debug + Serialize + DeserializeOwned +
 {
 }
 
-pub trait SendMessage<M> {
-    type Addr: Addr;
-
-    fn send(&self, dest: Self::Addr, message: &M) -> anyhow::Result<()>;
-
-    fn send_to_all(&self, message: &M) -> anyhow::Result<()>;
-}
-
 pub trait Buf: AsRef<[u8]> + Send + Sync + Clone + 'static {}
 impl<T: AsRef<[u8]> + Send + Sync + Clone + 'static> Buf for T {}
 
-pub trait SendBuf {
-    type Addr: Addr;
-
-    fn send(&self, dest: Self::Addr, buf: impl Buf) -> anyhow::Result<()>;
-
-    fn send_to_all(&self, buf: impl Buf) -> anyhow::Result<()>;
+pub trait SendMessage<A, M> {
+    fn send(&self, dest: A, message: M) -> anyhow::Result<()>;
 }
 
 #[derive(Debug, Clone)]
@@ -50,17 +38,11 @@ impl Udp {
     }
 }
 
-impl SendBuf for Udp {
-    type Addr = SocketAddr;
-
-    fn send(&self, dest: Self::Addr, buf: impl Buf) -> anyhow::Result<()> {
+impl<B: Buf> SendMessage<SocketAddr, B> for Udp {
+    fn send(&self, dest: SocketAddr, buf: B) -> anyhow::Result<()> {
         let socket = self.0.clone();
         tokio::spawn(async move { socket.send_to(buf.as_ref(), dest).await.unwrap() });
         Ok(())
-    }
-
-    fn send_to_all(&self, _: impl Buf) -> anyhow::Result<()> {
-        Err(anyhow::anyhow!("boradcast is not supported"))
     }
 }
 
@@ -70,19 +52,9 @@ pub struct SendAddr<T>(pub T);
 #[derive(Debug)]
 pub struct Auto<A>(std::marker::PhantomData<A>); // TODO better name
 
-impl<T: SendEvent<M>, M> SendMessage<M> for Auto<SendAddr<T>>
-where
-    SendAddr<T>: Addr,
-    M: Clone,
-{
-    type Addr = SendAddr<T>;
-
-    fn send(&self, dest: Self::Addr, message: &M) -> anyhow::Result<()> {
-        dest.0.send(message.clone())
-    }
-
-    fn send_to_all(&self, _: &M) -> anyhow::Result<()> {
-        Err(anyhow::anyhow!("boradcast is not supported"))
+impl<T: SendEvent<M>, M> SendMessage<SendAddr<T>, M> for Auto<SendAddr<T>> {
+    fn send(&self, dest: SendAddr<T>, message: M) -> anyhow::Result<()> {
+        dest.0.send(message)
     }
 }
 
@@ -101,16 +73,9 @@ impl<T, M> From<T> for MessageNet<T, M> {
     }
 }
 
-impl<T: SendBuf, M: Clone + Into<N>, N: Serialize> SendMessage<M> for MessageNet<T, N> {
-    type Addr = T::Addr;
-
-    fn send(&self, dest: Self::Addr, message: &M) -> anyhow::Result<()> {
-        let buf = Bytes::from(bincode::options().serialize(&message.clone().into())?);
+impl<T: SendMessage<A, Bytes>, A, M: Into<N>, N: Serialize> SendMessage<A, M> for MessageNet<T, N> {
+    fn send(&self, dest: A, message: M) -> anyhow::Result<()> {
+        let buf = Bytes::from(bincode::options().serialize(&message.into())?);
         self.0.send(dest, buf)
-    }
-
-    fn send_to_all(&self, message: &M) -> anyhow::Result<()> {
-        let buf = Bytes::from(bincode::options().serialize(&message.clone().into())?);
-        self.0.send_to_all(buf)
     }
 }
