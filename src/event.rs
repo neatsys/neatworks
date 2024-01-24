@@ -6,11 +6,27 @@ use tokio::{
 };
 
 pub trait SendEvent<M> {
-    fn send(&self, event: M) -> anyhow::Result<()>;
+    fn send(&mut self, event: M) -> anyhow::Result<()>;
 }
 
 pub trait OnEvent<M> {
     fn on_event(&mut self, event: M, timer: &mut dyn Timer<M>) -> anyhow::Result<()>;
+}
+
+pub struct Inline<'a, S, M>(pub &'a mut S, pub &'a mut dyn Timer<M>);
+
+impl<S: Debug, M> Debug for Inline<'_, S, M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Inline")
+            .field("state", &self.0)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<S: OnEvent<M>, N: Into<M>, M> SendEvent<N> for Inline<'_, S, M> {
+    fn send(&mut self, event: N) -> anyhow::Result<()> {
+        self.0.on_event(event.into(), self.1)
+    }
 }
 
 pub type TimerId = u32;
@@ -51,7 +67,7 @@ impl<M> PartialEq for SessionSender<M> {
 impl<M> Eq for SessionSender<M> {}
 
 impl<M: Into<N>, N> SendEvent<M> for SessionSender<N> {
-    fn send(&self, event: M) -> anyhow::Result<()> {
+    fn send(&mut self, event: M) -> anyhow::Result<()> {
         self.0
             .send(event.into().into())
             .map_err(|_| anyhow::anyhow!("receiver closed"))

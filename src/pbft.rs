@@ -680,7 +680,7 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
 
 pub type ToClientMessageNet<T> = MessageNet<T, Reply>;
 
-pub fn to_client_on_buf(sender: &impl SendEvent<Reply>, buf: &[u8]) -> anyhow::Result<()> {
+pub fn to_client_on_buf(sender: &mut impl SendEvent<Reply>, buf: &[u8]) -> anyhow::Result<()> {
     let message = bincode::options().allow_trailing_bytes().deserialize(buf)?;
     sender.send(message)
 }
@@ -696,7 +696,7 @@ pub enum ToReplica<A> {
 pub type ToReplicaMessageNet<T, A> = MessageNet<T, ToReplica<A>>;
 
 pub fn to_replica_on_buf<A: Addr>(
-    sender: &impl SendEvent<ReplicaEvent<A>>,
+    sender: &mut impl SendEvent<ReplicaEvent<A>>,
     buf: &[u8],
 ) -> anyhow::Result<()> {
     match bincode::options().allow_trailing_bytes().deserialize(buf)? {

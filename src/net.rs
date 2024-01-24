@@ -83,7 +83,7 @@ pub struct SendAddr<T>(pub T);
 pub struct Auto<A>(std::marker::PhantomData<A>); // TODO better name
 
 impl<T: SendEvent<M>, M> SendMessage<SendAddr<T>, M> for Auto<SendAddr<T>> {
-    fn send(&self, dest: SendAddr<T>, message: M) -> anyhow::Result<()> {
+    fn send(&self, mut dest: SendAddr<T>, message: M) -> anyhow::Result<()> {
         dest.0.send(message)
     }
 }

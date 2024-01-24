@@ -188,7 +188,7 @@ impl<S: App, N: ToClientNet<A>, A: Addr> Replica<S, N, A> {
 
 pub type ToClientMessageNet<T> = MessageNet<T, Reply>;
 
-pub fn to_client_on_buf(sender: &impl SendEvent<Reply>, buf: &[u8]) -> anyhow::Result<()> {
+pub fn to_client_on_buf(sender: &mut impl SendEvent<Reply>, buf: &[u8]) -> anyhow::Result<()> {
     let message = bincode::options().allow_trailing_bytes().deserialize(buf)?;
     sender.send(message)
 }
@@ -196,7 +196,7 @@ pub fn to_client_on_buf(sender: &impl SendEvent<Reply>, buf: &[u8]) -> anyhow::R
 pub type ToReplicaMessageNet<T, A> = MessageNet<T, Request<A>>;
 
 pub fn to_replica_on_buf(
-    sender: &impl SendEvent<Request<SocketAddr>>,
+    sender: &mut impl SendEvent<Request<SocketAddr>>,
     buf: &[u8],
 ) -> anyhow::Result<()> {
     let message = bincode::options().allow_trailing_bytes().deserialize(buf)?;

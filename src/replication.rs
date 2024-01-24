@@ -76,7 +76,7 @@ where
     E: SendEvent<Vec<u8>>,
 {
     pub fn launch(&mut self) -> anyhow::Result<()> {
-        for (client_id, sender) in &self.client_senders {
+        for (client_id, sender) in &mut self.client_senders {
             sender.send(Vec::new())?; // TODO
             self.invoke_instants.insert(*client_id, Instant::now());
         }
@@ -94,7 +94,7 @@ where
         _: &mut dyn Timer<ConcurrentEvent>,
     ) -> anyhow::Result<()> {
         let (client_id, _result) = event;
-        let Some(sender) = self.client_senders.get(&client_id) else {
+        let Some(sender) = self.client_senders.get_mut(&client_id) else {
             anyhow::bail!("unknown client id {client_id}")
         };
         sender.send(Vec::new())?; // TODO

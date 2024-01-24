@@ -7,7 +7,8 @@ use tokio::{
 
 use crate::event::SendEvent;
 
-pub type Work<S, M> = Box<dyn FnOnce(&S, &dyn SendEvent<M>) -> anyhow::Result<()> + Send + Sync>;
+pub type Work<S, M> =
+    Box<dyn FnOnce(&S, &mut dyn SendEvent<M>) -> anyhow::Result<()> + Send + Sync>;
 
 #[derive(Debug)]
 pub struct SpawnExecutor<S, M> {
@@ -35,8 +36,8 @@ impl<S, M> SpawnExecutor<S, M> {
                 work = self.receiver.recv() => Select::Recv(work.ok_or(anyhow::anyhow!("channel closed"))?),
             } {
                 let state = self.state.clone();
-                let sender = sender.clone();
-                self.handles.spawn(async move { work(&state, &sender) });
+                let mut sender = sender.clone();
+                self.handles.spawn(async move { work(&state, &mut sender) });
             }
         }
     }
