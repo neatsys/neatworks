@@ -79,6 +79,7 @@ async fn start_client(State(state): State<AppState>, Json(config): Json<ClientCo
     let mut session = state.session.lock().unwrap();
     let cancel = CancellationToken::new();
     let benchmark_result = state.benchmark_result.clone();
+    benchmark_result.lock().unwrap().take();
     let handle = spawn_blocking(move || {
         let runtime = &runtime::Builder::new_multi_thread()
             .worker_threads(1)

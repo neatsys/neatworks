@@ -213,8 +213,9 @@ pub struct Replica<S, N, M, A> {
     commit_quorums: HashMap<u32, HashMap<u8, Signed<Commit>>>,
     commit_num: u32,
     app: S,
-    on_verified_prepare: HashMap<u32, Vec<OnVerifiedMessage<Self>>>,
-    on_verified_commit: HashMap<u32, Vec<OnVerifiedMessage<Self>>>,
+    // op number -> task
+    on_verified_prepare_tasks: HashMap<u32, Vec<OnVerified<Self>>>,
+    on_verified_commit_tasks: HashMap<u32, Vec<OnVerified<Self>>>,
 
     net: N,
     client_net: M,
@@ -222,8 +223,7 @@ pub struct Replica<S, N, M, A> {
 }
 
 type OnRequest<A, N> = Box<dyn Fn(&Request<A>, &N) -> anyhow::Result<bool> + Send + Sync>;
-
-type OnVerifiedMessage<S> = Box<dyn FnOnce(&mut S) -> anyhow::Result<()> + Send + Sync>;
+type OnVerified<S> = Box<dyn FnOnce(&mut S) -> anyhow::Result<()> + Send + Sync>;
 
 #[derive(Debug)]
 struct LogEntry<A> {
@@ -278,8 +278,8 @@ impl<S, N, M, A> Replica<S, N, M, A> {
             prepare_quorums: Default::default(),
             commit_quorums: Default::default(),
             commit_num: 0,
-            on_verified_prepare: Default::default(),
-            on_verified_commit: Default::default(),
+            on_verified_prepare_tasks: Default::default(),
+            on_verified_commit_tasks: Default::default(),
         }
     }
 }
@@ -468,24 +468,24 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
     }
 
     fn on_ingress_prepare(&mut self, prepare: Signed<Prepare>) -> anyhow::Result<()> {
-        if prepare.view_num != self.view_num {
-            if prepare.view_num > self.view_num {
-                todo!("state transfer to enter view")
-            }
-            return Ok(());
-        }
-        if let Some(entry) = self.log.get(prepare.op_num as usize) {
-            if !entry.prepares.is_empty() {
-                return Ok(());
-            }
-            if let Some(pre_prepare) = &entry.pre_prepare {
-                if prepare.digest != pre_prepare.digest {
-                    return Ok(());
-                }
-            }
-        }
         let op_num = prepare.op_num;
         let do_verify = move |this: &mut Self| {
+            if prepare.view_num != this.view_num {
+                if prepare.view_num > this.view_num {
+                    todo!("state transfer to enter view")
+                }
+                return Ok(());
+            }
+            if let Some(entry) = this.log.get(prepare.op_num as usize) {
+                if !entry.prepares.is_empty() {
+                    return Ok(());
+                }
+                if let Some(pre_prepare) = &entry.pre_prepare {
+                    if prepare.digest != pre_prepare.digest {
+                        return Ok(());
+                    }
+                }
+            }
             this.crypto_worker.submit(Box::new(move |crypto, sender| {
                 if crypto.verify(&prepare.replica_id, &prepare).is_ok() {
                     sender.send(ReplicaEvent::VerifiedPrepare(prepare))
@@ -494,12 +494,13 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
                 }
             }))
         };
-        if let Some(on_verified) = self.on_verified_prepare.get_mut(&op_num) {
+        if let Some(on_verified) = self.on_verified_prepare_tasks.get_mut(&op_num) {
             on_verified.push(Box::new(do_verify));
             Ok(())
         } else {
             // insert the dummy entry to indicate there's ongoing task
-            self.on_verified_prepare.insert(op_num, Default::default());
+            self.on_verified_prepare_tasks
+                .insert(op_num, Default::default());
             do_verify(self)
         }
     }
@@ -510,12 +511,12 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
         }
         let op_num = prepare.op_num;
         self.insert_prepare(prepare)?;
-        if let Some(on_verified) = self.on_verified_prepare.get_mut(&op_num) {
+        if let Some(on_verified) = self.on_verified_prepare_tasks.get_mut(&op_num) {
             if let Some(on_verified) = on_verified.pop() {
                 on_verified(self)?;
             } else {
                 // there's no pending task, remove the task list to indicate
-                self.on_verified_prepare.remove(&op_num);
+                self.on_verified_prepare_tasks.remove(&op_num);
             }
         }
         Ok(())
@@ -538,7 +539,7 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
             .unwrap()
             .into_iter()
             .collect();
-        self.on_verified_prepare.remove(&prepare.op_num);
+        self.on_verified_prepare_tasks.remove(&prepare.op_num);
 
         let commit = Commit {
             view_num: self.view_num,
@@ -560,24 +561,24 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
     }
 
     fn on_ingress_commit(&mut self, commit: Signed<Commit>) -> anyhow::Result<()> {
-        if commit.view_num != self.view_num {
-            if commit.view_num > self.view_num {
-                todo!("state transfer to enter view")
-            }
-            return Ok(());
-        }
-        if let Some(entry) = self.log.get(commit.op_num as usize) {
-            if !entry.commits.is_empty() {
-                return Ok(());
-            }
-            if let Some(pre_prepare) = &entry.pre_prepare {
-                if commit.digest != pre_prepare.digest {
-                    return Ok(());
-                }
-            }
-        }
         let op_num = commit.op_num;
         let do_verify = move |this: &mut Self| {
+            if commit.view_num != this.view_num {
+                if commit.view_num > this.view_num {
+                    todo!("state transfer to enter view")
+                }
+                return Ok(());
+            }
+            if let Some(entry) = this.log.get(commit.op_num as usize) {
+                if !entry.commits.is_empty() {
+                    return Ok(());
+                }
+                if let Some(pre_prepare) = &entry.pre_prepare {
+                    if commit.digest != pre_prepare.digest {
+                        return Ok(());
+                    }
+                }
+            }
             this.crypto_worker.submit(Box::new(move |crypto, sender| {
                 if crypto.verify(&commit.replica_id, &commit).is_ok() {
                     sender.send(ReplicaEvent::VerifiedCommit(commit))
@@ -586,11 +587,12 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
                 }
             }))
         };
-        if let Some(on_verified) = self.on_verified_commit.get_mut(&op_num) {
+        if let Some(on_verified) = self.on_verified_commit_tasks.get_mut(&op_num) {
             on_verified.push(Box::new(do_verify));
             Ok(())
         } else {
-            self.on_verified_commit.insert(op_num, Default::default());
+            self.on_verified_commit_tasks
+                .insert(op_num, Default::default());
             do_verify(self)
         }
     }
@@ -601,11 +603,11 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
         }
         let op_num = commit.op_num;
         self.insert_commit(commit)?;
-        if let Some(on_verified) = self.on_verified_commit.get_mut(&op_num) {
+        if let Some(on_verified) = self.on_verified_commit_tasks.get_mut(&op_num) {
             if let Some(on_verified) = on_verified.pop() {
                 on_verified(self)?;
             } else {
-                self.on_verified_commit.remove(&op_num);
+                self.on_verified_commit_tasks.remove(&op_num);
             }
         }
         Ok(())
@@ -630,7 +632,7 @@ impl<S: App + 'static, N: ToReplicaNet<M::Addr> + 'static, M: ToClientNet + 'sta
             .unwrap()
             .into_iter()
             .collect();
-        self.on_verified_commit.remove(&commit.op_num);
+        self.on_verified_commit_tasks.remove(&commit.op_num);
 
         while let Some(entry) = self.log.get(self.commit_num as usize + 1) {
             if entry.commits.is_empty() {
