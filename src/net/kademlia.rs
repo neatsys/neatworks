@@ -7,7 +7,7 @@ use crate::{
 
 use super::{Addr, SendMessage};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Net<E>(pub E);
 
 impl<E: SendEvent<(PeerId, M)>, M> SendMessage<PeerId, M> for Net<E> {
@@ -67,11 +67,13 @@ impl<N: SendMessage<A, M>, M, P: SendEvent<(PeerId, usize)>, A: Addr> Control<N,
                 .entry(*peer_id)
                 .or_default()
                 .push(message);
+            // TODO deduplicated
             self.peer.send((*peer_id, 1))
         }
     }
 
     fn on_upcall(&mut self, upcall: QueryResult<A>) -> anyhow::Result<()> {
+        // println!("{upcall:?}");
         for record in upcall.closest {
             self.records.insert(record.id, record);
         }

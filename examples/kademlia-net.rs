@@ -14,7 +14,7 @@ use bincode::Options;
 use primitive_types::H256;
 use rand::{rngs::StdRng, thread_rng, SeedableRng};
 use serde::{Deserialize, Serialize};
-use tokio::net::UdpSocket;
+use tokio::{net::UdpSocket, spawn};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
         let crypto = Crypto::new_random(&mut thread_rng());
         let peer_record = crypto.peer(addr);
         peer_id = peer_record.id;
-        println!("PeerId {}", H256::from_slice(&peer_id));
+        println!("PeerId {}", H256(peer_id));
         (crypto_worker, crypto_session) = spawn_backend(crypto);
 
         let mut buckets = Buckets::new(peer_record);
@@ -75,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         let peer_record = seed_crypto.peer(addr);
         peer_id = peer_record.id;
-        println!("SEED PeerId {}", H256::from_slice(&peer_id));
+        println!("SEED PeerId {}", H256(peer_id));
         (crypto_worker, crypto_session) = spawn_backend(seed_crypto);
 
         let buckets = Buckets::new(peer_record);
@@ -88,14 +88,19 @@ async fn main() -> anyhow::Result<()> {
         bootstrap_finished.cancel(); // skip bootstrap on seed peer
     }
 
-    bootstrap_finished.cancelled().await;
-    println!("Bootstrap finished");
     let mut peer_session = Session::<kademlia::Event<SocketAddr>>::new();
     let mut peer_sender = peer_session.sender();
     let mut peer_net = Net(control_session.sender());
-    if let Some(peer_id) = send_hello {
-        peer_net.send(peer_id, Message::Hello(peer_id))?
-    }
+    let hello_session = spawn({
+        let mut peer_net = peer_net.clone();
+        async move {
+            bootstrap_finished.cancelled().await;
+            println!("Bootstrap finished");
+            if let Some(seed_id) = send_hello {
+                peer_net.send(seed_id, Message::Hello(peer_id)).unwrap()
+            }
+        }
+    });
     let socket_session = socket_net.recv_session(|buf| {
         let message = bincode::options()
             .allow_trailing_bytes()
@@ -108,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
                 peer_sender.send(kademlia::Event::IngressFindPeerOk(find_peer_ok))?
             }
             Message::Hello(peer_id) => {
-                println!("Replying Hello from {}", H256::from(&peer_id));
+                println!("Replying Hello from {}", H256(peer_id));
                 peer_net.send(peer_id, Message::HelloOk)?
             }
             Message::HelloOk => {
@@ -130,6 +135,7 @@ async fn main() -> anyhow::Result<()> {
         result = crypto_session => result?,
         result = peer_session => result?,
         result = control_session => result?,
+        Err(err) = hello_session => Err(err)?,
     }
     Err(anyhow::anyhow!("unreachable"))
 }

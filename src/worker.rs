@@ -43,6 +43,7 @@ impl<S, M> SpawnExecutor<S, M> {
         S: Clone + Send + Sync + 'static,
         M: 'static,
     {
+        // println!("executor run");
         loop {
             enum Select<S, E> {
                 Recv(Work<S, E>),
@@ -52,6 +53,7 @@ impl<S, M> SpawnExecutor<S, M> {
                 Some(result) = self.handles.join_next() => Select::JoinNext(result??),
                 work = self.receiver.recv() => Select::Recv(work.ok_or(anyhow::anyhow!("channel closed"))?),
             } {
+                // println!("work");
                 let state = self.state.clone();
                 let mut sender = sender.clone();
                 self.handles.spawn(async move { work(&state, &mut sender) });

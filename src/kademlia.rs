@@ -5,7 +5,7 @@ use std::{
 };
 
 use bincode::Options;
-use primitive_types::U256;
+use primitive_types::{H256, U256};
 use secp256k1::PublicKey;
 use serde::{Deserialize, Serialize};
 
@@ -290,6 +290,8 @@ impl<N: Net<A>, U: Upcall<A>, A: Addr> OnEvent<Event<A>> for Peer<N, U, A> {
         event: Event<A>,
         _timer: &mut dyn crate::event::Timer<Event<A>>,
     ) -> anyhow::Result<()> {
+        // println!("{event:?}");
+        // println!();
         match event {
             Event::Query(target, count) => self.on_query(&target, count),
             Event::SignedFindPeer(find_peer) => self.on_signed_find_peer(find_peer),
@@ -324,16 +326,21 @@ impl<N: Net<A>, U: Upcall<A>, A: Addr> Peer<N, U, A> {
         if self.on_bootstrap.is_some() {
             anyhow::bail!("start query while bootstrap in progress")
         }
+        // there's tiny little chance that the refreshing target (which is randomly chosen) that
+        // happens to be queried
+        // universe will explode before that happens
         self.start_query(target, count)
     }
 
     fn start_query(&self, target: &Target, count: usize) -> anyhow::Result<()> {
+        // println!("start query {} {count}", primitive_types::H256(*target));
         let find_peer = FindPeer {
             target: *target,
             count,
             record: self.record.clone(),
         };
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
+            // println!("signing {find_peer:?}");
             sender.send(Event::SignedFindPeer(crypto.sign(find_peer)))
         }))
     }
@@ -342,25 +349,27 @@ impl<N: Net<A>, U: Upcall<A>, A: Addr> Peer<N, U, A> {
         let target = find_peer.target;
         let records = self
             .buckets
-            .find_closest(&target, find_peer.count.min(NUM_CONCURRENCY));
+            .find_closest(&target, find_peer.count.max(NUM_CONCURRENCY));
         if records.is_empty() {
-            anyhow::bail!("empty buckets when finding {target:02x?}")
+            anyhow::bail!("empty buckets when finding {}", H256(target))
         }
-        let addrs = records
+        let mut contacting = records
             .iter()
-            .map(|record| record.addr.clone())
-            .collect::<Vec<_>>();
+            .map(|record| (record.id, record.addr.clone()))
+            .collect::<HashMap<_, _>>();
+        contacting.remove(&self.record.id);
         let state = QueryState {
             find_peer: find_peer.clone(),
-            contacting: records.iter().map(|record| record.id).collect(),
-            contacted: Default::default(),
+            contacting: contacting.keys().copied().collect(),
+            contacted: [self.record.id].into_iter().collect(),
             records,
         };
         let replaced = self.query_states.insert(target, state);
         if replaced.is_some() {
-            anyhow::bail!("concurrent query to {target:02x?}")
+            anyhow::bail!("concurrent query to {}", H256(target))
         }
-        for addr in addrs {
+        for addr in contacting.into_values() {
+            // println!("send find_peer to {addr:?}");
             self.net.send(addr, find_peer.clone())?
         }
         Ok(())
@@ -426,7 +435,7 @@ impl<N: Net<A>, U: Upcall<A>, A: Addr> Peer<N, U, A> {
                 )
                 .is_ok()
             {
-                sender.send(Event::SignedFindPeerOk(find_peer_ok))
+                sender.send(Event::VerifiedFindPeerOk(find_peer_ok))
             } else {
                 Ok(())
             }
@@ -472,27 +481,29 @@ impl<N: Net<A>, U: Upcall<A>, A: Addr> Peer<N, U, A> {
             .cloned()
             .collect();
         let status = 'upcall: {
-            if state
+            let count = state
                 .records
                 .iter()
                 .take_while(|record| state.contacted.contains(&record.id))
-                .count()
-                >= state.find_peer.count
-            {
+                .count();
+            if count >= state.find_peer.count {
                 self.query_states.remove(&target);
                 break 'upcall QueryStatus::Converge;
             }
-            let Some(record) = state.records.iter().find(|record| {
-                !state.contacted.contains(&record.id) && !state.contacting.contains(&record.id)
-            }) else {
+            if count == state.records.len() {
                 self.query_states.remove(&target);
                 break 'upcall QueryStatus::Halted;
-            };
-            state.contacting.insert(record.id);
-            self.net
-                .send(record.addr.clone(), state.find_peer.clone())?;
+            }
+            if let Some(record) = state.records.iter().find(|record| {
+                !state.contacted.contains(&record.id) && !state.contacting.contains(&record.id)
+            }) {
+                state.contacting.insert(record.id);
+                self.net
+                    .send(record.addr.clone(), state.find_peer.clone())?
+            }
             QueryStatus::Progress
         };
+        // println!("target {} status {status:?}", H256(target));
         if self.on_bootstrap.is_none() {
             return self.upcall.send(QueryResult {
                 status,
@@ -503,16 +514,22 @@ impl<N: Net<A>, U: Upcall<A>, A: Addr> Peer<N, U, A> {
         match status {
             QueryStatus::Converge => {}
             QueryStatus::Progress => return Ok(()),
-            QueryStatus::Halted => return Ok(()), // log warn/return error?
+            QueryStatus::Halted => {} // log warn/return error?
         }
         if self.refresh_targets.is_empty() {
             self.refresh_buckets()
         } else {
             self.refresh_targets.remove(&target);
-            if self.refresh_targets.is_empty() {
-                self.on_bootstrap.take().unwrap()()?
+            // println!(
+            //     "refreshed {}, {} left",
+            //     H256(target),
+            //     self.refresh_targets.len()
+            // );
+            if let Some(target) = self.refresh_targets.iter().next() {
+                self.start_query(target, BUCKET_SIZE)
+            } else {
+                self.on_bootstrap.take().unwrap()()
             }
-            Ok(())
         }
     }
 
@@ -524,9 +541,12 @@ impl<N: Net<A>, U: Upcall<A>, A: Addr> Peer<N, U, A> {
             let target = distance_from(&self.record.id, d);
             assert_eq!(self.buckets.index(&target), BITS - i - 1);
             self.refresh_targets.insert(target);
-            self.start_query(&target, BUCKET_SIZE)?
         }
-        Ok(())
+        // refresh the buckets without concurrency
+        // if refresh query for all buckets at the same time, testing on loopback network drops
+        // maybe docker's loopback network is too bad, but mitigating transient performance
+        // degradation caused by refreshing is still generally good to have
+        self.start_query(self.refresh_targets.iter().next().unwrap(), BUCKET_SIZE)
     }
 }
 
