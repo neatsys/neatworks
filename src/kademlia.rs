@@ -199,16 +199,20 @@ pub enum Event<A> {
 
 #[derive(Debug)]
 pub struct QueryResult<A> {
+    pub status: QueryStatus,
     pub target: Target,
     pub closest: Vec<PeerRecord<A>>,
 }
 
 #[derive(Debug)]
-pub enum Upcall<A> {
-    Progress(QueryResult<A>),
-    Converge(QueryResult<A>),
-    Halted(QueryResult<A>),
+pub enum QueryStatus {
+    Progress,
+    Converge,
+    Halted,
 }
+
+pub trait Upcall<A>: SendEvent<QueryResult<A>> {}
+impl<T: SendEvent<QueryResult<A>>, A> Upcall<A> for T {}
 
 pub struct Peer<N, U, A> {
     record: PeerRecord<A>,
@@ -263,7 +267,7 @@ impl<N, U, A: Addr> Peer<N, U, A> {
     }
 }
 
-impl<N: Net<A>, U: SendEvent<Upcall<A>>, A: Addr> OnEvent<Event<A>> for Peer<N, U, A> {
+impl<N: Net<A>, U: Upcall<A>, A: Addr> OnEvent<Event<A>> for Peer<N, U, A> {
     fn on_event(
         &mut self,
         event: Event<A>,
@@ -281,18 +285,18 @@ impl<N: Net<A>, U: SendEvent<Upcall<A>>, A: Addr> OnEvent<Event<A>> for Peer<N, 
     }
 }
 
-impl<N: Net<A>, U: SendEvent<Upcall<A>>, A: Addr> Peer<N, U, A> {
+impl<N: Net<A>, U: Upcall<A>, A: Addr> Peer<N, U, A> {
     pub fn bootstrap(&mut self, on_bootstrap: OnBootstrap) -> anyhow::Result<()> {
         // assert only bootstrap once?
         // seems no harm to bootstrap multiple times anyway, so just assert a clear state for now
         if !self.query_states.is_empty() {
-            anyhow::bail!("boostrap concurrent to query")
+            anyhow::bail!("start bootsrap while query in progress")
         }
         if !self.refresh_targets.is_empty() {
-            anyhow::bail!("boostrap during refreshing")
+            anyhow::bail!("start bootsrap while refresh in progress")
         }
         if self.on_bootstrap.is_some() {
-            anyhow::bail!("concurrent bootstraps")
+            anyhow::bail!("start bootstrap while another bootstrap in progress")
         }
         self.on_bootstrap = Some(on_bootstrap);
         let target = self.record.id;
@@ -300,6 +304,9 @@ impl<N: Net<A>, U: SendEvent<Upcall<A>>, A: Addr> Peer<N, U, A> {
     }
 
     fn on_query(&self, target: &Target, count: usize) -> anyhow::Result<()> {
+        if self.on_bootstrap.is_some() {
+            anyhow::bail!("start query while bootstrap in progress")
+        }
         self.start_query(target, count)
     }
 
@@ -440,17 +447,14 @@ impl<N: Net<A>, U: SendEvent<Upcall<A>>, A: Addr> Peer<N, U, A> {
                 Err(index) => state.records.insert(index, record),
             }
         }
-        let result = QueryResult {
-            target,
-            closest: state
-                .records
-                .iter()
-                .filter(|record| state.contacted.contains(&record.id))
-                .take(state.find_peer.count)
-                .cloned()
-                .collect(),
-        };
-        let upcall = 'upcall: {
+        let closest = state
+            .records
+            .iter()
+            .filter(|record| state.contacted.contains(&record.id))
+            .take(state.find_peer.count)
+            .cloned()
+            .collect();
+        let status = 'upcall: {
             if state
                 .records
                 .iter()
@@ -459,26 +463,30 @@ impl<N: Net<A>, U: SendEvent<Upcall<A>>, A: Addr> Peer<N, U, A> {
                 >= state.find_peer.count
             {
                 self.query_states.remove(&target);
-                break 'upcall Upcall::Converge(result);
+                break 'upcall QueryStatus::Converge;
             }
             let Some(record) = state.records.iter().find(|record| {
                 !state.contacted.contains(&record.id) && !state.contacting.contains(&record.id)
             }) else {
                 self.query_states.remove(&target);
-                break 'upcall Upcall::Halted(result);
+                break 'upcall QueryStatus::Halted;
             };
             state.contacting.insert(record.id);
             self.net
                 .send(record.addr.clone(), state.find_peer.clone())?;
-            Upcall::Progress(result)
+            QueryStatus::Progress
         };
         if self.on_bootstrap.is_none() {
-            return self.upcall.send(upcall);
+            return self.upcall.send(QueryResult {
+                status,
+                target,
+                closest,
+            });
         }
-        match upcall {
-            Upcall::Converge(_) => {}
-            Upcall::Progress(_) => return Ok(()),
-            Upcall::Halted(_) => return Ok(()), // log warn/return error?
+        match status {
+            QueryStatus::Converge => {}
+            QueryStatus::Progress => return Ok(()),
+            QueryStatus::Halted => return Ok(()), // log warn/return error?
         }
         if self.refresh_targets.is_empty() {
             self.refresh_buckets()
@@ -510,9 +518,7 @@ impl<N: Net<A>, U: SendEvent<Upcall<A>>, A: Addr> Peer<N, U, A> {
 fn rand_distance(index: usize, rng: &mut impl rand::Rng) -> U256 {
     let mut bytes = [0u8; 32];
     let quot = index / 8;
-    for byte in bytes.iter_mut().take(quot) {
-        *byte = rng.gen()
-    }
+    rng.fill_bytes(&mut bytes[..quot]);
     let rem = (index % 8) as u32;
     let lower = usize::pow(2, rem);
     let upper = usize::pow(2, rem + 1);
@@ -567,18 +573,18 @@ mod tests {
 
     struct NullNet;
     impl SendMessage<(), Signed<FindPeer<()>>> for NullNet {
-        fn send(&self, (): (), _: Signed<FindPeer<()>>) -> anyhow::Result<()> {
+        fn send(&mut self, (): (), _: Signed<FindPeer<()>>) -> anyhow::Result<()> {
             Ok(())
         }
     }
     impl SendMessage<(), Signed<FindPeerOk<()>>> for NullNet {
-        fn send(&self, (): (), _: Signed<FindPeerOk<()>>) -> anyhow::Result<()> {
+        fn send(&mut self, (): (), _: Signed<FindPeerOk<()>>) -> anyhow::Result<()> {
             Ok(())
         }
     }
     struct NullUpcall;
-    impl SendEvent<Upcall<()>> for NullUpcall {
-        fn send(&mut self, _: Upcall<()>) -> anyhow::Result<()> {
+    impl SendEvent<QueryResult<()>> for NullUpcall {
+        fn send(&mut self, _: QueryResult<()>) -> anyhow::Result<()> {
             Ok(())
         }
     }

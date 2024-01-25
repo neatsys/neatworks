@@ -1,3 +1,5 @@
+pub mod kademlia;
+
 use std::{fmt::Debug, hash::Hash, net::SocketAddr, sync::Arc};
 
 use bincode::Options as _;
@@ -49,7 +51,7 @@ pub trait SendMessage<A, M> {
     // filled into byte buffer, we would prefer to instead performing transformation on the original
     // message before serialization to do the trick, to e.g. enjoy type safety. certain
     // transformation e.g. `Into` is easy to use and requires owned messages, so the trait follows
-    fn send(&self, dest: A, message: M) -> anyhow::Result<()>;
+    fn send(&mut self, dest: A, message: M) -> anyhow::Result<()>;
 }
 
 #[derive(Debug, Clone)]
@@ -69,7 +71,7 @@ impl Udp {
 }
 
 impl<B: Buf> SendMessage<SocketAddr, B> for Udp {
-    fn send(&self, dest: SocketAddr, buf: B) -> anyhow::Result<()> {
+    fn send(&mut self, dest: SocketAddr, buf: B) -> anyhow::Result<()> {
         let socket = self.0.clone();
         tokio::spawn(async move { socket.send_to(buf.as_ref(), dest).await.unwrap() });
         Ok(())
@@ -83,7 +85,7 @@ pub struct SendAddr<T>(pub T);
 pub struct Auto<A>(std::marker::PhantomData<A>); // TODO better name
 
 impl<T: SendEvent<M>, M> SendMessage<SendAddr<T>, M> for Auto<SendAddr<T>> {
-    fn send(&self, mut dest: SendAddr<T>, message: M) -> anyhow::Result<()> {
+    fn send(&mut self, mut dest: SendAddr<T>, message: M) -> anyhow::Result<()> {
         dest.0.send(message)
     }
 }
@@ -104,7 +106,7 @@ impl<T, M> From<T> for MessageNet<T, M> {
 }
 
 impl<T: SendMessage<A, Bytes>, A, M: Into<N>, N: Serialize> SendMessage<A, M> for MessageNet<T, N> {
-    fn send(&self, dest: A, message: M) -> anyhow::Result<()> {
+    fn send(&mut self, dest: A, message: M) -> anyhow::Result<()> {
         let buf = Bytes::from(bincode::options().serialize(&message.into())?);
         self.0.send(dest, buf)
     }

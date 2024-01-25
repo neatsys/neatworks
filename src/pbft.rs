@@ -141,7 +141,7 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
         self.do_send((self.view_num as usize % self.num_replica) as u8)
     }
 
-    fn on_resend_timeout(&self) -> anyhow::Result<()> {
+    fn on_resend_timeout(&mut self) -> anyhow::Result<()> {
         // TODO logging
         self.do_send(AllReplica)
     }
@@ -174,7 +174,7 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
         }
     }
 
-    fn do_send<B>(&self, dest: B) -> anyhow::Result<()>
+    fn do_send<B>(&mut self, dest: B) -> anyhow::Result<()>
     where
         N: SendMessage<B, Request<A>>,
     {
@@ -225,7 +225,7 @@ pub struct Replica<S, N, M, A> {
     crypto_worker: Worker<Crypto<u8>, ReplicaEvent<A>>,
 }
 
-type OnRequest<A, N> = Box<dyn Fn(&Request<A>, &N) -> anyhow::Result<bool> + Send + Sync>;
+type OnRequest<A, N> = Box<dyn Fn(&Request<A>, &mut N) -> anyhow::Result<bool> + Send + Sync>;
 type OnVerified<S> = Box<dyn FnOnce(&mut S) -> anyhow::Result<()> + Send + Sync>;
 
 #[derive(Debug)]
@@ -328,7 +328,7 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
 
     fn on_ingress_request(&mut self, request: Request<A>) -> anyhow::Result<()> {
         if let Some(on_request) = self.on_request.get(&request.client_id) {
-            if on_request(&request, &self.client_net)? {
+            if on_request(&request, &mut self.client_net)? {
                 return Ok(());
             }
         }
@@ -652,7 +652,7 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
                     replica_id: self.id,
                 };
                 let addr = request.client_addr.clone();
-                let on_request = move |request: &Request<A>, net: &M| {
+                let on_request = move |request: &Request<A>, net: &mut M| {
                     if request.seq < seq {
                         return Ok(true);
                     }
@@ -663,7 +663,7 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
                         Ok(false)
                     }
                 };
-                on_request(request, &self.client_net)?;
+                on_request(request, &mut self.client_net)?;
                 self.on_request
                     .insert(request.client_id, Box::new(on_request));
             }

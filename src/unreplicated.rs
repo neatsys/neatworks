@@ -90,7 +90,7 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
         self.do_send()
     }
 
-    fn on_resend_timeout(&self) -> anyhow::Result<()> {
+    fn on_resend_timeout(&mut self) -> anyhow::Result<()> {
         // TODO logging
         self.do_send()
     }
@@ -110,7 +110,7 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
         self.upcall.send((self.id, reply.result))
     }
 
-    fn do_send(&self) -> anyhow::Result<()> {
+    fn do_send(&mut self) -> anyhow::Result<()> {
         let request = Request {
             client_id: self.id,
             client_addr: self.addr.clone(),
@@ -130,7 +130,7 @@ pub struct Replica<S, N, A> {
     net: N,
 }
 
-type OnRequest<A, N> = Box<dyn Fn(&Request<A>, &N) -> anyhow::Result<bool> + Send + Sync>;
+type OnRequest<A, N> = Box<dyn Fn(&Request<A>, &mut N) -> anyhow::Result<bool> + Send + Sync>;
 
 impl<S, N, A> Debug for Replica<S, N, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -161,14 +161,14 @@ impl<S: App, N: ToClientNet<A>, A: Addr> OnEvent<ReplicaEvent<A>> for Replica<S,
 impl<S: App, N: ToClientNet<A>, A: Addr> Replica<S, N, A> {
     fn on_ingress(&mut self, request: Request<A>) -> anyhow::Result<()> {
         if let Some(on_request) = self.on_request.get(&request.client_id) {
-            if on_request(&request, &self.net)? {
+            if on_request(&request, &mut self.net)? {
                 return Ok(());
             }
         }
         let result = self.app.execute(&request.op)?;
         let seq = request.seq;
         let reply = Reply { seq, result };
-        let on_request = move |request: &Request<A>, net: &N| {
+        let on_request = move |request: &Request<A>, net: &mut N| {
             if request.seq < seq {
                 return Ok(true);
             }
@@ -179,7 +179,7 @@ impl<S: App, N: ToClientNet<A>, A: Addr> Replica<S, N, A> {
                 Ok(false)
             }
         };
-        on_request(&request, &self.net)?;
+        on_request(&request, &mut self.net)?;
         self.on_request
             .insert(request.client_id, Box::new(on_request));
         Ok(())

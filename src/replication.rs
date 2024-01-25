@@ -116,15 +116,15 @@ where
 
 #[derive(Debug, Clone)]
 pub struct ReplicaNet<N, A> {
-    socket_net: N,
+    inner_net: N,
     replica_addrs: Vec<A>,
     all_except: Option<usize>,
 }
 
 impl<N, A> ReplicaNet<N, A> {
-    pub fn new(socket_net: N, replica_addrs: Vec<A>, replica_id: impl Into<Option<u8>>) -> Self {
+    pub fn new(inner_net: N, replica_addrs: Vec<A>, replica_id: impl Into<Option<u8>>) -> Self {
         Self {
-            socket_net,
+            inner_net,
             replica_addrs,
             all_except: replica_id.into().map(|id| id as usize),
         }
@@ -132,12 +132,12 @@ impl<N, A> ReplicaNet<N, A> {
 }
 
 impl<N: SendMessage<A, M>, A: Addr, M> SendMessage<u8, M> for ReplicaNet<N, A> {
-    fn send(&self, dest: u8, message: M) -> anyhow::Result<()> {
+    fn send(&mut self, dest: u8, message: M) -> anyhow::Result<()> {
         let dest = self
             .replica_addrs
             .get(dest as usize)
             .ok_or(anyhow::anyhow!("unknown replica id {dest}"))?;
-        self.socket_net.send(dest.clone(), message)
+        self.inner_net.send(dest.clone(), message)
     }
 }
 
@@ -151,12 +151,12 @@ pub struct AllReplica;
 // in another word, always wrap a raw net with `ReplicaNet` first, then desired
 // message net
 impl<N: SendMessage<A, B>, A: Addr, B: Buf> SendMessage<AllReplica, B> for ReplicaNet<N, A> {
-    fn send(&self, AllReplica: AllReplica, message: B) -> anyhow::Result<()> {
+    fn send(&mut self, AllReplica: AllReplica, message: B) -> anyhow::Result<()> {
         for (id, dest) in self.replica_addrs.iter().enumerate() {
             if self.all_except == Some(id) {
                 continue;
             }
-            self.socket_net.send(dest.clone(), message.clone())?
+            self.inner_net.send(dest.clone(), message.clone())?
         }
         Ok(())
     }
