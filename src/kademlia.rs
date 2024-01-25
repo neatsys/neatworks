@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     crypto::{Crypto, Signed},
-    event::SendEvent,
+    event::{OnEvent, SendEvent},
     net::{Addr, SendMessage},
     worker::Worker,
 };
@@ -207,6 +207,7 @@ pub struct QueryResult<A> {
 pub enum Upcall<A> {
     Progress(QueryResult<A>),
     Converge(QueryResult<A>),
+    Halted(QueryResult<A>),
 }
 
 pub struct Peer<N, U, A> {
@@ -242,14 +243,13 @@ struct QueryState<A> {
 
 impl<N, U, A: Addr> Peer<N, U, A> {
     pub fn new(
-        record: PeerRecord<A>,
         buckets: Buckets<A>, // seed peers inserted
         net: N,
         upcall: U,
         crypto_worker: Worker<Crypto<PeerId>, Event<A>>,
     ) -> Self {
         Self {
-            record,
+            record: buckets.origin.clone(),
             buckets,
             net,
             upcall,
@@ -259,6 +259,24 @@ impl<N, U, A: Addr> Peer<N, U, A> {
             on_bootstrap: None,
             find_peer_ok_seq: 0,
             find_peer_ok_dests: Default::default(),
+        }
+    }
+}
+
+impl<N: Net<A>, U: SendEvent<Upcall<A>>, A: Addr> OnEvent<Event<A>> for Peer<N, U, A> {
+    fn on_event(
+        &mut self,
+        event: Event<A>,
+        _timer: &mut dyn crate::event::Timer<Event<A>>,
+    ) -> anyhow::Result<()> {
+        match event {
+            Event::Query(target, count) => self.on_query(&target, count),
+            Event::SignedFindPeer(find_peer) => self.on_signed_find_peer(find_peer),
+            Event::IngressFindPeer(find_peer) => self.on_ingress_find_peer(find_peer),
+            Event::VerifiedFindPeer(find_peer) => self.on_verified_find_peer(find_peer),
+            Event::SignedFindPeerOk(find_peer_ok) => self.on_signed_find_peer_ok(find_peer_ok),
+            Event::IngressFindPeerOk(find_peer_ok) => self.on_ingress_find_peer_ok(find_peer_ok),
+            Event::VerifiedFindPeerOk(find_peer_ok) => self.on_verified_find_peer_ok(find_peer_ok),
         }
     }
 }
@@ -278,7 +296,7 @@ impl<N: Net<A>, U: SendEvent<Upcall<A>>, A: Addr> Peer<N, U, A> {
         }
         self.on_bootstrap = Some(on_bootstrap);
         let target = self.record.id;
-        self.start_query(&target, 1)
+        self.start_query(&target, BUCKET_SIZE)
     }
 
     fn on_query(&self, target: &Target, count: usize) -> anyhow::Result<()> {
@@ -298,7 +316,12 @@ impl<N: Net<A>, U: SendEvent<Upcall<A>>, A: Addr> Peer<N, U, A> {
 
     fn on_signed_find_peer(&mut self, find_peer: Signed<FindPeer<A>>) -> anyhow::Result<()> {
         let target = find_peer.target;
-        let records = self.buckets.find_closest(&target, find_peer.count);
+        let records = self
+            .buckets
+            .find_closest(&target, find_peer.count.min(NUM_CONCURRENCY));
+        if records.is_empty() {
+            anyhow::bail!("empty buckets when finding {target:02x?}")
+        }
         let addrs = records
             .iter()
             .map(|record| record.addr.clone())
@@ -391,14 +414,110 @@ impl<N: Net<A>, U: SendEvent<Upcall<A>>, A: Addr> Peer<N, U, A> {
         find_peer_ok: Signed<FindPeerOk<A>>,
     ) -> anyhow::Result<()> {
         let find_peer_ok = find_peer_ok.into_inner();
+        let peer_id = find_peer_ok.record.id;
         self.buckets.insert(find_peer_ok.record);
         // any necessity of ignoring replies of previous queries (that happens to be for the same
         // target)?
-        let Some(state) = self.query_states.get_mut(&find_peer_ok.target) else {
+        let target = find_peer_ok.target;
+        let Some(state) = self.query_states.get_mut(&target) else {
             return Ok(());
         };
-        todo!()
+        if !state.contacting.remove(&peer_id) {
+            return Ok(());
+        }
+        state.contacted.insert(peer_id);
+        for record in find_peer_ok.closest {
+            match state
+                .records
+                .binary_search_by_key(&distance(&record.id, &target), |record| {
+                    distance(&record.id, &target)
+                }) {
+                Ok(index) => {
+                    if record != state.records[index] {
+                        anyhow::bail!("non-distinct distance")
+                    }
+                }
+                Err(index) => state.records.insert(index, record),
+            }
+        }
+        let result = QueryResult {
+            target,
+            closest: state
+                .records
+                .iter()
+                .filter(|record| state.contacted.contains(&record.id))
+                .take(state.find_peer.count)
+                .cloned()
+                .collect(),
+        };
+        let upcall = 'upcall: {
+            if state
+                .records
+                .iter()
+                .take_while(|record| state.contacted.contains(&record.id))
+                .count()
+                >= state.find_peer.count
+            {
+                self.query_states.remove(&target);
+                break 'upcall Upcall::Converge(result);
+            }
+            let Some(record) = state.records.iter().find(|record| {
+                !state.contacted.contains(&record.id) && !state.contacting.contains(&record.id)
+            }) else {
+                self.query_states.remove(&target);
+                break 'upcall Upcall::Halted(result);
+            };
+            state.contacting.insert(record.id);
+            self.net
+                .send(record.addr.clone(), state.find_peer.clone())?;
+            Upcall::Progress(result)
+        };
+        if self.on_bootstrap.is_none() {
+            return self.upcall.send(upcall);
+        }
+        match upcall {
+            Upcall::Converge(_) => {}
+            Upcall::Progress(_) => return Ok(()),
+            Upcall::Halted(_) => return Ok(()), // log warn/return error?
+        }
+        if self.refresh_targets.is_empty() {
+            self.refresh_buckets()
+        } else {
+            self.refresh_targets.remove(&target);
+            if self.refresh_targets.is_empty() {
+                self.on_bootstrap.take().unwrap()()?
+            }
+            Ok(())
+        }
     }
+
+    fn refresh_buckets(&mut self) -> anyhow::Result<()> {
+        // TODO optimize for bootstrap: skip until the first non-empty bucket, and that non-empty
+        // bucket. assert the refreshing of those buckets cannot discover any peer
+        for i in 0..BITS {
+            let d = rand_distance(i, &mut rand::thread_rng());
+            let target = distance_from(&self.record.id, d);
+            assert_eq!(self.buckets.index(&target), BITS - i - 1);
+            self.refresh_targets.insert(target);
+            self.start_query(&target, BUCKET_SIZE)?
+        }
+        Ok(())
+    }
+}
+
+// https://github.com/libp2p/rust-libp2p/blob/master/protocols/kad/src/kbucket.rs
+/// Generates a random distance that falls into the bucket for this index.
+fn rand_distance(index: usize, rng: &mut impl rand::Rng) -> U256 {
+    let mut bytes = [0u8; 32];
+    let quot = index / 8;
+    for byte in bytes.iter_mut().take(quot) {
+        *byte = rng.gen()
+    }
+    let rem = (index % 8) as u32;
+    let lower = usize::pow(2, rem);
+    let upper = usize::pow(2, rem + 1);
+    bytes[quot] = rng.gen_range(lower..upper) as u8;
+    U256::from_little_endian(&bytes)
 }
 
 #[cfg(test)]
@@ -444,5 +563,37 @@ mod tests {
             ordered_closest()?
         }
         Ok(())
+    }
+
+    struct NullNet;
+    impl SendMessage<(), Signed<FindPeer<()>>> for NullNet {
+        fn send(&self, (): (), _: Signed<FindPeer<()>>) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+    impl SendMessage<(), Signed<FindPeerOk<()>>> for NullNet {
+        fn send(&self, (): (), _: Signed<FindPeerOk<()>>) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+    struct NullUpcall;
+    impl SendEvent<Upcall<()>> for NullUpcall {
+        fn send(&mut self, _: Upcall<()>) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn refresh_buckets() -> anyhow::Result<()> {
+        let secp = secp256k1::Secp256k1::signing_only();
+        let (_, public_key) = secp.generate_keypair(&mut rand::thread_rng());
+        let origin = PeerRecord {
+            id: public_key.sha256(),
+            key: public_key,
+            addr: (),
+        };
+        let buckets = Buckets::new(origin);
+        let mut peer = Peer::new(buckets, NullNet, NullUpcall, Worker::Null);
+        peer.refresh_buckets()
     }
 }

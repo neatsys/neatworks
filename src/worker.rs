@@ -60,20 +60,33 @@ impl<S, M> SpawnExecutor<S, M> {
     }
 }
 
-pub type Worker<S, M> = SpawnWorker<S, M>;
+#[derive(Debug, Clone)]
+pub enum Worker<S, M> {
+    Spawn(SpawnWorker<S, M>),
+    Null, // for testing
+}
+
+impl<S, M> Worker<S, M> {
+    pub fn submit(&self, work: Work<S, M>) -> anyhow::Result<()> {
+        match self {
+            Self::Spawn(worker) => worker.submit(work),
+            Self::Null => Ok(()),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SpawnWorker<S, M>(UnboundedSender<Work<S, M>>);
 
 impl<S, M> SpawnWorker<S, M> {
-    pub fn submit(&self, work: Work<S, M>) -> anyhow::Result<()> {
+    fn submit(&self, work: Work<S, M>) -> anyhow::Result<()> {
         self.0
             .send(work)
             .map_err(|_| anyhow::anyhow!("receiver closed"))
     }
 }
 
-pub fn spawn_backend<S, M>(state: S) -> (SpawnWorker<S, M>, SpawnExecutor<S, M>) {
+pub fn spawn_backend<S, M>(state: S) -> (Worker<S, M>, SpawnExecutor<S, M>) {
     let (sender, receiver) = unbounded_channel();
     let worker = SpawnWorker(sender);
     let executor = SpawnExecutor {
@@ -81,5 +94,5 @@ pub fn spawn_backend<S, M>(state: S) -> (SpawnWorker<S, M>, SpawnExecutor<S, M>)
         state,
         handles: Default::default(),
     };
-    (worker, executor)
+    (Worker::Spawn(worker), executor)
 }
