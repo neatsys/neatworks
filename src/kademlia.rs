@@ -494,9 +494,12 @@ impl<N: Net<A>, U: Upcall<A>, A: Addr> Peer<N, U, A> {
                 self.query_states.remove(&target);
                 break 'upcall QueryStatus::Halted;
             }
-            if let Some(record) = state.records.iter().find(|record| {
-                !state.contacted.contains(&record.id) && !state.contacting.contains(&record.id)
-            }) {
+            while state.contacting.len() < NUM_CONCURRENCY {
+                let Some(record) = state.records.iter().find(|record| {
+                    !state.contacted.contains(&record.id) && !state.contacting.contains(&record.id)
+                }) else {
+                    break;
+                };
                 state.contacting.insert(record.id);
                 self.net
                     .send(record.addr.clone(), state.find_peer.clone())?
