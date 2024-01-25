@@ -13,6 +13,19 @@ pub trait OnEvent<M> {
     fn on_event(&mut self, event: M, timer: &mut dyn Timer<M>) -> anyhow::Result<()>;
 }
 
+// SendEvent -> OnEvent
+// is this a generally reasonable blanket impl?
+// anyway, this is not a To iff From scenario: there's semantic difference
+// of implementing the two traits
+// should always prefer to implement OnEvent for event consumers even if they
+// don't make use of timers
+impl<T: SendEvent<M>, M> OnEvent<M> for T {
+    fn on_event(&mut self, event: M, _: &mut dyn Timer<M>) -> anyhow::Result<()> {
+        self.send(event)
+    }
+}
+
+// OnEvent -> SendEvent
 pub struct Inline<'a, S, M>(pub &'a mut S, pub &'a mut dyn Timer<M>);
 
 impl<S: Debug, M> Debug for Inline<'_, S, M> {
