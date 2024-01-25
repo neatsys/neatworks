@@ -6,5 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = { version = "1.0.79", features = ["backtrace"] }
 augustus = { version = "0.1.0", path = "../.." }
+serde = { version = "1.0.195", features = ["derive"] }
 wirehair = { git = "https://github.com/sgdxbc/wirehair", version = "0.1.0" }

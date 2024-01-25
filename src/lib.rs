@@ -1,4 +1,5 @@
 pub mod app;
+pub mod blob;
 pub mod crypto;
 pub mod event;
 pub mod kademlia;
@@ -9,8 +10,8 @@ pub mod unreplicated;
 pub mod worker;
 
 // develop notes that does not apply to any specific code
-// (start writing dev docs usually follows by a complete rewriting, hope not
-// this time)
+// (start writing dev docs usually follows by a complete code rewriting, hope
+// not the case this time)
 //
 // there has been a lot of generic around this codebase, naming convention
 // is roughly: `M`/`N` for messages/events, `S`/`U` for state machine (that

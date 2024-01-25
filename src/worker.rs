@@ -19,6 +19,8 @@ use crate::event::SendEvent;
 // `SendEvent<M> + Clone + Send + 'static`
 // also, construct the async task locally/eagerly before submission may also
 // expose some differences, not sure
+// anyway, `Worker` is for parallelism. if the work is async for concurrency,
+// directly working with `impl OnEvent`s is more reasonable
 pub type Work<S, M> =
     Box<dyn FnOnce(&S, &mut dyn SendEvent<M>) -> anyhow::Result<()> + Send + Sync>;
 

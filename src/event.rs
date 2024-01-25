@@ -42,6 +42,12 @@ impl<S: OnEvent<M>, N: Into<M>, M> SendEvent<N> for Inline<'_, S, M> {
     }
 }
 
+impl<N: Into<M>, M> SendEvent<N> for UnboundedSender<M> {
+    fn send(&mut self, event: N) -> anyhow::Result<()> {
+        UnboundedSender::send(self, event.into()).map_err(|_| anyhow::anyhow!("channel closed"))
+    }
+}
+
 pub type TimerId = u32;
 
 pub trait Timer<M> {
@@ -81,9 +87,7 @@ impl<M> Eq for SessionSender<M> {}
 
 impl<M: Into<N>, N> SendEvent<M> for SessionSender<N> {
     fn send(&mut self, event: M) -> anyhow::Result<()> {
-        self.0
-            .send(event.into().into())
-            .map_err(|_| anyhow::anyhow!("receiver closed"))
+        SendEvent::send(&mut self.0, event.into())
     }
 }
 
