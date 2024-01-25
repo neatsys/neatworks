@@ -4,12 +4,13 @@ use std::{
     iter::repeat_with,
 };
 
+use bincode::Options;
 use primitive_types::U256;
 use secp256k1::PublicKey;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    crypto::{Crypto, Signed},
+    crypto::{Crypto, DigestHash, Signed},
     event::{OnEvent, SendEvent},
     net::{Addr, SendMessage},
     worker::Worker,
@@ -38,6 +39,16 @@ pub struct PeerRecord<A> {
     pub id: PeerId,
     pub key: PublicKey,
     pub addr: A,
+}
+
+impl<A> PeerRecord<A> {
+    pub fn new(key: PublicKey, addr: A) -> Self {
+        Self {
+            id: key.sha256(),
+            key,
+            addr,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -186,14 +197,20 @@ impl<T: SendMessage<A, Signed<FindPeer<A>>> + SendMessage<A, Signed<FindPeerOk<A
 {
 }
 
-#[derive(Debug)]
+#[derive(Debug, derive_more::From)]
 pub enum Event<A> {
     Query(Target, usize),
+    #[from(ignore)]
     SignedFindPeer(Signed<FindPeer<A>>),
+    #[from(ignore)]
     IngressFindPeer(Signed<FindPeer<A>>),
+    #[from(ignore)]
     VerifiedFindPeer(Signed<FindPeer<A>>),
+    #[from(ignore)]
     SignedFindPeerOk(Signed<FindPeerOk<A>>),
+    #[from(ignore)]
     IngressFindPeerOk(Signed<FindPeerOk<A>>),
+    #[from(ignore)]
     VerifiedFindPeerOk(Signed<FindPeerOk<A>>),
 }
 
@@ -526,10 +543,26 @@ fn rand_distance(index: usize, rng: &mut impl rand::Rng) -> U256 {
     U256::from_little_endian(&bytes)
 }
 
+#[derive(Debug, Clone, derive_more::From, Serialize, Deserialize)]
+pub enum Message<A> {
+    FindPeer(Signed<FindPeer<A>>),
+    FindPeerOk(Signed<FindPeerOk<A>>),
+}
+
+pub type MessageNet<T, A> = crate::net::MessageNet<T, Message<A>>;
+
+pub fn on_buf<A: Addr>(sender: &mut impl SendEvent<Event<A>>, buf: &[u8]) -> anyhow::Result<()> {
+    let message = bincode::options()
+        .allow_trailing_bytes()
+        .deserialize::<Message<A>>(buf)?;
+    match message {
+        Message::FindPeer(find_peer) => sender.send(Event::IngressFindPeer(find_peer)),
+        Message::FindPeerOk(find_peer_ok) => sender.send(Event::IngressFindPeerOk(find_peer_ok)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::crypto::DigestHash as _;
-
     use super::*;
 
     #[test]
@@ -542,19 +575,11 @@ mod tests {
     fn ordered_closest() -> anyhow::Result<()> {
         let secp = secp256k1::Secp256k1::signing_only();
         let (_, public_key) = secp.generate_keypair(&mut rand::thread_rng());
-        let origin = PeerRecord {
-            id: public_key.sha256(),
-            key: public_key,
-            addr: (),
-        };
+        let origin = PeerRecord::new(public_key, ());
         let mut buckets = Buckets::new(origin);
         for _ in 0..1000 {
             let (_, public_key) = secp.generate_keypair(&mut rand::thread_rng());
-            buckets.insert(PeerRecord {
-                id: public_key.sha256(),
-                key: public_key,
-                addr: (),
-            })
+            buckets.insert(PeerRecord::new(public_key, ()))
         }
         for _ in 0..1000 {
             let records = buckets.find_closest(&rand::random(), 20);
@@ -593,11 +618,7 @@ mod tests {
     fn refresh_buckets() -> anyhow::Result<()> {
         let secp = secp256k1::Secp256k1::signing_only();
         let (_, public_key) = secp.generate_keypair(&mut rand::thread_rng());
-        let origin = PeerRecord {
-            id: public_key.sha256(),
-            key: public_key,
-            addr: (),
-        };
+        let origin = PeerRecord::new(public_key, ());
         let buckets = Buckets::new(origin);
         let mut peer = Peer::new(buckets, NullNet, NullUpcall, Worker::Null);
         peer.refresh_buckets()

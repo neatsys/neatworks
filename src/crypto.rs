@@ -7,7 +7,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::kademlia::PeerId;
+use crate::kademlia::{PeerId, PeerRecord};
 
 // Hashed based digest deriving solution
 // There's no well known solution for deriving digest methods to general
@@ -148,6 +148,22 @@ impl Crypto<u8> {
                 .map(|(id, secret_key)| (id as _, secret_key.public_key(&secp)))
                 .collect(),
         ))
+    }
+}
+
+impl Crypto<PeerId> {
+    pub fn new_random(rng: &mut impl rand::Rng) -> Self {
+        let secp = secp256k1::Secp256k1::new();
+        let (secret_key, _) = secp.generate_keypair(rng);
+        Self {
+            secret_key,
+            public_keys: Default::default(),
+            secp,
+        }
+    }
+
+    pub fn peer<A>(&self, addr: A) -> PeerRecord<A> {
+        PeerRecord::new(self.secret_key.public_key(&self.secp), addr)
     }
 }
 

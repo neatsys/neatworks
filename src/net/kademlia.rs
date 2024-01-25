@@ -36,7 +36,7 @@ impl<N, M, P, A> Control<N, M, P, A> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, derive_more::From)]
 pub enum ControlEvent<M, A> {
     SendMessage(PeerId, M),
     Upcall(QueryResult<A>),
