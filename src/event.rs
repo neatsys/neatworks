@@ -208,3 +208,136 @@ impl<M: Send + 'static> Timer<M> for SessionTimer<'_, M> {
         Ok(())
     }
 }
+
+// alternative design: type-erasured event
+pub mod erasured {
+    use std::{collections::HashMap, time::Duration};
+
+    use tokio::{
+        sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+        task::JoinHandle,
+        time::sleep,
+    };
+
+    use super::{SendEvent, TimerId};
+
+    pub trait Timer<S: ?Sized> {
+        fn set<M: Send + Sync + 'static>(
+            &mut self,
+            duration: Duration,
+            event: M,
+        ) -> anyhow::Result<TimerId>
+        where
+            S: OnEvent<M>;
+
+        fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()>;
+    }
+
+    pub trait OnEvent<M> {
+        fn on_event(&mut self, event: M, timer: &mut impl Timer<Self>) -> anyhow::Result<()>;
+    }
+
+    type Event<S> = Box<dyn FnOnce(&mut S, &mut Session<S>) -> anyhow::Result<()> + Send + Sync>;
+
+    enum SessionEvent<S: ?Sized> {
+        Timer(TimerId, Event<S>),
+        Other(Event<S>),
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct SessionSender<S>(UnboundedSender<SessionEvent<S>>);
+
+    impl<S: OnEvent<M> + 'static, M: Send + Sync + 'static> SendEvent<M> for SessionSender<S> {
+        fn send(&mut self, event: M) -> anyhow::Result<()> {
+            let event = move |state: &mut S, timer: &mut _| state.on_event(event, timer);
+            self.0
+                .send(SessionEvent::Other(Box::new(event)))
+                .map_err(|_| anyhow::anyhow!("channel closed"))
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct Session<S: ?Sized> {
+        sender: UnboundedSender<SessionEvent<S>>,
+        receiver: UnboundedReceiver<SessionEvent<S>>,
+        timer_id: TimerId,
+        timers: HashMap<TimerId, JoinHandle<()>>,
+    }
+
+    impl<S> Session<S> {
+        pub fn new() -> Self {
+            let (sender, receiver) = unbounded_channel();
+            Self {
+                sender,
+                receiver,
+                timer_id: 0,
+                timers: Default::default(),
+            }
+        }
+    }
+
+    impl<S> Default for Session<S> {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl<S> Session<S> {
+        pub fn sender(&self) -> SessionSender<S> {
+            SessionSender(self.sender.clone())
+        }
+
+        pub async fn run(&mut self, state: &mut S) -> anyhow::Result<()> {
+            loop {
+                let event = match self
+                    .receiver
+                    .recv()
+                    .await
+                    .ok_or(anyhow::anyhow!("channel closed"))?
+                {
+                    SessionEvent::Timer(timer_id, event) => {
+                        if self.timers.remove(&timer_id).is_some() {
+                            event
+                        } else {
+                            continue;
+                        }
+                    }
+                    SessionEvent::Other(event) => event,
+                };
+                event(state, self)?
+            }
+        }
+    }
+
+    impl<S: ?Sized + 'static> Timer<S> for Session<S> {
+        fn set<M: Send + Sync + 'static>(
+            &mut self,
+            duration: Duration,
+            event: M,
+        ) -> anyhow::Result<TimerId>
+        where
+            S: OnEvent<M>,
+        {
+            self.timer_id += 1;
+            let timer_id = self.timer_id;
+            let sender = self.sender.clone();
+            let timer = tokio::spawn(async move {
+                sleep(duration).await;
+                let event = move |state: &mut S, timer: &mut _| state.on_event(event, timer);
+                sender
+                    .send(SessionEvent::Timer(timer_id, Box::new(event)))
+                    .unwrap();
+            });
+            self.timers.insert(timer_id, timer);
+            Ok(timer_id)
+        }
+
+        fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()> {
+            self.timers
+                .remove(&timer_id)
+                .ok_or(anyhow::anyhow!("timer not exists"))?
+                .abort();
+            Ok(())
+        }
+    }
+}
