@@ -137,15 +137,15 @@ impl<M: Clone, A: Addr> OnEvent<QueryResult<A>> for Control<M, A> {
                 }
             }
             // otherwise, the destination is unreachable and the messages are dropped
-        } else if let Some((_, multicasts)) = self.querying_multicasts.remove(&upcall.target) {
+        }
+        if let Some((_, multicasts)) = self.querying_multicasts.remove(&upcall.target) {
             for (count, message) in multicasts {
                 for record in upcall.closest.iter().take(count) {
                     self.inner_net.send(record.addr.clone(), message.clone())?
                 }
             }
-        } else {
-            unreachable!()
         }
+        // assert at least one branch above has been entered
         if let Some(multicasts) = self.pending_multicasts.remove(&upcall.target) {
             assert!(!self.querying_unicasts.contains_key(&upcall.target));
             assert!(!self.querying_multicasts.contains_key(&upcall.target));

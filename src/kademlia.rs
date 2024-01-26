@@ -560,14 +560,14 @@ impl<A: Addr> OnEvent<Verified<FindPeerOk<A>>> for Peer<A> {
             QueryStatus::Halted => {} // log warn/return error?
         }
         if self.refresh_targets.is_empty() {
-            self.refresh_buckets()
+            self.refresh_buckets()?;
+            if self.refresh_targets.is_empty() {
+                self.on_bootstrap.take().unwrap()()?
+            }
+            Ok(())
         } else {
-            self.refresh_targets.remove(&target);
-            // println!(
-            //     "refreshed {}, {} left",
-            //     H256(target),
-            //     self.refresh_targets.len()
-            // );
+            let removed = self.refresh_targets.remove(&target);
+            assert!(removed);
             if let Some(target) = self.refresh_targets.iter().next() {
                 self.start_query(target, BUCKET_SIZE)
             } else {
@@ -579,9 +579,17 @@ impl<A: Addr> OnEvent<Verified<FindPeerOk<A>>> for Peer<A> {
 
 impl<A: Addr> Peer<A> {
     fn refresh_buckets(&mut self) -> anyhow::Result<()> {
-        // TODO optimize for bootstrap: skip until the first non-empty bucket, and that non-empty
-        // bucket. assert the refreshing of those buckets cannot discover any peer
-        for i in 0..BITS {
+        let mut end_index = BITS;
+        if self.on_bootstrap.is_some() {
+            // optimize for bootstrap: skip from the closest bucket until the first non-empty one,
+            // and skip that non-empty bucket as well. assert the refreshing of those buckets cannot
+            // discover any peer
+            while {
+                end_index -= 1;
+                self.buckets.distances[end_index].records.is_empty()
+            } {}
+        }
+        for i in 0..end_index {
             let d = rand_distance(i, &mut rand::thread_rng());
             let target = distance_from(&self.record.id, d);
             assert_eq!(self.buckets.index(&target), BITS - i - 1);
@@ -591,7 +599,10 @@ impl<A: Addr> Peer<A> {
         // if refresh query for all buckets at the same time, testing on loopback network drops
         // maybe docker's loopback network is too bad, but mitigating transient performance
         // degradation caused by refreshing is still generally good to have
-        self.start_query(self.refresh_targets.iter().next().unwrap(), BUCKET_SIZE)
+        if let Some(target) = self.refresh_targets.iter().next() {
+            self.start_query(target, BUCKET_SIZE)?
+        }
+        Ok(())
     }
 }
 
@@ -695,7 +706,7 @@ mod tests {
         let secp = secp256k1::Secp256k1::signing_only();
         let (_, public_key) = secp.generate_keypair(&mut rand::thread_rng());
         let origin = PeerRecord::new(public_key, ());
-        let buckets = Buckets::new(origin);
+        let buckets = Buckets::new(origin.clone());
         let mut peer = Peer::new(buckets, NullNet, NullUpcall, Worker::Null);
         peer.refresh_buckets()
     }
