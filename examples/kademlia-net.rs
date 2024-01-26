@@ -9,7 +9,7 @@ use augustus::{
     kademlia::{self, Buckets, Peer, PeerId, SendCryptoEvent},
     net::{
         events::Recv,
-        kademlia::{Control, Net},
+        kademlia::{Control, Multicast, Net},
         SendMessage, Udp,
     },
     worker::erasured::spawn_backend,
@@ -27,6 +27,7 @@ enum Message {
     Kademlia(kademlia::Message<SocketAddr>),
     Hello(PeerId),
     HelloOk,
+    Join(PeerId),
 }
 
 struct MessageNet<T>(T);
@@ -122,10 +123,14 @@ async fn main() -> anyhow::Result<()> {
             }
             Message::Hello(peer_id) => {
                 println!("Replying Hello from {}", H256(peer_id));
-                peer_net.send(peer_id, Message::HelloOk)?
+                peer_net.send(peer_id, Message::HelloOk)?;
+                peer_net.send(Multicast(peer_id, 3), Message::Join(peer_id))?
             }
             Message::HelloOk => {
                 println!("Received HelloOk")
+            }
+            Message::Join(peer_id) => {
+                println!("Joining peer {}", H256(peer_id))
             }
         }
         Ok(())

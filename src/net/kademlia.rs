@@ -1,11 +1,14 @@
-use std::{collections::HashMap, fmt::Debug};
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    fmt::Debug,
+};
 
 use crate::{
     event::{
         erasured::{OnEvent, Timer},
         SendEvent,
     },
-    kademlia::{PeerId, PeerRecord, QueryResult, QueryStatus},
+    kademlia::{PeerId, PeerRecord, QueryResult, QueryStatus, Target},
 };
 
 use super::{Addr, SendMessage};
@@ -19,17 +22,30 @@ impl<E: SendEvent<(PeerId, M)>, M> SendMessage<PeerId, M> for Net<E> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Multicast(pub Target, pub usize);
+
+// is it useful to have a variant that suppress loopback?
+
+impl<E: SendEvent<(Multicast, M)>, M> SendMessage<Multicast, M> for Net<E> {
+    fn send(&mut self, dest: Multicast, message: M) -> anyhow::Result<()> {
+        self.0.send((dest, message))
+    }
+}
+
 pub struct Control<M, A> {
     inner_net: Box<dyn SendMessage<A, M> + Send + Sync>,
     peer: Box<dyn SendEvent<(PeerId, usize)> + Send + Sync>, // sender handle of a kademlia Peer
-    pending_messages: HashMap<PeerId, Vec<M>>,
+    querying_unicasts: HashMap<PeerId, Vec<M>>,
+    querying_multicasts: HashMap<Target, (usize, Vec<(usize, M)>)>,
+    pending_multicasts: HashMap<Target, Vec<(usize, M)>>,
     records: HashMap<PeerId, PeerRecord<A>>,
 }
 
 impl<M: Debug, A: Debug> Debug for Control<M, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Control")
-            .field("pending_messages", &self.pending_messages)
+            .field("pending_messages", &self.querying_unicasts)
             .field("records", &self.records)
             .finish_non_exhaustive()
     }
@@ -44,7 +60,9 @@ impl<M, A> Control<M, A> {
         Self {
             inner_net: Box::new(inner_net),
             peer: Box::new(peer),
-            pending_messages: Default::default(),
+            querying_unicasts: Default::default(),
+            querying_multicasts: Default::default(),
+            pending_multicasts: Default::default(),
             records: Default::default(),
         }
     }
@@ -59,32 +77,82 @@ impl<M, A: Addr> OnEvent<(PeerId, M)> for Control<M, A> {
         if let Some(record) = self.records.get(&peer_id) {
             self.inner_net.send(record.addr.clone(), message)
         } else {
-            self.pending_messages
-                .entry(peer_id)
-                .or_default()
-                .push(message);
-            // TODO deduplicated
-            self.peer.send((peer_id, 1))
+            let entry = self.querying_unicasts.entry(peer_id);
+            if matches!(entry, Entry::Vacant(_)) &&
+                // the multicast query happens to accomplish the desired query
+                !self.querying_multicasts.contains_key(&peer_id)
+            {
+                self.peer.send((peer_id, 1))? // TODO set timer
+            }
+            entry.or_default().push(message);
+            Ok(())
         }
     }
 }
 
-impl<M, A: Addr> OnEvent<QueryResult<A>> for Control<M, A> {
+impl<M, A> OnEvent<(Multicast, M)> for Control<M, A> {
+    fn on_event(
+        &mut self,
+        (Multicast(target, count), message): (Multicast, M),
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
+        if let Some((query_count, multicasts)) = self.querying_multicasts.get_mut(&target) {
+            if count <= *query_count {
+                multicasts.push((count, message))
+            } else {
+                self.pending_multicasts
+                    .entry(target)
+                    .or_default()
+                    .push((count, message))
+            }
+            return Ok(());
+        }
+        if self.querying_unicasts.contains_key(&target) {
+            self.pending_multicasts
+                .entry(target)
+                .or_default()
+                .push((count, message));
+            return Ok(());
+        }
+        self.peer.send((target, count))?; // TODO set timer
+        self.querying_multicasts
+            .insert(target, (count, vec![(count, message)]));
+        Ok(())
+    }
+}
+
+impl<M: Clone, A: Addr> OnEvent<QueryResult<A>> for Control<M, A> {
     fn on_event(&mut self, upcall: QueryResult<A>, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
         // println!("{upcall:?}");
-        for record in upcall.closest {
-            self.records.insert(record.id, record);
+        for record in &upcall.closest {
+            self.records.insert(record.id, record.clone());
         }
         if matches!(upcall.status, QueryStatus::Progress) {
             return Ok(());
         }
-        if let Some(messages) = self.pending_messages.remove(&upcall.target) {
+        if let Some(messages) = self.querying_unicasts.remove(&upcall.target) {
             if let Some(record) = self.records.get(&upcall.target) {
                 for message in messages {
                     self.inner_net.send(record.addr.clone(), message)?
                 }
             }
             // otherwise, the destination is unreachable and the messages are dropped
+        } else if let Some((_, multicasts)) = self.querying_multicasts.remove(&upcall.target) {
+            for (count, message) in multicasts {
+                for record in upcall.closest.iter().take(count) {
+                    self.inner_net.send(record.addr.clone(), message.clone())?
+                }
+            }
+        } else {
+            unreachable!()
+        }
+        if let Some(multicasts) = self.pending_multicasts.remove(&upcall.target) {
+            assert!(!self.querying_unicasts.contains_key(&upcall.target));
+            assert!(!self.querying_multicasts.contains_key(&upcall.target));
+            let count = *multicasts.iter().map(|(count, _)| count).max().unwrap();
+            self.peer.send((upcall.target, count))?; // TODO set timer
+            self.querying_multicasts
+                .insert(upcall.target, (count, multicasts));
         }
         Ok(())
     }
