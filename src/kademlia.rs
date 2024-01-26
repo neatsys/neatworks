@@ -15,11 +15,11 @@ use crate::{
         Crypto, DigestHash, Verifiable,
     },
     event::{
-        erasured::{OnEvent, Timer},
+        erased::{OnEvent, Timer},
         SendEvent,
     },
     net::{events::Recv, Addr, SendMessage},
-    worker::erasured::Worker,
+    worker::erased::Worker,
 };
 
 // 32 bytes array refers to sha256 digest by default in this codebase

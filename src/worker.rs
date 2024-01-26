@@ -101,7 +101,7 @@ pub fn spawn_backend<S, M>(state: S) -> (Worker<S, M>, SpawnExecutor<S, M>) {
     (Worker::Spawn(worker), executor)
 }
 
-pub mod erasured {
+pub mod erased {
     use tokio::{
         sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
         task::JoinSet,

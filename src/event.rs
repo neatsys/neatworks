@@ -205,8 +205,8 @@ impl<M: Send + 'static> Timer<M> for Session<M> {
     }
 }
 
-// alternative design: type-erasured event
-pub mod erasured {
+// alternative design: type-erasure event
+pub mod erased {
     use std::{collections::HashMap, time::Duration};
 
     use tokio::{

@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     event::{
-        erasured::{OnEvent, Timer},
+        erased::{OnEvent, Timer},
         SendEvent,
     },
     kademlia::{PeerId, PeerRecord, QueryResult, QueryStatus, Target},

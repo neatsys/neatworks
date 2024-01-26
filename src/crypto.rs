@@ -91,6 +91,8 @@ pub trait DigestHash: Hash {
 }
 impl<T: Hash> DigestHash for T {}
 
+pub use primitive_types::H256;
+
 #[derive(Debug, Clone)]
 pub struct Crypto<I> {
     secret_key: secp256k1::SecretKey,

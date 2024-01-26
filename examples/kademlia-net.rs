@@ -3,7 +3,7 @@ use std::{env::args, net::SocketAddr};
 use augustus::{
     crypto::Crypto,
     event::{
-        erasured::{Session, SessionSender},
+        erased::{Session, SessionSender},
         SendEvent,
     },
     kademlia::{self, Buckets, Peer, PeerId, SendCryptoEvent},
@@ -12,7 +12,7 @@ use augustus::{
         kademlia::{Control, Multicast, Net},
         SendMessage, Udp,
     },
-    worker::erasured::spawn_backend,
+    worker::erased::spawn_backend,
 };
 use bincode::Options;
 use primitive_types::H256;
