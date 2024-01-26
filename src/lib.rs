@@ -21,25 +21,21 @@ pub mod worker;
 // (yeah, i also just realized the awful reusing of `M`/`N`)
 //
 // although does not look like so, but the spirit is to avoid generic/trait
-// usage as much as possible. always prefer enum polymophism than trait one.
+// usage as much as possible. always prefer enum polymophism over trait one.
 // existing enum polymophism includes crypto, worker, and app (which is trait
 // for now, but probably will be converted soon or later). the user of this
 // codebase is generally assumed to keep this codebase at a writable place (i.e.
 // not as a git/crates.io dependency), so more enum variants can always be added
-// if necessary. every trait comes with a reason
+// if necessary.
 //
-// the reason for `SendEvent` and `SendMessage` is that the user/implementor
-// may require/support sending various number of event/message types (and for
-// `SendMessage`, the number of supported address types may also vary). the
-// method interface is not aligned, since some implementation variants may
-// support to send certain kind of event/message and others may not.
-// the enum based approach would require a event enum and a sender enum, then
-// simultaneously match on them and only forward the sensible combinations,
-// leave the rest ones with `unimplemented!()`. that would be terrible to
-// maintain, and what's worse, certain implementor has type parameters on
-// its own, and can support different kind of events base on what parameters
-// are given to itself. the enum must take all these type parameters, makes the
-// approach infeasible.
+// one case that must use trait is when type erasuring is required, that is, the
+// type parameters of implementors must not be exposed to the use-site, which
+// is a requirement that enum cannot fulfill. this is the case for `SendEvent`.
+//
+// for `SendMessage` it's more about code organization. if it is instead an enum
+// then all message types must be also made into another enum. having that gaint
+// enum feels nonsense. a `SendMessage` trait also brings additional benefits
+// like allow me to write down fancy `SendAddr` stuff :)
 //
 // the reason for `Addr` is that most components only work with one address type
 // (plus some auxiliry types like `AllReplica`), so an address enum will
@@ -48,9 +44,20 @@ pub mod worker;
 // either this or anonying downcasts every time the address is evaluated. i
 // decide to choose the type parameter since it make better use of the compiler
 //
-// there's no pursuit on code organization for software engineering or whatever
-// reason. ideally there suppose to be one big `src/` that every single line of
-// code lives in. (until it spends whole night to finish compiling.)
+// when working with these traits, either to keep type parameters or make them
+// into trait objects is mostly by personal tastes. (at least when most traits
+// can be made into trait objects.) there are certain cases where a type
+// parameter must be inroduced e.g. when it is propagated across interfaces, and
+// ther are also other cases where a trait object must be used e.g. when sending
+// events in circle, and working with type-erasured events (so the consumer type
+// appears everywhere instead of the event types), trait objects must be used
+// somewhere to break infinite type recursion. other than these there's no
+// preference on which style to go with
+//
+// there's no pursuit on project-level code organization for software
+// engineering or whatever reason. ideally there suppose to be one big `src/`
+// that every single line of code lives in. (until it spends whole night to
+// finish compiling.)
 //
 // the reason to have a separate `tools` is because those code are for distinct
 // purpose. the main part of this codebase is distributed code, that should be

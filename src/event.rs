@@ -51,11 +51,11 @@ impl<M> SendEvent<M> for Void {
     }
 }
 
-// impl<N: Into<M>, M> SendEvent<N> for UnboundedSender<M> {
-//     fn send(&mut self, event: N) -> anyhow::Result<()> {
-//         UnboundedSender::send(self, event.into()).map_err(|_| anyhow::anyhow!("channel closed"))
-//     }
-// }
+impl<N: Into<M>, M> SendEvent<N> for UnboundedSender<M> {
+    fn send(&mut self, event: N) -> anyhow::Result<()> {
+        UnboundedSender::send(self, event.into()).map_err(|_| anyhow::anyhow!("channel closed"))
+    }
+}
 
 pub type TimerId = u32;
 
@@ -96,9 +96,7 @@ impl<M> Eq for SessionSender<M> {}
 
 impl<M: Into<N>, N> SendEvent<M> for SessionSender<N> {
     fn send(&mut self, event: M) -> anyhow::Result<()> {
-        // SendEvent::send(&mut self.0, event.into())
-        UnboundedSender::send(&self.0, event.into().into())
-            .map_err(|_| anyhow::anyhow!("channel closed"))
+        SendEvent::send(&mut self.0, event.into())
     }
 }
 
@@ -156,7 +154,8 @@ impl<M> Session<M> {
                     if self.timers.remove(&timer_id).is_some() {
                         event
                     } else {
-                        // unset/timeup contention, force to skip timer as long as it has been unset
+                        // unset/timeout contention, force to skip timer as long as it has been
+                        // unset
                         // this could happen because of stalled timers in event waiting list
                         // another approach has been taken previously, by passing the timer events
                         // with a shared mutex state `timeouts`
@@ -179,29 +178,15 @@ impl<M> Session<M> {
                 }
                 SessionEvent::Other(event) => event,
             };
-            state.on_event(
-                event,
-                &mut SessionTimer {
-                    timer_id: &mut self.timer_id,
-                    timers: &mut self.timers,
-                    sender: &self.sender,
-                } as _,
-            )?
+            state.on_event(event, self)?
         }
     }
 }
 
-#[derive(Debug)]
-pub struct SessionTimer<'a, M> {
-    timer_id: &'a mut TimerId,
-    timers: &'a mut HashMap<TimerId, JoinHandle<()>>,
-    sender: &'a UnboundedSender<SessionEvent<M>>,
-}
-
-impl<M: Send + 'static> Timer<M> for SessionTimer<'_, M> {
+impl<M: Send + 'static> Timer<M> for Session<M> {
     fn set_internal(&mut self, duration: Duration, event: M) -> anyhow::Result<TimerId> {
-        *self.timer_id += 1;
-        let timer_id = *self.timer_id;
+        self.timer_id += 1;
+        let timer_id = self.timer_id;
         let sender = self.sender.clone();
         let timer = tokio::spawn(async move {
             tokio::time::sleep(duration).await;
