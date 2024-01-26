@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
     println!("SocketAddr {addr}");
     let socket_net = Udp(socket.into());
 
-    let mut control_session = Session::<Control<_, _, _, _>>::new();
+    let mut control_session = Session::<Control<_, _>>::new();
     let (crypto_worker, mut crypto_session);
     let peer_id;
     let mut peer;
@@ -140,7 +140,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let crypto_session = crypto_session.run(S(peer_session.sender()));
-    let mut control = Control::<_, Message, _, SocketAddr>::new(
+    let mut control = Control::new(
         augustus::net::MessageNet::<_, Message>::new(socket_net.clone()),
         peer_session.sender(),
     );

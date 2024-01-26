@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Debug};
 
 use crate::{
     event::{
@@ -19,51 +19,38 @@ impl<E: SendEvent<(PeerId, M)>, M> SendMessage<PeerId, M> for Net<E> {
     }
 }
 
-#[derive(Debug)]
-pub struct Control<N, M, P, A> {
-    inner_net: N,
-    peer: P, // sender handle of a kademlia Peer
+pub struct Control<M, A> {
+    inner_net: Box<dyn SendMessage<A, M> + Send + Sync>,
+    peer: Box<dyn SendEvent<(PeerId, usize)> + Send + Sync>, // sender handle of a kademlia Peer
     pending_messages: HashMap<PeerId, Vec<M>>,
     records: HashMap<PeerId, PeerRecord<A>>,
 }
 
-impl<N, M, P, A> Control<N, M, P, A> {
+impl<M: Debug, A: Debug> Debug for Control<M, A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Control")
+            .field("pending_messages", &self.pending_messages)
+            .field("records", &self.records)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<M, A> Control<M, A> {
     // peer must have finished bootstrap
-    pub fn new(inner_net: N, peer: P) -> Self {
+    pub fn new(
+        inner_net: impl SendMessage<A, M> + Send + Sync + 'static,
+        peer: impl SendEvent<(PeerId, usize)> + Send + Sync + 'static,
+    ) -> Self {
         Self {
-            inner_net,
-            peer,
+            inner_net: Box::new(inner_net),
+            peer: Box::new(peer),
             pending_messages: Default::default(),
             records: Default::default(),
         }
     }
 }
 
-// #[derive(Debug, derive_more::From)]
-// pub enum ControlEvent<M, A> {
-//     SendMessage(PeerId, M),
-//     Upcall(QueryResult<A>),
-//     // TODO timeout for clearing record cache, cancel query, etc
-// }
-
-// impl<N: SendMessage<A, M>, M, P: SendEvent<(PeerId, usize)>, A: Addr> OnEvent<ControlEvent<M, A>>
-//     for Control<N, M, P, A>
-// {
-//     fn on_event(
-//         &mut self,
-//         event: ControlEvent<M, A>,
-//         _timer: &mut dyn crate::event::Timer<ControlEvent<M, A>>,
-//     ) -> anyhow::Result<()> {
-//         match event {
-//             ControlEvent::SendMessage(peer_id, message) => self.on_send_message(&peer_id, message),
-//             ControlEvent::Upcall(upcall) => self.on_upcall(upcall),
-//         }
-//     }
-// }
-
-impl<N: SendMessage<A, M>, M, P: SendEvent<(PeerId, usize)>, A: Addr> OnEvent<(PeerId, M)>
-    for Control<N, M, P, A>
-{
+impl<M, A: Addr> OnEvent<(PeerId, M)> for Control<M, A> {
     fn on_event(
         &mut self,
         (peer_id, message): (PeerId, M),
@@ -82,9 +69,7 @@ impl<N: SendMessage<A, M>, M, P: SendEvent<(PeerId, usize)>, A: Addr> OnEvent<(P
     }
 }
 
-impl<N: SendMessage<A, M>, M, P: SendEvent<(PeerId, usize)>, A: Addr> OnEvent<QueryResult<A>>
-    for Control<N, M, P, A>
-{
+impl<M, A: Addr> OnEvent<QueryResult<A>> for Control<M, A> {
     fn on_event(&mut self, upcall: QueryResult<A>, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
         // println!("{upcall:?}");
         for record in upcall.closest {
