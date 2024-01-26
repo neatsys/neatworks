@@ -10,10 +10,16 @@ use secp256k1::PublicKey;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    crypto::{Crypto, DigestHash, Signed},
-    event::{OnEvent, SendEvent},
-    net::{Addr, SendMessage},
-    worker::Worker,
+    crypto::{
+        events::{Signed, Verified},
+        Crypto, DigestHash, Verifiable,
+    },
+    event::{
+        erasured::{OnEvent, Timer},
+        SendEvent,
+    },
+    net::{events::Recv, Addr, SendMessage},
+    worker::erasured::Worker,
 };
 
 // 32 bytes array refers to sha256 digest by default in this codebase
@@ -189,29 +195,12 @@ pub struct FindPeerOk<A> {
 }
 
 pub trait Net<A>:
-    SendMessage<A, Signed<FindPeer<A>>> + SendMessage<A, Signed<FindPeerOk<A>>>
+    SendMessage<A, Verifiable<FindPeer<A>>> + SendMessage<A, Verifiable<FindPeerOk<A>>>
 {
 }
-impl<T: SendMessage<A, Signed<FindPeer<A>>> + SendMessage<A, Signed<FindPeerOk<A>>>, A> Net<A>
-    for T
+impl<T: SendMessage<A, Verifiable<FindPeer<A>>> + SendMessage<A, Verifiable<FindPeerOk<A>>>, A>
+    Net<A> for T
 {
-}
-
-#[derive(Debug, derive_more::From)]
-pub enum Event<A> {
-    Query(Target, usize),
-    #[from(ignore)]
-    SignedFindPeer(Signed<FindPeer<A>>),
-    #[from(ignore)]
-    IngressFindPeer(Signed<FindPeer<A>>),
-    #[from(ignore)]
-    VerifiedFindPeer(Signed<FindPeer<A>>),
-    #[from(ignore)]
-    SignedFindPeerOk(Signed<FindPeerOk<A>>),
-    #[from(ignore)]
-    IngressFindPeerOk(Signed<FindPeerOk<A>>),
-    #[from(ignore)]
-    VerifiedFindPeerOk(Signed<FindPeerOk<A>>),
 }
 
 #[derive(Debug)]
@@ -238,7 +227,24 @@ pub enum QueryStatus {
 pub trait Upcall<A>: SendEvent<QueryResult<A>> {}
 impl<T: SendEvent<QueryResult<A>>, A> Upcall<A> for T {}
 
-pub struct Peer<N, U, A> {
+pub trait SendCryptoEvent<A>:
+    SendEvent<Signed<FindPeer<A>>>
+    + SendEvent<Signed<FindPeerOk<A>>>
+    + SendEvent<Verified<FindPeer<A>>>
+    + SendEvent<Verified<FindPeerOk<A>>>
+{
+}
+impl<
+        T: SendEvent<Signed<FindPeer<A>>>
+            + SendEvent<Signed<FindPeerOk<A>>>
+            + SendEvent<Verified<FindPeer<A>>>
+            + SendEvent<Verified<FindPeerOk<A>>>,
+        A,
+    > SendCryptoEvent<A> for T
+{
+}
+
+pub struct Peer<A> {
     record: PeerRecord<A>,
 
     buckets: Buckets<A>,
@@ -248,14 +254,15 @@ pub struct Peer<N, U, A> {
     find_peer_ok_seq: u32,
     find_peer_ok_dests: HashMap<u32, A>,
 
-    net: N,
-    upcall: U,
-    crypto_worker: Worker<Crypto<PeerId>, Event<A>>,
+    net: Box<dyn Net<A> + Send + Sync>,
+    upcall: Box<dyn Upcall<A> + Send + Sync>,
+    crypto_worker: CryptoWorker<A>,
 }
 
 type OnBootstrap = Box<dyn FnOnce() -> anyhow::Result<()> + Send + Sync>;
+pub type CryptoWorker<A> = Worker<Crypto<PeerId>, dyn SendCryptoEvent<A> + Send + Sync>;
 
-impl<N, U, A> Debug for Peer<N, U, A> {
+impl<A> Debug for Peer<A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Peer").finish_non_exhaustive()
     }
@@ -263,24 +270,24 @@ impl<N, U, A> Debug for Peer<N, U, A> {
 
 #[derive(Debug)]
 struct QueryState<A> {
-    find_peer: Signed<FindPeer<A>>,
+    find_peer: Verifiable<FindPeer<A>>,
     records: Vec<PeerRecord<A>>,
     contacting: HashSet<PeerId>,
     contacted: HashSet<PeerId>,
 }
 
-impl<N, U, A: Addr> Peer<N, U, A> {
+impl<A: Addr> Peer<A> {
     pub fn new(
         buckets: Buckets<A>, // seed peers inserted
-        net: N,
-        upcall: U,
-        crypto_worker: Worker<Crypto<PeerId>, Event<A>>,
+        net: impl Net<A> + Send + Sync + 'static,
+        upcall: impl Upcall<A> + Send + Sync + 'static,
+        crypto_worker: CryptoWorker<A>,
     ) -> Self {
         Self {
             record: buckets.origin.clone(),
             buckets,
-            net,
-            upcall,
+            net: Box::new(net),
+            upcall: Box::new(upcall),
             crypto_worker,
             query_states: Default::default(),
             refresh_targets: Default::default(),
@@ -291,27 +298,7 @@ impl<N, U, A: Addr> Peer<N, U, A> {
     }
 }
 
-impl<N: Net<A>, U: Upcall<A>, A: Addr> OnEvent<Event<A>> for Peer<N, U, A> {
-    fn on_event(
-        &mut self,
-        event: Event<A>,
-        _timer: &mut dyn crate::event::Timer<Event<A>>,
-    ) -> anyhow::Result<()> {
-        // println!("{event:?}");
-        // println!();
-        match event {
-            Event::Query(target, count) => self.on_query(&target, count),
-            Event::SignedFindPeer(find_peer) => self.on_signed_find_peer(find_peer),
-            Event::IngressFindPeer(find_peer) => self.on_ingress_find_peer(find_peer),
-            Event::VerifiedFindPeer(find_peer) => self.on_verified_find_peer(find_peer),
-            Event::SignedFindPeerOk(find_peer_ok) => self.on_signed_find_peer_ok(find_peer_ok),
-            Event::IngressFindPeerOk(find_peer_ok) => self.on_ingress_find_peer_ok(find_peer_ok),
-            Event::VerifiedFindPeerOk(find_peer_ok) => self.on_verified_find_peer_ok(find_peer_ok),
-        }
-    }
-}
-
-impl<N: Net<A>, U: Upcall<A>, A: Addr> Peer<N, U, A> {
+impl<A: Addr> Peer<A> {
     pub fn bootstrap(&mut self, on_bootstrap: OnBootstrap) -> anyhow::Result<()> {
         // assert only bootstrap once?
         // seems no harm to bootstrap multiple times anyway, so just assert a clear state for now
@@ -328,17 +315,25 @@ impl<N: Net<A>, U: Upcall<A>, A: Addr> Peer<N, U, A> {
         let target = self.record.id;
         self.start_query(&target, BUCKET_SIZE)
     }
+}
 
-    fn on_query(&self, target: &Target, count: usize) -> anyhow::Result<()> {
+impl<A: Addr> OnEvent<(PeerId, usize)> for Peer<A> {
+    fn on_event(
+        &mut self,
+        (target, count): (PeerId, usize),
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
         if self.on_bootstrap.is_some() {
             anyhow::bail!("start query while bootstrap in progress")
         }
         // there's tiny little chance that the refreshing target (which is randomly chosen) that
         // happens to be queried
         // universe will explode before that happens
-        self.start_query(target, count)
+        self.start_query(&target, count)
     }
+}
 
+impl<A: Addr> Peer<A> {
     fn start_query(&self, target: &Target, count: usize) -> anyhow::Result<()> {
         // println!("start query {} {count}", primitive_types::H256(*target));
         let find_peer = FindPeer {
@@ -348,11 +343,17 @@ impl<N: Net<A>, U: Upcall<A>, A: Addr> Peer<N, U, A> {
         };
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
             // println!("signing {find_peer:?}");
-            sender.send(Event::SignedFindPeer(crypto.sign(find_peer)))
+            sender.send(Signed(crypto.sign(find_peer)))
         }))
     }
+}
 
-    fn on_signed_find_peer(&mut self, find_peer: Signed<FindPeer<A>>) -> anyhow::Result<()> {
+impl<A: Addr> OnEvent<Signed<FindPeer<A>>> for Peer<A> {
+    fn on_event(
+        &mut self,
+        Signed(find_peer): Signed<FindPeer<A>>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
         let target = find_peer.target;
         let records = self
             .buckets
@@ -381,8 +382,14 @@ impl<N: Net<A>, U: Upcall<A>, A: Addr> Peer<N, U, A> {
         }
         Ok(())
     }
+}
 
-    fn on_ingress_find_peer(&self, find_peer: Signed<FindPeer<A>>) -> anyhow::Result<()> {
+impl<A: Addr> OnEvent<Recv<Verifiable<FindPeer<A>>>> for Peer<A> {
+    fn on_event(
+        &mut self,
+        Recv(find_peer): Recv<Verifiable<FindPeer<A>>>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
             if crypto
                 .verify_with_public_key(
@@ -392,14 +399,20 @@ impl<N: Net<A>, U: Upcall<A>, A: Addr> Peer<N, U, A> {
                 )
                 .is_ok()
             {
-                sender.send(Event::VerifiedFindPeer(find_peer))
+                sender.send(Verified(find_peer))
             } else {
                 Ok(())
             }
         }))
     }
+}
 
-    fn on_verified_find_peer(&mut self, find_peer: Signed<FindPeer<A>>) -> anyhow::Result<()> {
+impl<A: Addr> OnEvent<Verified<FindPeer<A>>> for Peer<A> {
+    fn on_event(
+        &mut self,
+        Verified(find_peer): Verified<FindPeer<A>>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
         let find_peer = find_peer.into_inner();
         let dest = find_peer.record.addr.clone();
         self.buckets.insert(find_peer.record);
@@ -414,13 +427,16 @@ impl<N: Net<A>, U: Upcall<A>, A: Addr> Peer<N, U, A> {
         };
         self.find_peer_ok_dests.insert(self.find_peer_ok_seq, dest);
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
-            sender.send(Event::SignedFindPeerOk(crypto.sign(find_peer_ok)))
+            sender.send(Signed(crypto.sign(find_peer_ok)))
         }))
     }
+}
 
-    fn on_signed_find_peer_ok(
+impl<A> OnEvent<Signed<FindPeerOk<A>>> for Peer<A> {
+    fn on_event(
         &mut self,
-        find_peer_ok: Signed<FindPeerOk<A>>,
+        Signed(find_peer_ok): Signed<FindPeerOk<A>>,
+        _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let dest = self
             .find_peer_ok_dests
@@ -431,8 +447,14 @@ impl<N: Net<A>, U: Upcall<A>, A: Addr> Peer<N, U, A> {
             ))?;
         self.net.send(dest, find_peer_ok)
     }
+}
 
-    fn on_ingress_find_peer_ok(&self, find_peer_ok: Signed<FindPeerOk<A>>) -> anyhow::Result<()> {
+impl<A: Addr> OnEvent<Recv<Verifiable<FindPeerOk<A>>>> for Peer<A> {
+    fn on_event(
+        &mut self,
+        Recv(find_peer_ok): Recv<Verifiable<FindPeerOk<A>>>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
             if crypto
                 .verify_with_public_key(
@@ -442,16 +464,19 @@ impl<N: Net<A>, U: Upcall<A>, A: Addr> Peer<N, U, A> {
                 )
                 .is_ok()
             {
-                sender.send(Event::VerifiedFindPeerOk(find_peer_ok))
+                sender.send(Verified(find_peer_ok))
             } else {
                 Ok(())
             }
         }))
     }
+}
 
-    fn on_verified_find_peer_ok(
+impl<A: Addr> OnEvent<Verified<FindPeerOk<A>>> for Peer<A> {
+    fn on_event(
         &mut self,
-        find_peer_ok: Signed<FindPeerOk<A>>,
+        Verified(find_peer_ok): Verified<FindPeerOk<A>>,
+        _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let find_peer_ok = find_peer_ok.into_inner();
         let peer_id = find_peer_ok.record.id;
@@ -550,7 +575,9 @@ impl<N: Net<A>, U: Upcall<A>, A: Addr> Peer<N, U, A> {
             }
         }
     }
+}
 
+impl<A: Addr> Peer<A> {
     fn refresh_buckets(&mut self) -> anyhow::Result<()> {
         // TODO optimize for bootstrap: skip until the first non-empty bucket, and that non-empty
         // bucket. assert the refreshing of those buckets cannot discover any peer
@@ -583,19 +610,30 @@ fn rand_distance(index: usize, rng: &mut impl rand::Rng) -> U256 {
 
 #[derive(Debug, Clone, derive_more::From, Serialize, Deserialize)]
 pub enum Message<A> {
-    FindPeer(Signed<FindPeer<A>>),
-    FindPeerOk(Signed<FindPeerOk<A>>),
+    FindPeer(Verifiable<FindPeer<A>>),
+    FindPeerOk(Verifiable<FindPeerOk<A>>),
 }
 
 pub type MessageNet<T, A> = crate::net::MessageNet<T, Message<A>>;
 
-pub fn on_buf<A: Addr>(sender: &mut impl SendEvent<Event<A>>, buf: &[u8]) -> anyhow::Result<()> {
+pub trait SendRecvEvent<A>:
+    SendEvent<Recv<Verifiable<FindPeer<A>>>> + SendEvent<Recv<Verifiable<FindPeerOk<A>>>>
+{
+}
+impl<
+        T: SendEvent<Recv<Verifiable<FindPeer<A>>>> + SendEvent<Recv<Verifiable<FindPeerOk<A>>>>,
+        A,
+    > SendRecvEvent<A> for T
+{
+}
+
+pub fn on_buf<A: Addr>(sender: &mut impl SendRecvEvent<A>, buf: &[u8]) -> anyhow::Result<()> {
     let message = bincode::options()
         .allow_trailing_bytes()
         .deserialize::<Message<A>>(buf)?;
     match message {
-        Message::FindPeer(find_peer) => sender.send(Event::IngressFindPeer(find_peer)),
-        Message::FindPeerOk(find_peer_ok) => sender.send(Event::IngressFindPeerOk(find_peer_ok)),
+        Message::FindPeer(message) => sender.send(Recv(message)),
+        Message::FindPeerOk(message) => sender.send(Recv(message)),
     }
 }
 
@@ -635,13 +673,13 @@ mod tests {
     }
 
     struct NullNet;
-    impl SendMessage<(), Signed<FindPeer<()>>> for NullNet {
-        fn send(&mut self, (): (), _: Signed<FindPeer<()>>) -> anyhow::Result<()> {
+    impl SendMessage<(), Verifiable<FindPeer<()>>> for NullNet {
+        fn send(&mut self, (): (), _: Verifiable<FindPeer<()>>) -> anyhow::Result<()> {
             Ok(())
         }
     }
-    impl SendMessage<(), Signed<FindPeerOk<()>>> for NullNet {
-        fn send(&mut self, (): (), _: Signed<FindPeerOk<()>>) -> anyhow::Result<()> {
+    impl SendMessage<(), Verifiable<FindPeerOk<()>>> for NullNet {
+        fn send(&mut self, (): (), _: Verifiable<FindPeerOk<()>>) -> anyhow::Result<()> {
             Ok(())
         }
     }

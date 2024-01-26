@@ -42,11 +42,20 @@ impl<S: OnEvent<M>, N: Into<M>, M> SendEvent<N> for Inline<'_, S, M> {
     }
 }
 
-impl<N: Into<M>, M> SendEvent<N> for UnboundedSender<M> {
-    fn send(&mut self, event: N) -> anyhow::Result<()> {
-        UnboundedSender::send(self, event.into()).map_err(|_| anyhow::anyhow!("channel closed"))
+#[derive(Debug)]
+pub struct Void; // for testing
+
+impl<M> SendEvent<M> for Void {
+    fn send(&mut self, _: M) -> anyhow::Result<()> {
+        Ok(())
     }
 }
+
+// impl<N: Into<M>, M> SendEvent<N> for UnboundedSender<M> {
+//     fn send(&mut self, event: N) -> anyhow::Result<()> {
+//         UnboundedSender::send(self, event.into()).map_err(|_| anyhow::anyhow!("channel closed"))
+//     }
+// }
 
 pub type TimerId = u32;
 
@@ -87,7 +96,9 @@ impl<M> Eq for SessionSender<M> {}
 
 impl<M: Into<N>, N> SendEvent<M> for SessionSender<N> {
     fn send(&mut self, event: M) -> anyhow::Result<()> {
-        SendEvent::send(&mut self.0, event.into())
+        // SendEvent::send(&mut self.0, event.into())
+        UnboundedSender::send(&self.0, event.into().into())
+            .map_err(|_| anyhow::anyhow!("channel closed"))
     }
 }
 
@@ -239,20 +250,45 @@ pub mod erasured {
 
     type Event<S> = Box<dyn FnOnce(&mut S, &mut Session<S>) -> anyhow::Result<()> + Send + Sync>;
 
+    #[derive(Debug)]
+    pub struct Sender<'a, M, S>(&'a UnboundedSender<M>, std::marker::PhantomData<S>);
+
+    impl<'a, M, S> Sender<'a, M, S> {
+        pub fn new(inner: &'a UnboundedSender<M>) -> Self {
+            Self(inner, Default::default())
+        }
+    }
+
+    impl<S: OnEvent<M> + 'static, M: Send + Sync + 'static, N> SendEvent<M> for Sender<'_, N, S>
+    where
+        Event<S>: Into<N>,
+    {
+        fn send(&mut self, event: M) -> anyhow::Result<()> {
+            let event = move |state: &mut S, timer: &mut _| state.on_event(event, timer);
+            self.0
+                .send((Box::new(event) as Event<_>).into())
+                .map_err(|_| anyhow::anyhow!("channel closed"))
+        }
+    }
+
+    #[derive(derive_more::From)]
     enum SessionEvent<S: ?Sized> {
         Timer(TimerId, Event<S>),
         Other(Event<S>),
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug)]
     pub struct SessionSender<S>(UnboundedSender<SessionEvent<S>>);
+
+    impl<S> Clone for SessionSender<S> {
+        fn clone(&self) -> Self {
+            Self(self.0.clone())
+        }
+    }
 
     impl<S: OnEvent<M> + 'static, M: Send + Sync + 'static> SendEvent<M> for SessionSender<S> {
         fn send(&mut self, event: M) -> anyhow::Result<()> {
-            let event = move |state: &mut S, timer: &mut _| state.on_event(event, timer);
-            self.0
-                .send(SessionEvent::Other(Box::new(event)))
-                .map_err(|_| anyhow::anyhow!("channel closed"))
+            Sender::new(&self.0).send(event)
         }
     }
 

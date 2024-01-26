@@ -54,6 +54,11 @@ pub trait SendMessage<A, M> {
     fn send(&mut self, dest: A, message: M) -> anyhow::Result<()>;
 }
 
+pub mod events {
+    #[derive(Debug, Clone, derive_more::Deref, derive_more::From)]
+    pub struct Recv<M>(pub M);
+}
+
 #[derive(Debug, Clone)]
 pub struct Udp(pub Arc<tokio::net::UdpSocket>);
 

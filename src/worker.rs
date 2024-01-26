@@ -100,3 +100,79 @@ pub fn spawn_backend<S, M>(state: S) -> (Worker<S, M>, SpawnExecutor<S, M>) {
     };
     (Worker::Spawn(worker), executor)
 }
+
+pub mod erasured {
+    use tokio::{
+        sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+        task::JoinSet,
+    };
+
+    pub type Work<S, E> = Box<dyn FnOnce(&S, &mut E) -> anyhow::Result<()> + Send + Sync>;
+
+    #[derive(Debug)]
+    pub struct SpawnExecutor<S, E: ?Sized> {
+        state: S,
+        receiver: UnboundedReceiver<Work<S, E>>,
+        handles: JoinSet<anyhow::Result<()>>,
+    }
+
+    impl<S: Clone + Send + Sync + 'static, E: ?Sized + 'static> SpawnExecutor<S, E> {
+        pub async fn run(
+            &mut self,
+            sender: impl Clone + Send + AsMut<E> + 'static,
+        ) -> anyhow::Result<()> {
+            loop {
+                enum Select<S, E: ?Sized> {
+                    Recv(Work<S, E>),
+                    JoinNext(()),
+                }
+                if let Select::Recv(work) = tokio::select! {
+                    Some(result) = self.handles.join_next() => Select::JoinNext(result??),
+                    work = self.receiver.recv() => Select::Recv(work.ok_or(anyhow::anyhow!("channel closed"))?),
+                } {
+                    let state = self.state.clone();
+                    let mut sender = sender.clone();
+                    self.handles
+                        .spawn(async move { work(&state, sender.as_mut()) });
+                }
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    pub enum Worker<S, E: ?Sized> {
+        Spawn(SpawnWorker<S, E>),
+        Null, // for testing
+    }
+
+    impl<S, E: ?Sized> Worker<S, E> {
+        pub fn submit(&self, work: Work<S, E>) -> anyhow::Result<()> {
+            match self {
+                Self::Spawn(worker) => worker.submit(work),
+                Self::Null => Ok(()),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct SpawnWorker<S, E: ?Sized>(UnboundedSender<Work<S, E>>);
+
+    impl<S, E: ?Sized> SpawnWorker<S, E> {
+        fn submit(&self, work: Work<S, E>) -> anyhow::Result<()> {
+            self.0
+                .send(work)
+                .map_err(|_| anyhow::anyhow!("receiver closed"))
+        }
+    }
+
+    pub fn spawn_backend<S, E: ?Sized>(state: S) -> (Worker<S, E>, SpawnExecutor<S, E>) {
+        let (sender, receiver) = unbounded_channel();
+        let worker = SpawnWorker(sender);
+        let executor = SpawnExecutor {
+            receiver,
+            state,
+            handles: Default::default(),
+        };
+        (Worker::Spawn(worker), executor)
+    }
+}

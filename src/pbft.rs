@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     app::App,
-    crypto::{Crypto, DigestHash as _, Signed},
+    crypto::{Crypto, DigestHash as _, Verifiable},
     event::{OnEvent, SendEvent, Timer, TimerId},
     net::{Addr, MessageNet, SendMessage},
     replication::{AllReplica, Request},
@@ -49,17 +49,17 @@ impl<T: SendMessage<A, Reply>, A> ToClientNet<A> for T {}
 pub trait ToReplicaNet<A>:
     SendMessage<u8, Request<A>>
     + SendMessage<AllReplica, Request<A>>
-    + SendMessage<AllReplica, (Signed<PrePrepare>, Vec<Request<A>>)>
-    + SendMessage<AllReplica, Signed<Prepare>>
-    + SendMessage<AllReplica, Signed<Commit>>
+    + SendMessage<AllReplica, (Verifiable<PrePrepare>, Vec<Request<A>>)>
+    + SendMessage<AllReplica, Verifiable<Prepare>>
+    + SendMessage<AllReplica, Verifiable<Commit>>
 {
 }
 impl<
         T: SendMessage<u8, Request<A>>
             + SendMessage<AllReplica, Request<A>>
-            + SendMessage<AllReplica, (Signed<PrePrepare>, Vec<Request<A>>)>
-            + SendMessage<AllReplica, Signed<Prepare>>
-            + SendMessage<AllReplica, Signed<Commit>>,
+            + SendMessage<AllReplica, (Verifiable<PrePrepare>, Vec<Request<A>>)>
+            + SendMessage<AllReplica, Verifiable<Prepare>>
+            + SendMessage<AllReplica, Verifiable<Commit>>,
         A,
     > ToReplicaNet<A> for T
 {
@@ -191,15 +191,15 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
 #[derive(Debug)]
 pub enum ReplicaEvent<A> {
     IngressRequest(Request<A>),
-    SignedPrePrepare(Signed<PrePrepare>, Vec<Request<A>>),
-    IngressPrePrepare(Signed<PrePrepare>, Vec<Request<A>>),
-    VerifiedPrePrepare(Signed<PrePrepare>, Vec<Request<A>>),
-    SignedPrepare(Signed<Prepare>),
-    IngressPrepare(Signed<Prepare>),
-    VerifiedPrepare(Signed<Prepare>),
-    SignedCommit(Signed<Commit>),
-    IngressCommit(Signed<Commit>),
-    VerifiedCommit(Signed<Commit>),
+    SignedPrePrepare(Verifiable<PrePrepare>, Vec<Request<A>>),
+    IngressPrePrepare(Verifiable<PrePrepare>, Vec<Request<A>>),
+    VerifiedPrePrepare(Verifiable<PrePrepare>, Vec<Request<A>>),
+    SignedPrepare(Verifiable<Prepare>),
+    IngressPrepare(Verifiable<Prepare>),
+    VerifiedPrepare(Verifiable<Prepare>),
+    SignedCommit(Verifiable<Commit>),
+    IngressCommit(Verifiable<Commit>),
+    VerifiedCommit(Verifiable<Commit>),
 }
 
 pub struct Replica<S, N, M, A> {
@@ -212,8 +212,8 @@ pub struct Replica<S, N, M, A> {
     view_num: u32,
     op_num: u32,
     log: Vec<LogEntry<A>>,
-    prepare_quorums: HashMap<u32, HashMap<u8, Signed<Prepare>>>,
-    commit_quorums: HashMap<u32, HashMap<u8, Signed<Commit>>>,
+    prepare_quorums: HashMap<u32, HashMap<u8, Verifiable<Prepare>>>,
+    commit_quorums: HashMap<u32, HashMap<u8, Verifiable<Commit>>>,
     commit_num: u32,
     app: S,
     // op number -> task
@@ -231,10 +231,10 @@ type OnVerified<S> = Box<dyn FnOnce(&mut S) -> anyhow::Result<()> + Send + Sync>
 #[derive(Debug)]
 struct LogEntry<A> {
     view_num: u32,
-    pre_prepare: Option<Signed<PrePrepare>>,
+    pre_prepare: Option<Verifiable<PrePrepare>>,
     requests: Vec<Request<A>>,
-    prepares: Vec<(u8, Signed<Prepare>)>,
-    commits: Vec<(u8, Signed<Commit>)>,
+    prepares: Vec<(u8, Verifiable<Prepare>)>,
+    commits: Vec<(u8, Verifiable<Commit>)>,
 }
 
 impl<A> Default for LogEntry<A> {
@@ -371,7 +371,7 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
 
     fn on_signed_pre_prepare(
         &mut self,
-        pre_prepare: Signed<PrePrepare>,
+        pre_prepare: Verifiable<PrePrepare>,
         requests: Vec<Request<A>>,
     ) -> anyhow::Result<()> {
         if pre_prepare.view_num != self.view_num {
@@ -392,7 +392,7 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
 
     fn on_ingress_pre_prepare(
         &mut self,
-        pre_prepare: Signed<PrePrepare>,
+        pre_prepare: Verifiable<PrePrepare>,
         requests: Vec<Request<A>>,
     ) -> anyhow::Result<()> {
         if pre_prepare.view_num != self.view_num {
@@ -423,7 +423,7 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
 
     fn on_verified_pre_prepare(
         &mut self,
-        pre_prepare: Signed<PrePrepare>,
+        pre_prepare: Verifiable<PrePrepare>,
         requests: Vec<Request<A>>,
     ) -> anyhow::Result<()> {
         if pre_prepare.view_num != self.view_num {
@@ -461,7 +461,7 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
         Ok(())
     }
 
-    fn on_signed_prepare(&mut self, prepare: Signed<Prepare>) -> anyhow::Result<()> {
+    fn on_signed_prepare(&mut self, prepare: Verifiable<Prepare>) -> anyhow::Result<()> {
         if prepare.view_num != self.view_num {
             return Ok(());
         }
@@ -470,7 +470,7 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
         Ok(())
     }
 
-    fn on_ingress_prepare(&mut self, prepare: Signed<Prepare>) -> anyhow::Result<()> {
+    fn on_ingress_prepare(&mut self, prepare: Verifiable<Prepare>) -> anyhow::Result<()> {
         let op_num = prepare.op_num;
         let do_verify = move |this: &mut Self| {
             if prepare.view_num != this.view_num {
@@ -508,7 +508,7 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
         }
     }
 
-    fn on_verified_prepare(&mut self, prepare: Signed<Prepare>) -> anyhow::Result<()> {
+    fn on_verified_prepare(&mut self, prepare: Verifiable<Prepare>) -> anyhow::Result<()> {
         if prepare.view_num != self.view_num {
             return Ok(());
         }
@@ -525,7 +525,7 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
         Ok(())
     }
 
-    fn insert_prepare(&mut self, prepare: Signed<Prepare>) -> anyhow::Result<()> {
+    fn insert_prepare(&mut self, prepare: Verifiable<Prepare>) -> anyhow::Result<()> {
         let prepare_quorum = self.prepare_quorums.entry(prepare.op_num).or_default();
         prepare_quorum.insert(prepare.replica_id, prepare.clone());
         let Some(entry) = self.log.get_mut(prepare.op_num as usize) else {
@@ -555,7 +555,7 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
         }))
     }
 
-    fn on_signed_commit(&mut self, commit: Signed<Commit>) -> anyhow::Result<()> {
+    fn on_signed_commit(&mut self, commit: Verifiable<Commit>) -> anyhow::Result<()> {
         if commit.view_num != self.view_num {
             return Ok(());
         }
@@ -563,7 +563,7 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
         self.insert_commit(commit)
     }
 
-    fn on_ingress_commit(&mut self, commit: Signed<Commit>) -> anyhow::Result<()> {
+    fn on_ingress_commit(&mut self, commit: Verifiable<Commit>) -> anyhow::Result<()> {
         let op_num = commit.op_num;
         let do_verify = move |this: &mut Self| {
             if commit.view_num != this.view_num {
@@ -600,7 +600,7 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
         }
     }
 
-    fn on_verified_commit(&mut self, commit: Signed<Commit>) -> anyhow::Result<()> {
+    fn on_verified_commit(&mut self, commit: Verifiable<Commit>) -> anyhow::Result<()> {
         if commit.view_num != self.view_num {
             return Ok(());
         }
@@ -616,7 +616,7 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
         Ok(())
     }
 
-    fn insert_commit(&mut self, commit: Signed<Commit>) -> anyhow::Result<()> {
+    fn insert_commit(&mut self, commit: Verifiable<Commit>) -> anyhow::Result<()> {
         let commit_quorum = self.commit_quorums.entry(commit.op_num).or_default();
         commit_quorum.insert(commit.replica_id, commit.clone());
         if commit_quorum.len() < self.num_replica - self.num_faulty {
@@ -688,9 +688,9 @@ pub fn to_client_on_buf(sender: &mut impl SendEvent<Reply>, buf: &[u8]) -> anyho
 #[derive(Debug, Clone, Serialize, Deserialize, derive_more::From)]
 pub enum ToReplica<A> {
     Request(Request<A>),
-    PrePrepare(Signed<PrePrepare>, Vec<Request<A>>),
-    Prepare(Signed<Prepare>),
-    Commit(Signed<Commit>),
+    PrePrepare(Verifiable<PrePrepare>, Vec<Request<A>>),
+    Prepare(Verifiable<Prepare>),
+    Commit(Verifiable<Commit>),
 }
 
 pub type ToReplicaMessageNet<T, A> = MessageNet<T, ToReplica<A>>;

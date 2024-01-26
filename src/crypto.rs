@@ -104,16 +104,24 @@ pub type PublicKey = secp256k1::PublicKey;
 pub struct Signature(pub secp256k1::ecdsa::Signature);
 
 #[derive(Debug, Clone, Serialize, Deserialize, derive_more::Deref)]
-pub struct Signed<M> {
+pub struct Verifiable<M> {
     #[deref]
     inner: M,
     signature: Signature,
 }
 
-impl<M> Signed<M> {
+impl<M> Verifiable<M> {
     pub fn into_inner(self) -> M {
         self.inner
     }
+}
+
+pub mod events {
+    #[derive(Debug, Clone, derive_more::Deref, derive_more::From)]
+    pub struct Signed<M>(pub super::Verifiable<M>);
+
+    #[derive(Debug, Clone, derive_more::Deref, derive_more::From)]
+    pub struct Verified<M>(pub super::Verifiable<M>);
 }
 
 impl<I> Crypto<I> {
@@ -168,15 +176,15 @@ impl Crypto<PeerId> {
 }
 
 impl<I> Crypto<I> {
-    pub fn sign<M: DigestHash>(&self, message: M) -> Signed<M> {
+    pub fn sign<M: DigestHash>(&self, message: M) -> Verifiable<M> {
         let digest = secp256k1::Message::from_digest(message.sha256());
-        Signed {
+        Verifiable {
             inner: message,
             signature: Signature(self.secp.sign_ecdsa(&digest, &self.secret_key)),
         }
     }
 
-    pub fn verify<M: DigestHash>(&self, index: &I, signed: &Signed<M>) -> anyhow::Result<()>
+    pub fn verify<M: DigestHash>(&self, index: &I, signed: &Verifiable<M>) -> anyhow::Result<()>
     where
         I: Eq + Hash,
     {
@@ -195,7 +203,7 @@ impl Crypto<PeerId> {
         &self,
         mut peer_id: impl BorrowMut<Option<PeerId>>,
         public_key: &PublicKey,
-        signed: &Signed<M>,
+        signed: &Verifiable<M>,
     ) -> anyhow::Result<()> {
         let claimed_peer_id = peer_id.borrow_mut();
         let peer_id = public_key.sha256();

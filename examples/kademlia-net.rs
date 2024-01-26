@@ -2,13 +2,17 @@ use std::{env::args, net::SocketAddr};
 
 use augustus::{
     crypto::Crypto,
-    event::{SendEvent, Session},
-    kademlia::{self, Buckets, Peer, PeerId},
+    event::{
+        erasured::{Session, SessionSender},
+        SendEvent,
+    },
+    kademlia::{self, Buckets, Peer, PeerId, SendCryptoEvent},
     net::{
-        kademlia::{Control, ControlEvent, Net},
+        events::Recv,
+        kademlia::{Control, Net},
         SendMessage, Udp,
     },
-    worker::spawn_backend,
+    worker::erasured::spawn_backend,
 };
 use bincode::Options;
 use primitive_types::H256;
@@ -17,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{net::UdpSocket, spawn};
 use tokio_util::sync::CancellationToken;
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum Message {
     Kademlia(kademlia::Message<SocketAddr>),
@@ -45,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
     println!("SocketAddr {addr}");
     let socket_net = Udp(socket.into());
 
-    let mut control_session = Session::<ControlEvent<Message, SocketAddr>>::new();
+    let mut control_session = Session::<Control<_, _, _, _>>::new();
     let (crypto_worker, mut crypto_session);
     let peer_id;
     let mut peer;
@@ -71,7 +76,10 @@ async fn main() -> anyhow::Result<()> {
             crypto_worker,
         );
         let cancel = bootstrap_finished.clone();
-        peer.bootstrap(Box::new(move || Ok(cancel.cancel())))?;
+        peer.bootstrap(Box::new(move || {
+            cancel.cancel();
+            Ok(())
+        }))?;
     } else {
         let peer_record = seed_crypto.peer(addr);
         peer_id = peer_record.id;
@@ -88,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
         bootstrap_finished.cancel(); // skip bootstrap on seed peer
     }
 
-    let mut peer_session = Session::<kademlia::Event<SocketAddr>>::new();
+    let mut peer_session = Session::<Peer<_>>::new();
     let mut peer_sender = peer_session.sender();
     let mut peer_net = Net(control_session.sender());
     let hello_session = spawn({
@@ -106,11 +114,11 @@ async fn main() -> anyhow::Result<()> {
             .allow_trailing_bytes()
             .deserialize::<Message>(buf)?;
         match message {
-            Message::Kademlia(kademlia::Message::FindPeer(find_peer)) => {
-                peer_sender.send(kademlia::Event::IngressFindPeer(find_peer))?
+            Message::Kademlia(kademlia::Message::FindPeer(message)) => {
+                peer_sender.send(Recv(message))?
             }
-            Message::Kademlia(kademlia::Message::FindPeerOk(find_peer_ok)) => {
-                peer_sender.send(kademlia::Event::IngressFindPeerOk(find_peer_ok))?
+            Message::Kademlia(kademlia::Message::FindPeerOk(message)) => {
+                peer_sender.send(Recv(message))?
             }
             Message::Hello(peer_id) => {
                 println!("Replying Hello from {}", H256(peer_id));
@@ -123,7 +131,15 @@ async fn main() -> anyhow::Result<()> {
         Ok(())
     });
 
-    let crypto_session = crypto_session.run(peer_session.sender());
+    #[derive(Clone)]
+    struct S(SessionSender<Peer<SocketAddr>>);
+    impl AsMut<dyn SendCryptoEvent<SocketAddr> + Send + Sync + 'static> for S {
+        fn as_mut(&mut self) -> &mut (dyn SendCryptoEvent<SocketAddr> + Send + Sync + 'static) {
+            &mut self.0
+        }
+    }
+
+    let crypto_session = crypto_session.run(S(peer_session.sender()));
     let mut control = Control::<_, Message, _, SocketAddr>::new(
         augustus::net::MessageNet::<_, Message>::new(socket_net.clone()),
         peer_session.sender(),
