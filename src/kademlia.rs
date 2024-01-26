@@ -218,13 +218,20 @@ pub enum Event<A> {
 pub struct QueryResult<A> {
     pub status: QueryStatus,
     pub target: Target,
+    // every peer here has been contacted just now, so they are probably reachable for a while
     pub closest: Vec<PeerRecord<A>>,
 }
 
 #[derive(Debug)]
 pub enum QueryStatus {
     Progress,
+    // termination condition is satisfied
+    // there should be `count` peers in `closest`, and any peer that is closer to any of the peers
+    // in `closest` is either contacted (and thus in `closest`) or unreachable
     Converge,
+    // termination condition is not satisfied, but nothing can be further done
+    // this can either because the total number of discovered peers is less than `count`, otherwise
+    // i'm not sure
     Halted,
 }
 
@@ -508,11 +515,19 @@ impl<N: Net<A>, U: Upcall<A>, A: Addr> Peer<N, U, A> {
         };
         // println!("target {} status {status:?}", H256(target));
         if self.on_bootstrap.is_none() {
-            return self.upcall.send(QueryResult {
-                status,
-                target,
-                closest,
-            });
+            if !self.refresh_targets.contains(&target) {
+                self.upcall.send(QueryResult {
+                    status,
+                    target,
+                    closest,
+                })?
+            } else {
+                // TODO log warning on halted refreshing
+                if matches!(status, QueryStatus::Converge | QueryStatus::Halted) {
+                    self.refresh_targets.remove(&target);
+                }
+            }
+            return Ok(());
         }
         match status {
             QueryStatus::Converge => {}
