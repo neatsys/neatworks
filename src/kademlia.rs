@@ -203,6 +203,9 @@ impl<T: SendMessage<A, Verifiable<FindPeer<A>>> + SendMessage<A, Verifiable<Find
 {
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct Query(pub Target, pub usize);
+
 #[derive(Debug)]
 pub struct QueryResult<A> {
     pub status: QueryStatus,
@@ -317,10 +320,10 @@ impl<A: Addr> Peer<A> {
     }
 }
 
-impl<A: Addr> OnEvent<(PeerId, usize)> for Peer<A> {
+impl<A: Addr> OnEvent<Query> for Peer<A> {
     fn on_event(
         &mut self,
-        (target, count): (PeerId, usize),
+        Query(target, count): Query,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if self.on_bootstrap.is_some() {

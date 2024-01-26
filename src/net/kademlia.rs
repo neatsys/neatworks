@@ -8,7 +8,7 @@ use crate::{
         erased::{OnEvent, Timer},
         SendEvent,
     },
-    kademlia::{PeerId, PeerRecord, QueryResult, QueryStatus, Target},
+    kademlia::{PeerId, PeerRecord, Query, QueryResult, QueryStatus, Target},
 };
 
 use super::{Addr, SendMessage};
@@ -35,7 +35,7 @@ impl<E: SendEvent<(Multicast, M)>, M> SendMessage<Multicast, M> for Net<E> {
 
 pub struct Control<M, A> {
     inner_net: Box<dyn SendMessage<A, M> + Send + Sync>,
-    peer: Box<dyn SendEvent<(PeerId, usize)> + Send + Sync>, // sender handle of a kademlia Peer
+    peer: Box<dyn SendEvent<Query> + Send + Sync>, // sender handle of a kademlia Peer
     querying_unicasts: HashMap<PeerId, Vec<M>>,
     querying_multicasts: HashMap<Target, (usize, Vec<(usize, M)>)>,
     pending_multicasts: HashMap<Target, Vec<(usize, M)>>,
@@ -55,7 +55,7 @@ impl<M, A> Control<M, A> {
     // peer must have finished bootstrap
     pub fn new(
         inner_net: impl SendMessage<A, M> + Send + Sync + 'static,
-        peer: impl SendEvent<(PeerId, usize)> + Send + Sync + 'static,
+        peer: impl SendEvent<Query> + Send + Sync + 'static,
     ) -> Self {
         Self {
             inner_net: Box::new(inner_net),
@@ -82,7 +82,7 @@ impl<M, A: Addr> OnEvent<(PeerId, M)> for Control<M, A> {
                 // the multicast query happens to accomplish the desired query
                 !self.querying_multicasts.contains_key(&peer_id)
             {
-                self.peer.send((peer_id, 1))? // TODO set timer
+                self.peer.send(Query(peer_id, 1))? // TODO set timer
             }
             entry.or_default().push(message);
             Ok(())
@@ -114,7 +114,7 @@ impl<M, A> OnEvent<(Multicast, M)> for Control<M, A> {
                 .push((count, message));
             return Ok(());
         }
-        self.peer.send((target, count))?; // TODO set timer
+        self.peer.send(Query(target, count))?; // TODO set timer
         self.querying_multicasts
             .insert(target, (count, vec![(count, message)]));
         Ok(())
@@ -150,7 +150,7 @@ impl<M: Clone, A: Addr> OnEvent<QueryResult<A>> for Control<M, A> {
             assert!(!self.querying_unicasts.contains_key(&upcall.target));
             assert!(!self.querying_multicasts.contains_key(&upcall.target));
             let count = *multicasts.iter().map(|(count, _)| count).max().unwrap();
-            self.peer.send((upcall.target, count))?; // TODO set timer
+            self.peer.send(Query(upcall.target, count))?; // TODO set timer
             self.querying_multicasts
                 .insert(upcall.target, (count, multicasts));
         }

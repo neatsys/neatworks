@@ -5,6 +5,7 @@ use std::{
 };
 
 use augustus::{
+    blob::{RecvBlob, Transfer},
     crypto::H256,
     event::{
         erased::{OnEvent, Timer},
@@ -55,17 +56,18 @@ impl<
 {
 }
 
-pub trait SendBlob: SendEvent<(PeerId, SendFragment, Vec<u8>)> {}
-impl<T: SendEvent<(PeerId, SendFragment, Vec<u8>)>> SendBlob for T {}
+pub trait TransferBlob: SendEvent<Transfer<PeerId, SendFragment>> {}
+impl<T: SendEvent<Transfer<PeerId, SendFragment>>> TransferBlob for T {}
 
 #[derive(Debug, Clone)]
-pub struct Put([u8; 32], Vec<u8>);
+pub struct Put(pub [u8; 32], pub Vec<u8>);
 #[derive(Debug, Clone)]
-pub struct PutOk([u8; 32]);
+pub struct Get(pub [u8; 32]);
+
 #[derive(Debug, Clone)]
-pub struct Get([u8; 32]);
+pub struct PutOk(pub [u8; 32]);
 #[derive(Debug, Clone)]
-pub struct GetOk([u8; 32], Vec<u8>);
+pub struct GetOk(pub [u8; 32], pub Vec<u8>);
 
 pub trait Upcall: SendEvent<PutOk> + SendEvent<GetOk> {}
 impl<T: SendEvent<PutOk> + SendEvent<GetOk>> Upcall for T {}
@@ -98,10 +100,12 @@ pub struct Peer {
     downloads: HashMap<[u8; 32], DownloadState>,
 
     net: Box<dyn Net + Send + Sync>,
-    blob: Box<dyn SendBlob + Send + Sync>,
+    blob: Box<dyn TransferBlob + Send + Sync>,
     upcall: Box<dyn Upcall + Send + Sync>,
     codec_worker: CodecWorker,
 }
+
+pub type CodecWorker = Worker<(), dyn SendCodecEvent + Send + Sync>;
 
 #[derive(Debug)]
 struct UploadState {
@@ -115,8 +119,6 @@ struct DownloadState {
     pending: HashMap<u32, Vec<u8>>,
     decoded: HashSet<u32>,
 }
-
-pub type CodecWorker = Worker<(), dyn SendCodecEvent + Send + Sync>;
 
 impl Debug for Peer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -217,14 +219,14 @@ impl OnEvent<Encode> for Peer {
             return Ok(());
         };
         let send_fragment = SendFragment { chunk, index };
-        self.blob.send((*peer_id, send_fragment, fragment))
+        self.blob.send(Transfer(*peer_id, send_fragment, fragment))
     }
 }
 
-impl OnEvent<(SendFragment, Vec<u8>)> for Peer {
+impl OnEvent<RecvBlob<SendFragment>> for Peer {
     fn on_event(
         &mut self,
-        (send_fragment, fragment): (SendFragment, Vec<u8>),
+        RecvBlob(send_fragment, fragment): RecvBlob<SendFragment>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if let Some(state) = self.downloads.get_mut(&send_fragment.chunk) {
