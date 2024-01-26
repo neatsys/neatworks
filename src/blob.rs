@@ -106,3 +106,6 @@ pub async fn session<A, M: Send + 'static>(
         }
     }
 }
+
+pub trait SendRecvEvent<M>: SendEvent<Recv<Serve<M>>> {}
+impl<T: SendEvent<Recv<Serve<M>>>, M> SendRecvEvent<M> for T {}

@@ -4,7 +4,6 @@ use std::{
     iter::repeat_with,
 };
 
-use bincode::Options;
 use primitive_types::{H256, U256};
 use secp256k1::PublicKey;
 use serde::{Deserialize, Serialize};
@@ -622,13 +621,11 @@ fn rand_distance(index: usize, rng: &mut impl rand::Rng) -> U256 {
     U256::from_little_endian(&bytes)
 }
 
-#[derive(Debug, Clone, derive_more::From, Serialize, Deserialize)]
-pub enum Message<A> {
-    FindPeer(Verifiable<FindPeer<A>>),
-    FindPeerOk(Verifiable<FindPeerOk<A>>),
-}
-
-pub type MessageNet<T, A> = crate::net::MessageNet<T, Message<A>>;
+// #[derive(Debug, Clone, derive_more::From, Serialize, Deserialize)]
+// pub enum Message<A> {
+//     FindPeer(Verifiable<FindPeer<A>>),
+//     FindPeerOk(Verifiable<FindPeerOk<A>>),
+// }
 
 pub trait SendRecvEvent<A>:
     SendEvent<Recv<Verifiable<FindPeer<A>>>> + SendEvent<Recv<Verifiable<FindPeerOk<A>>>>
@@ -639,16 +636,6 @@ impl<
         A,
     > SendRecvEvent<A> for T
 {
-}
-
-pub fn on_buf<A: Addr>(sender: &mut impl SendRecvEvent<A>, buf: &[u8]) -> anyhow::Result<()> {
-    let message = bincode::options()
-        .allow_trailing_bytes()
-        .deserialize::<Message<A>>(buf)?;
-    match message {
-        Message::FindPeer(message) => sender.send(Recv(message)),
-        Message::FindPeerOk(message) => sender.send(Recv(message)),
-    }
 }
 
 #[cfg(test)]

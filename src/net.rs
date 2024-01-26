@@ -116,3 +116,10 @@ impl<T: SendMessage<A, Bytes>, A, M: Into<N>, N: Serialize> SendMessage<A, M> fo
         self.0.send(dest, buf)
     }
 }
+
+pub fn deserialize<M: DeserializeOwned>(buf: &[u8]) -> anyhow::Result<M> {
+    bincode::options()
+        .allow_trailing_bytes()
+        .deserialize(buf)
+        .map_err(Into::into)
+}

@@ -1,12 +1,12 @@
 use std::{env::args, net::SocketAddr};
 
 use augustus::{
-    crypto::Crypto,
+    crypto::{Crypto, Verifiable},
     event::{
         erased::{Session, SessionSender},
         SendEvent,
     },
-    kademlia::{self, Buckets, Peer, PeerId, SendCryptoEvent},
+    kademlia::{Buckets, FindPeer, FindPeerOk, Peer, PeerId, SendCryptoEvent},
     net::{
         events::Recv,
         kademlia::{Control, Multicast, Net},
@@ -22,27 +22,18 @@ use tokio::{net::UdpSocket, spawn};
 use tokio_util::sync::CancellationToken;
 
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, derive_more::From)]
 enum Message {
-    Kademlia(kademlia::Message<SocketAddr>),
+    FindPeer(Verifiable<FindPeer<SocketAddr>>),
+    FindPeerOk(Verifiable<FindPeerOk<SocketAddr>>),
+    #[from(ignore)]
     Hello(PeerId),
     HelloOk,
+    #[from(ignore)]
     Join(PeerId),
 }
 
-struct MessageNet<T>(T);
-
-impl<T: SendMessage<SocketAddr, Vec<u8>>, N> SendMessage<SocketAddr, N> for MessageNet<T>
-where
-    N: Into<kademlia::Message<SocketAddr>>,
-{
-    fn send(&mut self, dest: SocketAddr, message: N) -> anyhow::Result<()> {
-        self.0.send(
-            dest,
-            bincode::options().serialize(&Message::Kademlia(message.into()))?,
-        )
-    }
-}
+type MessageNet<T> = augustus::net::MessageNet<T, Message>;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
@@ -72,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
         buckets.insert(seed_peer);
         peer = Peer::new(
             buckets,
-            MessageNet(socket_net.clone()),
+            MessageNet::new(socket_net.clone()),
             control_session.sender(),
             crypto_worker,
         );
@@ -90,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
         let buckets = Buckets::new(peer_record);
         peer = Peer::new(
             buckets,
-            MessageNet(socket_net.clone()),
+            MessageNet::new(socket_net.clone()),
             control_session.sender(),
             crypto_worker,
         );
@@ -115,12 +106,8 @@ async fn main() -> anyhow::Result<()> {
             .allow_trailing_bytes()
             .deserialize::<Message>(buf)?;
         match message {
-            Message::Kademlia(kademlia::Message::FindPeer(message)) => {
-                peer_sender.send(Recv(message))?
-            }
-            Message::Kademlia(kademlia::Message::FindPeerOk(message)) => {
-                peer_sender.send(Recv(message))?
-            }
+            Message::FindPeer(message) => peer_sender.send(Recv(message))?,
+            Message::FindPeerOk(message) => peer_sender.send(Recv(message))?,
             Message::Hello(peer_id) => {
                 println!("Replying Hello from {}", H256(peer_id));
                 peer_net.send(peer_id, Message::HelloOk)?;

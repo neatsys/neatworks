@@ -136,7 +136,7 @@ async fn client_session<S: OnEvent<M> + Send + 'static, M: Send + 'static>(
         ReplicaNet<Udp, SocketAddr>,
         SessionSender<ConcurrentEvent>,
     ) -> S,
-    on_buf: impl Fn(&mut SessionSender<M>, &[u8]) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
+    on_buf: impl Fn(&[u8], &mut SessionSender<M>) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
     benchmark_result: Arc<Mutex<Option<BenchmarkResult>>>,
 ) -> anyhow::Result<()>
 where
@@ -164,7 +164,7 @@ where
         concurrent.insert_client_sender(client_id, session.sender())?;
         let mut sender = session.sender();
         let on_buf = on_buf.clone();
-        sessions.spawn(async move { net.recv_session(|buf| on_buf(&mut sender, buf)).await });
+        sessions.spawn(async move { net.recv_session(|buf| on_buf(buf, &mut sender)).await });
         sessions.spawn(async move { session.run(&mut state).await });
     }
     concurrent.launch()?;
@@ -260,7 +260,7 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
 
 async fn replica_session<M: Send + 'static>(
     mut state: impl OnEvent<M> + Send + 'static,
-    on_buf: impl Fn(&mut SessionSender<M>, &[u8]) -> anyhow::Result<()> + Send + Sync + 'static,
+    on_buf: impl Fn(&[u8], &mut SessionSender<M>) -> anyhow::Result<()> + Send + Sync + 'static,
     net: Udp,
     mut crypto_executor: SpawnExecutor<Crypto<u8>, M>,
     cancel: CancellationToken,
@@ -268,7 +268,7 @@ async fn replica_session<M: Send + 'static>(
     let mut session = Session::new();
     let mut recv_session = spawn({
         let mut sender = session.sender();
-        async move { net.recv_session(|buf| on_buf(&mut sender, buf)).await }
+        async move { net.recv_session(|buf| on_buf(buf, &mut sender)).await }
     });
     let mut crypto_session = spawn({
         let sender = session.sender();

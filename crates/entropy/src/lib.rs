@@ -5,16 +5,17 @@ use std::{
 };
 
 use augustus::{
-    blob::{RecvBlob, Transfer},
-    crypto::H256,
+    blob::{self, RecvBlob, Serve, Transfer},
+    crypto::{Verifiable, H256},
     event::{
         erased::{OnEvent, Timer},
         SendEvent,
     },
-    kademlia::PeerId,
-    net::{events::Recv, kademlia::Multicast, SendMessage},
+    kademlia::{self, FindPeer, FindPeerOk, PeerId},
+    net::{deserialize, events::Recv, kademlia::Multicast, Addr, SendMessage},
     worker::erased::Worker,
 };
+
 use serde::{Deserialize, Serialize};
 use wirehair::{Decoder, Encoder};
 
@@ -90,6 +91,9 @@ impl<T: SendEvent<NewEncoder> + SendEvent<Encode> + SendEvent<Decode> + SendEven
 {
 }
 
+pub trait SendFsEvent: SendEvent<fs::Store> + SendEvent<fs::Load> {}
+impl<T: SendEvent<fs::Store> + SendEvent<fs::Load>> SendFsEvent for T {}
+
 pub struct Peer {
     id: PeerId,
     fragment_len: usize,
@@ -98,11 +102,13 @@ pub struct Peer {
 
     uploads: HashMap<[u8; 32], UploadState>,
     downloads: HashMap<[u8; 32], DownloadState>,
+    persists: HashMap<[u8; 32], PersistState>,
 
     net: Box<dyn Net + Send + Sync>,
     blob: Box<dyn TransferBlob + Send + Sync>,
     upcall: Box<dyn Upcall + Send + Sync>,
     codec_worker: CodecWorker,
+    fs: Box<dyn SendFsEvent + Send + Sync>,
 }
 
 pub type CodecWorker = Worker<(), dyn SendCodecEvent + Send + Sync>;
@@ -118,6 +124,19 @@ struct DownloadState {
     decoder: Option<Decoder>,
     pending: HashMap<u32, Vec<u8>>,
     decoded: HashSet<u32>,
+}
+
+#[derive(Debug)]
+struct PersistState {
+    index: u32,
+    status: PersistStatus,
+}
+
+#[derive(Debug)]
+enum PersistStatus {
+    Recovering(Option<Decoder>),
+    Storing,
+    Available,
 }
 
 impl Debug for Peer {
@@ -324,6 +343,143 @@ impl OnEvent<Recover> for Peer {
             self.upcall.send(GetOk(chunk, buf))
         } else {
             todo!()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, derive_more::From)]
+pub enum Message<A> {
+    Invite(Invite),
+    InviteOk(InviteOk),
+    Pull(Pull),
+
+    FindPeer(Verifiable<FindPeer<A>>),
+    FindPeerOk(Verifiable<FindPeerOk<A>>),
+
+    BlobServe(Serve<SendFragment>),
+}
+
+pub type MessageNet<T, A> = augustus::net::MessageNet<T, Message<A>>;
+
+pub trait SendRecvEvent:
+    SendEvent<Recv<Invite>> + SendEvent<Recv<InviteOk>> + SendEvent<Recv<Pull>>
+{
+}
+impl<T: SendEvent<Recv<Invite>> + SendEvent<Recv<InviteOk>> + SendEvent<Recv<Pull>>> SendRecvEvent
+    for T
+{
+}
+
+pub fn on_buf<A: Addr>(
+    buf: &[u8],
+    entropy_sender: &mut impl SendRecvEvent,
+    kademlia_sender: &mut impl kademlia::SendRecvEvent<A>,
+    blob_sender: &mut impl blob::SendRecvEvent<SendFragment>,
+) -> anyhow::Result<()> {
+    match deserialize(buf)? {
+        Message::Invite(message) => entropy_sender.send(Recv(message)),
+        Message::InviteOk(message) => entropy_sender.send(Recv(message)),
+        Message::Pull(message) => entropy_sender.send(Recv(message)),
+        Message::FindPeer(message) => kademlia_sender.send(Recv(message)),
+        Message::FindPeerOk(message) => kademlia_sender.send(Recv(message)),
+        Message::BlobServe(message) => blob_sender.send(Recv(message)),
+    }
+}
+
+pub mod fs {
+    use std::{fmt::Debug, path::Path};
+
+    use augustus::{crypto::H256, event::SendEvent};
+    use tokio::{
+        fs::{create_dir, read, remove_dir_all, write},
+        sync::mpsc::UnboundedReceiver,
+        task::JoinSet,
+    };
+
+    #[derive(Clone)]
+    pub struct Store(pub [u8; 32], pub u32, pub Vec<u8>);
+
+    impl Debug for Store {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Store")
+                .field("chunk", &H256(self.0))
+                .field("index", &self.1)
+                .field("data", &format!("<{} bytes>", self.2.len()))
+                .finish()
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    // Load(chunk, index, true) will delete fragment file while loading
+    // not particual useful in practice, but good for evaluation with bounded storage usage
+    pub struct Load(pub [u8; 32], pub u32, pub bool);
+
+    #[derive(Debug, Clone)]
+    pub struct StoreOk(pub [u8; 32]);
+
+    #[derive(Clone)]
+    pub struct LoadOk(pub [u8; 32], pub u32, pub Vec<u8>);
+
+    impl Debug for LoadOk {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("LoadOk")
+                .field("chunk", &H256(self.0))
+                .field("index", &self.1)
+                .field("data", &format!("<{} bytes>", self.2.len()))
+                .finish()
+        }
+    }
+
+    #[derive(Debug, Clone, derive_more::From)]
+    pub enum Event {
+        Store(Store),
+        Load(Load),
+    }
+
+    pub trait Upcall: SendEvent<StoreOk> + SendEvent<LoadOk> {}
+    impl<T: SendEvent<StoreOk> + SendEvent<LoadOk>> Upcall for T {}
+
+    pub async fn session(
+        path: impl AsRef<Path>,
+        mut events: UnboundedReceiver<Event>,
+        mut upcall: impl Upcall,
+    ) -> anyhow::Result<()> {
+        let mut store_tasks = JoinSet::<anyhow::Result<_>>::new();
+        let mut load_tasks = JoinSet::<anyhow::Result<_>>::new();
+        loop {
+            enum Select {
+                Recv(Event),
+                JoinNextStore([u8; 32]),
+                JoinNextLoad(([u8; 32], u32, Vec<u8>)),
+            }
+            match tokio::select! {
+                event = events.recv() => Select::Recv(event.ok_or(anyhow::anyhow!("channel closed"))?),
+                Some(result) = store_tasks.join_next() => Select::JoinNextStore(result??),
+                Some(result) = load_tasks.join_next() => Select::JoinNextLoad(result??),
+            } {
+                Select::Recv(Event::Store(Store(chunk, index, fragment))) => {
+                    let chunk_path = path.as_ref().join(format!("{:x}", H256(chunk)));
+                    store_tasks.spawn(async move {
+                        create_dir(&chunk_path).await?;
+                        write(chunk_path.join(index.to_string()), fragment).await?;
+                        Ok(chunk)
+                    });
+                }
+                Select::Recv(Event::Load(Load(chunk, index, take))) => {
+                    let chunk_path = path.as_ref().join(format!("{:x}", H256(chunk)));
+                    load_tasks.spawn(async move {
+                        let fragment = read(chunk_path.join(index.to_string())).await?;
+                        if take {
+                            remove_dir_all(chunk_path).await?
+                        }
+                        Ok((chunk, index, fragment))
+                    });
+                }
+                Select::JoinNextStore(chunk) => upcall.send(StoreOk(chunk))?,
+                Select::JoinNextLoad((chunk, index, fragment)) => {
+                    upcall.send(LoadOk(chunk, index, fragment))?
+                }
+            }
         }
     }
 }

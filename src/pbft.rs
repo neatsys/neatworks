@@ -1,13 +1,12 @@
 use std::{collections::HashMap, fmt::Debug, time::Duration};
 
-use bincode::Options as _;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     app::App,
     crypto::{Crypto, DigestHash as _, Verifiable},
     event::{OnEvent, SendEvent, Timer, TimerId},
-    net::{Addr, MessageNet, SendMessage},
+    net::{deserialize, Addr, MessageNet, SendMessage},
     replication::{AllReplica, Request},
     worker::Worker,
 };
@@ -680,9 +679,8 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
 
 pub type ToClientMessageNet<T> = MessageNet<T, Reply>;
 
-pub fn to_client_on_buf(sender: &mut impl SendEvent<Reply>, buf: &[u8]) -> anyhow::Result<()> {
-    let message = bincode::options().allow_trailing_bytes().deserialize(buf)?;
-    sender.send(message)
+pub fn to_client_on_buf(buf: &[u8], sender: &mut impl SendEvent<Reply>) -> anyhow::Result<()> {
+    sender.send(deserialize(buf)?)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, derive_more::From)]
@@ -696,10 +694,10 @@ pub enum ToReplica<A> {
 pub type ToReplicaMessageNet<T, A> = MessageNet<T, ToReplica<A>>;
 
 pub fn to_replica_on_buf<A: Addr>(
-    sender: &mut impl SendEvent<ReplicaEvent<A>>,
     buf: &[u8],
+    sender: &mut impl SendEvent<ReplicaEvent<A>>,
 ) -> anyhow::Result<()> {
-    match bincode::options().allow_trailing_bytes().deserialize(buf)? {
+    match deserialize(buf)? {
         ToReplica::Request(message) => sender.send(ReplicaEvent::IngressRequest(message)),
         ToReplica::PrePrepare(message, requests) => {
             sender.send(ReplicaEvent::IngressPrePrepare(message, requests))

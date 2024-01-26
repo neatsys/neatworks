@@ -75,3 +75,7 @@ pub mod worker;
 // have further system requirements. currently there's `crates/entropy` that
 // requires cmake, llvm-dev, libclang-dev and clang to be present. there may be
 // another crate for dpdk stuff later
+//
+// well, not particular useful note, but this codebase can make so much use of
+// trait alias. if some day i surprisingly switch to nightly toolchain, this
+// must be a huge reason for it
