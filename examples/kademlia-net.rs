@@ -6,7 +6,7 @@ use augustus::{
         erased::{Session, SessionSender},
         SendEvent,
     },
-    kademlia::{Buckets, FindPeer, FindPeerOk, Peer, PeerId, SendCryptoEvent},
+    kademlia::{Buckets, FindPeer, FindPeerOk, Peer, PeerId, PeerRecord, SendCryptoEvent},
     net::{
         events::Recv,
         kademlia::{Control, Multicast, PeerNet},
@@ -52,13 +52,13 @@ async fn main() -> anyhow::Result<()> {
     let seed_crypto = Crypto::new_random(&mut StdRng::seed_from_u64(117418));
     if let Some(seed_addr) = args().nth(1) {
         let crypto = Crypto::new_random(&mut thread_rng());
-        let peer_record = crypto.peer(addr);
+        let peer_record = PeerRecord::new(crypto.public_key(), addr);
         peer_id = peer_record.id;
         println!("PeerId {}", H256(peer_id));
         (crypto_worker, crypto_session) = spawn_backend(crypto);
 
         let mut buckets = Buckets::new(peer_record);
-        let seed_peer = seed_crypto.peer(seed_addr.parse()?);
+        let seed_peer = PeerRecord::new(seed_crypto.public_key(), seed_addr.parse()?);
         send_hello = Some(seed_peer.id);
         buckets.insert(seed_peer);
         peer = Peer::new(
@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }))?;
     } else {
-        let peer_record = seed_crypto.peer(addr);
+        let peer_record = PeerRecord::new(seed_crypto.public_key(), addr);
         peer_id = peer_record.id;
         println!("SEED PeerId {}", H256(peer_id));
         (crypto_worker, crypto_session) = spawn_backend(seed_crypto);

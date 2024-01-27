@@ -8,26 +8,15 @@ use tokio::{
 use crate::event::SendEvent;
 
 // any explicit support for async work i.e. Pin<Box<dyn Future<...> + ...>>?
-// currently it has been "kind of" supported by e.g.
+// currently it probably can be supported with erased Work i.e.
 // Work<tokio's Runtime, tokio's Sender>, move async block into closure, spawn
 // a task with the runtime that captures it and a cloned sender, await it, then
 // pass reply message(s) through the sender
-// it's only kind of supported because currently `dyn SendEvent<M>` actually
-// cannot be cloned (and probably never will since some impl literally cannot),
-// so we will need to abstract it (back) away and let user specify their desired
-// constratins for a second `&mut E` parameter of the closure e.g.
-// `SendEvent<M> + Clone + Send + 'static`
-// also, construct the async task locally/eagerly before submission may also
-// expose some differences, not sure
+// there's no way to propagate errors from detacked tasks though
 // anyway, `Worker` is for parallelism. if the work is async for concurrency,
 // directly working with `impl OnEvent`s is more reasonable
 pub type Work<S, M> =
     Box<dyn FnOnce(&S, &mut dyn SendEvent<M>) -> anyhow::Result<()> + Send + Sync>;
-
-pub trait Work2<S, M> {
-    // TODO allow implementors to specify additional requirements on `E`
-    fn execute<E>(self, state: &S, sender: &mut E) -> anyhow::Result<()>;
-}
 
 #[derive(Debug)]
 pub struct SpawnExecutor<S, M> {

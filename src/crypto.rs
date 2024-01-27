@@ -7,7 +7,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::kademlia::{PeerId, PeerRecord};
+use crate::kademlia::PeerId;
 
 // Hashed based digest deriving solution
 // There's no well known solution for deriving digest methods to general
@@ -171,13 +171,13 @@ impl Crypto<PeerId> {
             secp,
         }
     }
-
-    pub fn peer<A>(&self, addr: A) -> PeerRecord<A> {
-        PeerRecord::new(self.secret_key.public_key(&self.secp), addr)
-    }
 }
 
 impl<I> Crypto<I> {
+    pub fn public_key(&self) -> PublicKey {
+        self.secret_key.public_key(&self.secp)
+    }
+
     pub fn sign<M: DigestHash>(&self, message: M) -> Verifiable<M> {
         let digest = secp256k1::Message::from_digest(message.sha256());
         Verifiable {
