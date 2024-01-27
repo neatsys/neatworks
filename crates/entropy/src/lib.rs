@@ -96,13 +96,14 @@ impl<T: SendEvent<fs::Store> + SendEvent<fs::Load>> SendFsEvent for T {}
 
 pub struct Peer {
     id: PeerId,
-    fragment_len: usize,
-    chunk_k: u32,
-    chunk_n: u32,
+    fragment_len: u32,
+    chunk_k: usize,
+    chunk_n: usize,
 
     uploads: HashMap<[u8; 32], UploadState>,
     downloads: HashMap<[u8; 32], DownloadState>,
     persists: HashMap<[u8; 32], PersistState>,
+    pending_pulls: HashMap<[u8; 32], Vec<PeerId>>,
 
     net: Box<dyn Net + Send + Sync>,
     blob: Box<dyn TransferBlob + Send + Sync>,
@@ -121,9 +122,27 @@ struct UploadState {
 
 #[derive(Debug)]
 struct DownloadState {
+    recover: RecoverState,
+}
+
+#[derive(Debug)]
+struct RecoverState {
     decoder: Option<Decoder>,
     pending: HashMap<u32, Vec<u8>>,
-    decoded: HashSet<u32>,
+    received: HashSet<u32>,
+}
+
+impl RecoverState {
+    fn new(fragment_len: u32, chunk_k: usize) -> anyhow::Result<Self> {
+        Ok(Self {
+            decoder: Some(Decoder::new(
+                fragment_len as u64 * chunk_k as u64,
+                fragment_len,
+            )?),
+            pending: Default::default(),
+            received: Default::default(),
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -134,7 +153,7 @@ struct PersistState {
 
 #[derive(Debug)]
 enum PersistStatus {
-    Recovering(Option<Decoder>),
+    Recovering(RecoverState),
     Storing,
     Available,
 }
@@ -147,7 +166,7 @@ impl Debug for Peer {
 
 impl OnEvent<Put> for Peer {
     fn on_event(&mut self, Put(chunk, buf): Put, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
-        if buf.len() != self.fragment_len * self.chunk_k as usize {
+        if buf.len() != self.fragment_len as usize * self.chunk_k {
             anyhow::bail!(
                 "expect chunk len {} * {}, actual {}",
                 self.fragment_len,
@@ -155,8 +174,9 @@ impl OnEvent<Put> for Peer {
                 buf.len()
             )
         }
+        let fragment_len = self.fragment_len;
         self.codec_worker.submit(Box::new(move |(), sender| {
-            let encoder = Encoder::new(&buf, 1)?;
+            let encoder = Encoder::new(&buf, fragment_len)?;
             sender.send(NewEncoder(chunk, encoder))
         }))
     }
@@ -192,13 +212,21 @@ impl OnEvent<Recv<Invite>> for Peer {
         Recv(invite): Recv<Invite>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        // technically this is fine, just for simplifing things
+        // technically this is fine, just for more stable evaluation
+        // the PUT/GET peers are expected to perform additional object-level codec
+        // exclude them from chunk-level workload prevents performance interference
         if invite.peer_id == self.id {
             return Ok(());
         }
+        let index = 0; // TODO
+        self.persists.entry(invite.chunk).or_insert(PersistState {
+            index,
+            status: PersistStatus::Recovering(RecoverState::new(self.fragment_len, self.chunk_k)?),
+        });
+        // TODO provide a way to supress unnecessary following `SendFragment`
         let invite_ok = InviteOk {
             chunk: invite.chunk,
-            index: 0, // TODO
+            index,
             proof: (),
             peer_id: self.id,
         };
@@ -249,36 +277,72 @@ impl OnEvent<RecvBlob<SendFragment>> for Peer {
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if let Some(state) = self.downloads.get_mut(&send_fragment.chunk) {
-            if !state.decoded.insert(send_fragment.index) {
+            return state.recover.submit_decode(
+                send_fragment.chunk,
+                send_fragment.index,
+                fragment,
+                &self.codec_worker,
+            );
+        }
+        if let Some(state) = self.persists.get_mut(&send_fragment.chunk) {
+            let PersistStatus::Recovering(recover) = &mut state.status else {
                 return Ok(());
+            };
+            if send_fragment.index == state.index {
+                state.status = PersistStatus::Storing;
+                return self
+                    .fs
+                    .send(fs::Store(send_fragment.chunk, state.index, fragment));
             }
-            if let Some(decoder) = state.decoder.take() {
-                self.submit_decode(decoder, send_fragment.chunk, send_fragment.index, fragment)?
-            } else {
-                state.pending.insert(send_fragment.index, fragment);
-            }
-            Ok(())
+            return recover.submit_decode(
+                send_fragment.chunk,
+                send_fragment.index,
+                fragment,
+                &self.codec_worker,
+            );
+        }
+        Ok(())
+    }
+}
+
+impl RecoverState {
+    fn submit_decode(
+        &mut self,
+        chunk: [u8; 32],
+        index: u32,
+        fragment: Vec<u8>,
+        worker: &CodecWorker,
+    ) -> Result<(), anyhow::Error> {
+        if !self.received.insert(index) {
+            return Ok(());
+        }
+        if let Some(mut decoder) = self.decoder.take() {
+            worker.submit(Box::new(move |(), sender| {
+                if decoder.decode(index, &fragment)? {
+                    sender.send(Decode(chunk, decoder))
+                } else {
+                    sender.send(Recover(chunk, decoder.recover()?))
+                }
+            }))
         } else {
-            todo!()
+            self.pending.insert(index, fragment);
+            Ok(())
         }
     }
 }
 
-impl Peer {
-    fn submit_decode(
+impl OnEvent<fs::StoreOk> for Peer {
+    fn on_event(
         &mut self,
-        mut decoder: Decoder,
-        chunk: [u8; 32],
-        index: u32,
-        fragment: Vec<u8>,
-    ) -> Result<(), anyhow::Error> {
-        self.codec_worker.submit(Box::new(move |(), sender| {
-            if decoder.decode(index, &fragment)? {
-                sender.send(Decode(chunk, decoder))
-            } else {
-                sender.send(Recover(chunk, decoder.recover()?))
-            }
-        }))
+        fs::StoreOk(chunk): fs::StoreOk,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
+        let Some(state) = self.persists.get_mut(&chunk) else {
+            // is this ok?
+            return Ok(());
+        };
+        state.status = PersistStatus::Available;
+        Ok(()) // TODO reply
     }
 }
 
@@ -287,12 +351,7 @@ impl OnEvent<Get> for Peer {
         let replaced = self.downloads.insert(
             chunk,
             DownloadState {
-                decoder: Some(Decoder::new(
-                    (self.fragment_len * self.chunk_k as usize) as _,
-                    self.fragment_len as _,
-                )?),
-                pending: Default::default(),
-                decoded: Default::default(),
+                recover: RecoverState::new(self.fragment_len, self.chunk_k)?,
             },
         );
         if replaced.is_some() {
@@ -308,6 +367,37 @@ impl OnEvent<Get> for Peer {
 
 impl OnEvent<Recv<Pull>> for Peer {
     fn on_event(&mut self, Recv(pull): Recv<Pull>, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
+        let Some(state) = self.persists.get(&pull.chunk) else {
+            return Ok(());
+        };
+        if !matches!(state.status, PersistStatus::Available) {
+            return Ok(());
+        }
+        self.pending_pulls
+            .entry(pull.chunk)
+            .or_default()
+            .push(pull.peer_id);
+        self.fs.send(fs::Load(pull.chunk, state.index, true))
+    }
+}
+
+impl OnEvent<fs::LoadOk> for Peer {
+    fn on_event(
+        &mut self,
+        fs::LoadOk(chunk, index, fragment): fs::LoadOk,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
+        let Some(pending) = self.pending_pulls.remove(&chunk) else {
+            return Ok(());
+        };
+        let send_fragment = SendFragment { chunk, index };
+        for peer_id in pending {
+            // cloning overhead can be mitigate with `Bytes`, but `Transfer` then need to accept
+            // any `impl Buf` which seems nontrivial
+            // the number of pending peers will be 1 anyway
+            self.blob
+                .send(Transfer(peer_id, send_fragment.clone(), fragment.clone()))?
+        }
         Ok(())
     }
 }
@@ -319,17 +409,28 @@ impl OnEvent<Decode> for Peer {
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if let Some(state) = self.downloads.get_mut(&chunk) {
-            assert!(state.decoder.is_none());
-            if let Some(&index) = state.pending.keys().next() {
-                let fragment = state.pending.remove(&index).unwrap();
-                self.submit_decode(decoder, chunk, index, fragment)?
-            } else {
-                state.decoder = Some(decoder)
-            }
-            Ok(())
+            state.recover.on_decode(chunk, decoder, &self.codec_worker)
         } else {
             Ok(())
         }
+    }
+}
+
+impl RecoverState {
+    fn on_decode(
+        &mut self,
+        chunk: [u8; 32],
+        decoder: Decoder,
+        worker: &CodecWorker,
+    ) -> anyhow::Result<()> {
+        assert!(self.decoder.is_none());
+        if let Some(&index) = self.pending.keys().next() {
+            let fragment = self.pending.remove(&index).unwrap();
+            self.submit_decode(chunk, index, fragment, worker)?
+        } else {
+            self.decoder = Some(decoder)
+        }
+        Ok(())
     }
 }
 
