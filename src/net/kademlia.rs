@@ -1,6 +1,7 @@
 use std::{
     collections::{hash_map::Entry, HashMap},
     fmt::Debug,
+    num::NonZeroUsize,
 };
 
 use crate::{
@@ -23,7 +24,7 @@ impl<E: SendEvent<(PeerId, M)>, M> SendMessage<PeerId, M> for PeerNet<E> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Multicast(pub Target, pub usize);
+pub struct Multicast(pub Target, pub NonZeroUsize);
 
 // is it useful to have a variant that suppress loopback?
 
@@ -40,8 +41,8 @@ pub struct Control<M, A> {
     inner_net: Box<dyn Net<A, M> + Send + Sync>,
     peer: Box<dyn SendEvent<Query> + Send + Sync>, // sender handle of a kademlia Peer
     querying_unicasts: HashMap<PeerId, Vec<M>>,
-    querying_multicasts: HashMap<Target, (usize, Vec<(usize, M)>)>,
-    pending_multicasts: HashMap<Target, Vec<(usize, M)>>,
+    querying_multicasts: HashMap<Target, (NonZeroUsize, Vec<(NonZeroUsize, M)>)>,
+    pending_multicasts: HashMap<Target, Vec<(NonZeroUsize, M)>>,
     records: HashMap<PeerId, PeerRecord<A>>,
 }
 
@@ -85,7 +86,7 @@ impl<M, A: Addr> OnEvent<(PeerId, M)> for Control<M, A> {
                 // the multicast query happens to accomplish the desired query
                 !self.querying_multicasts.contains_key(&peer_id)
             {
-                self.peer.send(Query(peer_id, 1))? // TODO set timer
+                self.peer.send(Query(peer_id, 1.try_into().unwrap()))? // TODO set timer
             }
             entry.or_default().push(message);
             Ok(())
@@ -146,7 +147,7 @@ impl<M: Clone, A: Addr> OnEvent<QueryResult<A>> for Control<M, A> {
                 let addrs = upcall
                     .closest
                     .iter()
-                    .take(count)
+                    .take(count.into())
                     .map(|record| record.addr.clone());
                 self.inner_net.send_to_each(addrs, message.clone())?
             }

@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::Debug,
+    num::NonZeroUsize,
     sync::Arc,
 };
 
@@ -120,10 +121,10 @@ impl<T: SendEvent<fs::Store> + SendEvent<fs::Load>> SendFsEvent for T {}
 pub struct Peer {
     id: PeerId,
     fragment_len: u32,
-    chunk_k: usize, // the number of honest peers to recover a chunk
+    chunk_k: NonZeroUsize, // the number of honest peers to recover a chunk
     // the number of peers that, with high probablity at least `k` peers of them are honest
-    chunk_n: usize,
-    chunk_m: usize, // the number of peers that Put peer send Invite to
+    chunk_n: NonZeroUsize,
+    chunk_m: NonZeroUsize, // the number of peers that Put peer send Invite to
     // `n` should be derived from `k` and the upper bound of faulty portion
     // `m` should be derived from `n` and the upper bound of faulty portion, because Put can only
     // be concluded when at least `n` peers replies FragmentAvailable, and the worst case is that
@@ -171,10 +172,10 @@ struct RecoverState {
 }
 
 impl RecoverState {
-    fn new(fragment_len: u32, chunk_k: usize) -> anyhow::Result<Self> {
+    fn new(fragment_len: u32, chunk_k: NonZeroUsize) -> anyhow::Result<Self> {
         Ok(Self {
             decoder: Some(Decoder::new(
-                fragment_len as u64 * chunk_k as u64,
+                fragment_len as u64 * chunk_k.get() as u64,
                 fragment_len,
             )?),
             pending: Default::default(),
@@ -205,7 +206,7 @@ impl Debug for Peer {
 
 impl OnEvent<Put> for Peer {
     fn on_event(&mut self, Put(chunk, buf): Put, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
-        if buf.len() != self.fragment_len as usize * self.chunk_k {
+        if buf.len() != self.fragment_len as usize * self.chunk_k.get() {
             anyhow::bail!(
                 "expect chunk len {} * {}, actual {}",
                 self.fragment_len,
@@ -440,7 +441,7 @@ impl OnEvent<Recv<Verifiable<FragmentAvailable>>> for Peer {
             return Ok(());
         }
         state.available.insert(fragment_available.peer_id);
-        if state.available.len() == self.chunk_n {
+        if state.available.len() == self.chunk_n.into() {
             self.uploads.remove(&fragment_available.chunk);
             self.upcall.send(PutOk(fragment_available.chunk))?
         }

@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Debug,
     iter::repeat_with,
+    num::NonZeroUsize,
 };
 
 use primitive_types::{H256, U256};
@@ -143,7 +144,7 @@ impl<A: Addr> Buckets<A> {
         Some(record)
     }
 
-    fn find_closest(&self, target: &Target, count: usize) -> Vec<PeerRecord<A>> {
+    fn find_closest(&self, target: &Target, count: NonZeroUsize) -> Vec<PeerRecord<A>> {
         let mut records = Vec::new();
         let index = self.index(target);
         let origin_distance = distance(&self.origin.id, target);
@@ -165,9 +166,9 @@ impl<A: Addr> Buckets<A> {
                 index_records.push(self.origin.clone())
             }
             index_records.sort_unstable_by_key(|record| distance(&record.id, target));
-            records.extend(index_records.into_iter().take(count - records.len()));
-            assert!(records.len() <= count);
-            if records.len() == count {
+            records.extend(index_records.into_iter().take(count.get() - records.len()));
+            assert!(records.len() <= count.into());
+            if records.len() == count.into() {
                 break;
             }
         }
@@ -181,7 +182,7 @@ impl<A: Addr> Buckets<A> {
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]
 pub struct FindPeer<A> {
     target: Target,
-    count: usize,
+    count: NonZeroUsize,
     record: PeerRecord<A>,
 }
 
@@ -205,7 +206,7 @@ impl<
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct Query(pub Target, pub usize);
+pub struct Query(pub Target, pub NonZeroUsize);
 
 #[derive(Debug)]
 pub struct QueryResult<A> {
@@ -317,7 +318,7 @@ impl<A: Addr> Peer<A> {
         }
         self.on_bootstrap = Some(on_bootstrap);
         let target = self.record.id;
-        self.start_query(&target, BUCKET_SIZE)
+        self.start_query(&target, BUCKET_SIZE.try_into().unwrap())
     }
 }
 
@@ -338,7 +339,7 @@ impl<A: Addr> OnEvent<Query> for Peer<A> {
 }
 
 impl<A: Addr> Peer<A> {
-    fn start_query(&self, target: &Target, count: usize) -> anyhow::Result<()> {
+    fn start_query(&self, target: &Target, count: NonZeroUsize) -> anyhow::Result<()> {
         // println!("start query {} {count}", primitive_types::H256(*target));
         let find_peer = FindPeer {
             target: *target,
@@ -359,9 +360,10 @@ impl<A: Addr> OnEvent<Signed<FindPeer<A>>> for Peer<A> {
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let target = find_peer.target;
-        let records = self
-            .buckets
-            .find_closest(&target, find_peer.count.max(NUM_CONCURRENCY));
+        let records = self.buckets.find_closest(
+            &target,
+            find_peer.count.max(NUM_CONCURRENCY.try_into().unwrap()),
+        );
         if records.is_empty() {
             anyhow::bail!("empty buckets when finding {}", H256(target))
         }
@@ -509,7 +511,7 @@ impl<A: Addr> OnEvent<Verified<FindPeerOk<A>>> for Peer<A> {
             .records
             .iter()
             .filter(|record| state.contacted.contains(&record.id))
-            .take(state.find_peer.count)
+            .take(state.find_peer.count.into())
             .cloned()
             .collect();
         let status = 'upcall: {
@@ -518,7 +520,7 @@ impl<A: Addr> OnEvent<Verified<FindPeerOk<A>>> for Peer<A> {
                 .iter()
                 .take_while(|record| state.contacted.contains(&record.id))
                 .count();
-            if count >= state.find_peer.count {
+            if count >= state.find_peer.count.into() {
                 self.query_states.remove(&target);
                 break 'upcall QueryStatus::Converge;
             }
@@ -573,7 +575,7 @@ impl<A: Addr> OnEvent<Verified<FindPeerOk<A>>> for Peer<A> {
             let removed = self.refresh_targets.remove(&target);
             assert!(removed);
             if let Some(target) = self.refresh_targets.iter().next() {
-                self.start_query(target, BUCKET_SIZE)
+                self.start_query(target, BUCKET_SIZE.try_into().unwrap())
             } else {
                 self.on_bootstrap.take().unwrap()()
             }
@@ -604,7 +606,7 @@ impl<A: Addr> Peer<A> {
         // maybe docker's loopback network is too bad, but mitigating transient performance
         // degradation caused by refreshing is still generally good to have
         if let Some(target) = self.refresh_targets.iter().next() {
-            self.start_query(target, BUCKET_SIZE)?
+            self.start_query(target, BUCKET_SIZE.try_into().unwrap())?
         }
         Ok(())
     }
@@ -663,7 +665,7 @@ mod tests {
             buckets.insert(PeerRecord::new(public_key, ()))
         }
         for _ in 0..1000 {
-            let records = buckets.find_closest(&rand::random(), 20);
+            let records = buckets.find_closest(&rand::random(), 20.try_into().unwrap());
             assert_eq!(records.len(), 20)
         }
         Ok(())

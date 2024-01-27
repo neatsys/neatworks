@@ -111,7 +111,10 @@ async fn main() -> anyhow::Result<()> {
             Message::Hello(peer_id) => {
                 println!("Replying Hello from {}", H256(peer_id));
                 peer_net.send(peer_id, Message::HelloOk)?;
-                peer_net.send(Multicast(peer_id, 3), Message::Join(peer_id))?
+                peer_net.send(
+                    Multicast(peer_id, 3.try_into().unwrap()),
+                    Message::Join(peer_id),
+                )?
             }
             Message::HelloOk => {
                 println!("Received HelloOk")
