@@ -79,3 +79,18 @@ pub mod worker;
 // well, not particular useful note, but this codebase can make so much use of
 // trait alias. if some day i surprisingly switch to nightly toolchain, this
 // must be a huge reason for it
+//
+// previously there's essential difference between `SendEvent` and
+// `SendMessage`: the `Addr` was an associated type. after i realize that the
+// address may not be unique for certain implementations, `SendMessage<A, M>`
+// is almost equivalent as `SendEvent<(A, M)>`. this is exactly what certain
+// nets e.g. `PeerNet` are doing
+//
+// i choose to not build universal connection between them because they are
+// expected to be used in different context: `SendEvent` probably sends to local
+// receipant i.e. `impl OnEvent`, thus it's possible to work with type-erased
+// events; `SendMessage` on contrast sends to "the outside world", so the
+// sending cannot be directly hooked up with the consuming and type erasure
+// cannot be performed. if multiple `M`s has been `impl SendMessage<A, M>`, then
+// they are probably get unified into single representation as the shared "wire
+// format" e.g. enum variants.

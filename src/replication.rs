@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     event::{OnEvent, SendEvent, Timer},
-    net::{Addr, IterAddr, SendMessage},
+    net::{Addr, SendMessage, SendMessageToEach, SendMessageToEachExt as _},
 };
 
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]
@@ -144,11 +144,11 @@ impl<N: SendMessage<A, M>, A: Addr, M> SendMessage<u8, M> for ReplicaNet<N, A> {
 #[derive(Debug)]
 pub struct AllReplica;
 
-impl<N: for<'a> SendMessage<IterAddr<'a, A>, M>, A: Addr, M> SendMessage<AllReplica, M>
+impl<N: for<'a> SendMessageToEach<A, M>, A: Addr, M> SendMessage<AllReplica, M>
     for ReplicaNet<N, A>
 {
     fn send(&mut self, AllReplica: AllReplica, message: M) -> anyhow::Result<()> {
-        let mut addrs = self
+        let addrs = self
             .replica_addrs
             .iter()
             .enumerate()
@@ -159,6 +159,6 @@ impl<N: for<'a> SendMessage<IterAddr<'a, A>, M>, A: Addr, M> SendMessage<AllRepl
                     Some(addr.clone())
                 }
             });
-        self.inner_net.send(IterAddr(&mut addrs), message)
+        self.inner_net.send_to_each(addrs, message)
     }
 }

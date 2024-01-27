@@ -11,7 +11,7 @@ use crate::{
     kademlia::{PeerId, PeerRecord, Query, QueryResult, QueryStatus, Target},
 };
 
-use super::{Addr, IterAddr, SendMessage};
+use super::{Addr, SendMessage, SendMessageToEach, SendMessageToEachExt as _};
 
 #[derive(Debug, Clone)]
 pub struct PeerNet<E>(pub E);
@@ -33,8 +33,8 @@ impl<E: SendEvent<(Multicast, M)>, M> SendMessage<Multicast, M> for PeerNet<E> {
     }
 }
 
-pub trait Net<A, M>: SendMessage<A, M> + for<'a> SendMessage<IterAddr<'a, A>, M> {}
-impl<T: SendMessage<A, M> + for<'a> SendMessage<IterAddr<'a, A>, M>, A, M> Net<A, M> for T {}
+pub trait Net<A, M>: SendMessage<A, M> + for<'a> SendMessageToEach<A, M> {}
+impl<T: SendMessage<A, M> + for<'a> SendMessageToEach<A, M>, A, M> Net<A, M> for T {}
 
 pub struct Control<M, A> {
     inner_net: Box<dyn Net<A, M> + Send + Sync>,
@@ -143,12 +143,12 @@ impl<M: Clone, A: Addr> OnEvent<QueryResult<A>> for Control<M, A> {
         }
         if let Some((_, multicasts)) = self.querying_multicasts.remove(&upcall.target) {
             for (count, message) in multicasts {
-                let mut addrs = upcall
+                let addrs = upcall
                     .closest
                     .iter()
                     .take(count)
                     .map(|record| record.addr.clone());
-                self.inner_net.send(IterAddr(&mut addrs), message.clone())?
+                self.inner_net.send_to_each(addrs, message.clone())?
             }
         }
         // assert at least one branch above has been entered

@@ -39,6 +39,12 @@ impl<T: AsRef<[u8]> + Send + Sync + Clone + 'static> Buf for T {}
 // sending trait anymore. nevertheless, constrait type parameters with them
 // manually when necessary
 
+// it's obvious that `M` is not required to `impl Buf` for all cases, but `A`
+// is neither required to `impl Addr` for all cases
+// only the "public" `A`s, e.g. the ones that are sent as part of network
+// messages, are required to `impl Addr`, because e.g. network messages demand
+// it
+// perhaps `Addr` is not the best name for the trait
 pub trait SendMessage<A, M> {
     // an alternative choice is to accept `message: &M` to avoid overhead of moving large messages,
     // since structural messages needs to be serialized before sent, which usually can be done
@@ -67,8 +73,19 @@ pub trait SendMessage<A, M> {
 // codebase "address" has been abused and certain address iterator e.g.
 // IterAddr<AllReplica> does not really make sense
 pub struct IterAddr<'a, A>(pub &'a mut dyn Iterator<Item = A>);
-pub trait SendMessageToEach<A, M>: for<'a> SendMessage<IterAddr<'a, A>, M> {} // TODO better name
+// TODO better name
+pub trait SendMessageToEach<A, M>: for<'a> SendMessage<IterAddr<'a, A>, M> {}
 impl<T: for<'a> SendMessage<IterAddr<'a, A>, M>, A, M> SendMessageToEach<A, M> for T {}
+pub trait SendMessageToEachExt<A, M>: SendMessageToEach<A, M> {
+    fn send_to_each(
+        &mut self,
+        mut addrs: impl Iterator<Item = A>,
+        message: M,
+    ) -> anyhow::Result<()> {
+        SendMessage::send(self, IterAddr(&mut addrs), message)
+    }
+}
+impl<T: ?Sized + SendMessageToEach<A, M>, A, M> SendMessageToEachExt<A, M> for T {}
 
 pub mod events {
     #[derive(Debug, Clone, derive_more::Deref, derive_more::From)]
@@ -94,6 +111,9 @@ impl Udp {
 impl<B: Buf> SendMessage<SocketAddr, B> for Udp {
     fn send(&mut self, dest: SocketAddr, buf: B) -> anyhow::Result<()> {
         let socket = self.0.clone();
+        // a broken error propagation here. nothing can observe the failure of `send_to`
+        // by definition `SendMessage` is one-way (i.e. no complete notification) unreliable net
+        // interface, so this is fine, just kindly note the fact
         tokio::spawn(async move { socket.send_to(buf.as_ref(), dest).await.unwrap() });
         Ok(())
     }
@@ -137,6 +157,7 @@ impl<T, M> From<T> for MessageNet<T, M> {
 
 impl<T: SendMessage<A, Bytes>, A, M: Into<N>, N: Serialize> SendMessage<A, M> for MessageNet<T, N> {
     fn send(&mut self, dest: A, message: M) -> anyhow::Result<()> {
+        // the `dest` may be an IterAddr, use Bytes to reduce cloning overhead
         let buf = Bytes::from(bincode::options().serialize(&message.into())?);
         self.0.send(dest, buf)
     }

@@ -17,7 +17,7 @@ use crate::{
         erased::{OnEvent, Timer},
         SendEvent,
     },
-    net::{events::Recv, Addr, IterAddr, SendMessage},
+    net::{events::Recv, Addr, SendMessage, SendMessageToEach, SendMessageToEachExt as _},
     worker::erased::Worker,
 };
 
@@ -194,13 +194,11 @@ pub struct FindPeerOk<A> {
 }
 
 pub trait Net<A>:
-    for<'a> SendMessage<IterAddr<'a, A>, Verifiable<FindPeer<A>>>
-    + SendMessage<A, Verifiable<FindPeerOk<A>>>
+    SendMessageToEach<A, Verifiable<FindPeer<A>>> + SendMessage<A, Verifiable<FindPeerOk<A>>>
 {
 }
 impl<
-        T: for<'a> SendMessage<IterAddr<'a, A>, Verifiable<FindPeer<A>>>
-            + SendMessage<A, Verifiable<FindPeerOk<A>>>,
+        T: SendMessageToEach<A, Verifiable<FindPeer<A>>> + SendMessage<A, Verifiable<FindPeerOk<A>>>,
         A,
     > Net<A> for T
 {
@@ -382,8 +380,7 @@ impl<A: Addr> OnEvent<Signed<FindPeer<A>>> for Peer<A> {
         if replaced.is_some() {
             anyhow::bail!("concurrent query to {}", H256(target))
         }
-        self.net
-            .send(IterAddr(&mut contacting.into_values()), find_peer)
+        self.net.send_to_each(contacting.into_values(), find_peer)
     }
 }
 
@@ -541,7 +538,7 @@ impl<A: Addr> OnEvent<Verified<FindPeerOk<A>>> for Peer<A> {
             }
             if !addrs.is_empty() {
                 self.net
-                    .send(IterAddr(&mut addrs.into_iter()), state.find_peer.clone())?
+                    .send_to_each(addrs.into_iter(), state.find_peer.clone())?
             }
             QueryStatus::Progress
         };
@@ -645,6 +642,8 @@ impl<
 
 #[cfg(test)]
 mod tests {
+    use crate::net::IterAddr;
+
     use super::*;
 
     #[test]
