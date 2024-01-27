@@ -54,6 +54,22 @@ pub trait SendMessage<A, M> {
     fn send(&mut self, dest: A, message: M) -> anyhow::Result<()>;
 }
 
+// i have realized that this will always be used as
+// `IterAddr<&mut dyn Iterator<Item = A>>`, so change the definition to make it
+// more usable
+// #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// pub struct IterAddr<I>(pub I);
+
+// this is usable enough, just still feels not very decent, and performance will
+// be limited, certainly
+// it may seem like a default implementation of SendMessage<IterAddr<A>, M>
+// should be provided as long as SendMessage<A, M> and M is Clone. but in this
+// codebase "address" has been abused and certain address iterator e.g.
+// IterAddr<AllReplica> does not really make sense
+pub struct IterAddr<'a, A>(pub &'a mut dyn Iterator<Item = A>);
+pub trait SendMessageToEach<A, M>: for<'a> SendMessage<IterAddr<'a, A>, M> {} // TODO better name
+impl<T: for<'a> SendMessage<IterAddr<'a, A>, M>, A, M> SendMessageToEach<A, M> for T {}
+
 pub mod events {
     #[derive(Debug, Clone, derive_more::Deref, derive_more::From)]
     pub struct Recv<M>(pub M);
@@ -79,6 +95,15 @@ impl<B: Buf> SendMessage<SocketAddr, B> for Udp {
     fn send(&mut self, dest: SocketAddr, buf: B) -> anyhow::Result<()> {
         let socket = self.0.clone();
         tokio::spawn(async move { socket.send_to(buf.as_ref(), dest).await.unwrap() });
+        Ok(())
+    }
+}
+
+impl<B: Buf> SendMessage<IterAddr<'_, SocketAddr>, B> for Udp {
+    fn send(&mut self, dest: IterAddr<'_, SocketAddr>, buf: B) -> anyhow::Result<()> {
+        for addr in dest.0 {
+            self.send(addr, buf.clone())?
+        }
         Ok(())
     }
 }

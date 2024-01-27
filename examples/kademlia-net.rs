@@ -9,7 +9,7 @@ use augustus::{
     kademlia::{Buckets, FindPeer, FindPeerOk, Peer, PeerId, SendCryptoEvent},
     net::{
         events::Recv,
-        kademlia::{Control, Multicast, Net},
+        kademlia::{Control, Multicast, PeerNet},
         SendMessage, Udp,
     },
     worker::erased::spawn_backend,
@@ -90,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut peer_session = Session::<Peer<_>>::new();
     let mut peer_sender = peer_session.sender();
-    let mut peer_net = Net(control_session.sender());
+    let mut peer_net = PeerNet(control_session.sender());
     let hello_session = spawn({
         let mut peer_net = peer_net.clone();
         async move {

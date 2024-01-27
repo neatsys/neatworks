@@ -17,7 +17,7 @@ use crate::{
         erased::{OnEvent, Timer},
         SendEvent,
     },
-    net::{events::Recv, Addr, SendMessage},
+    net::{events::Recv, Addr, IterAddr, SendMessage},
     worker::erased::Worker,
 };
 
@@ -194,11 +194,15 @@ pub struct FindPeerOk<A> {
 }
 
 pub trait Net<A>:
-    SendMessage<A, Verifiable<FindPeer<A>>> + SendMessage<A, Verifiable<FindPeerOk<A>>>
+    for<'a> SendMessage<IterAddr<'a, A>, Verifiable<FindPeer<A>>>
+    + SendMessage<A, Verifiable<FindPeerOk<A>>>
 {
 }
-impl<T: SendMessage<A, Verifiable<FindPeer<A>>> + SendMessage<A, Verifiable<FindPeerOk<A>>>, A>
-    Net<A> for T
+impl<
+        T: for<'a> SendMessage<IterAddr<'a, A>, Verifiable<FindPeer<A>>>
+            + SendMessage<A, Verifiable<FindPeerOk<A>>>,
+        A,
+    > Net<A> for T
 {
 }
 
@@ -378,11 +382,8 @@ impl<A: Addr> OnEvent<Signed<FindPeer<A>>> for Peer<A> {
         if replaced.is_some() {
             anyhow::bail!("concurrent query to {}", H256(target))
         }
-        for addr in contacting.into_values() {
-            // println!("send find_peer to {addr:?}");
-            self.net.send(addr, find_peer.clone())?
-        }
-        Ok(())
+        self.net
+            .send(IterAddr(&mut contacting.into_values()), find_peer)
     }
 }
 
@@ -528,6 +529,7 @@ impl<A: Addr> OnEvent<Verified<FindPeerOk<A>>> for Peer<A> {
                 self.query_states.remove(&target);
                 break 'upcall QueryStatus::Halted;
             }
+            let mut addrs = Vec::new();
             while state.contacting.len() < NUM_CONCURRENCY {
                 let Some(record) = state.records.iter().find(|record| {
                     !state.contacted.contains(&record.id) && !state.contacting.contains(&record.id)
@@ -535,8 +537,11 @@ impl<A: Addr> OnEvent<Verified<FindPeerOk<A>>> for Peer<A> {
                     break;
                 };
                 state.contacting.insert(record.id);
+                addrs.push(record.addr.clone());
+            }
+            if !addrs.is_empty() {
                 self.net
-                    .send(record.addr.clone(), state.find_peer.clone())?
+                    .send(IterAddr(&mut addrs.into_iter()), state.find_peer.clone())?
             }
             QueryStatus::Progress
         };
@@ -674,8 +679,8 @@ mod tests {
     }
 
     struct NullNet;
-    impl SendMessage<(), Verifiable<FindPeer<()>>> for NullNet {
-        fn send(&mut self, (): (), _: Verifiable<FindPeer<()>>) -> anyhow::Result<()> {
+    impl SendMessage<IterAddr<'_, ()>, Verifiable<FindPeer<()>>> for NullNet {
+        fn send(&mut self, _: IterAddr<'_, ()>, _: Verifiable<FindPeer<()>>) -> anyhow::Result<()> {
             Ok(())
         }
     }

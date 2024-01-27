@@ -231,7 +231,7 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
             }
             Protocol::Pbft => {
                 let (crypto_worker, crypto_executor) = spawn_backend(crypto);
-                let state = pbft::Replica::new(
+                let state = pbft::Replica::<_, _, _, SocketAddr>::new(
                     config.replica_id,
                     Null,
                     pbft::ToReplicaMessageNet::new(ReplicaNet::new(

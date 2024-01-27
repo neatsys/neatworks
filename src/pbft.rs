@@ -141,7 +141,7 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
     }
 
     fn on_resend_timeout(&mut self) -> anyhow::Result<()> {
-        // TODO logging
+        println!("Resend timeout on seq {}", self.seq);
         self.do_send(AllReplica)
     }
 

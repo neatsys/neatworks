@@ -11,12 +11,12 @@ use crate::{
     kademlia::{PeerId, PeerRecord, Query, QueryResult, QueryStatus, Target},
 };
 
-use super::{Addr, SendMessage};
+use super::{Addr, IterAddr, SendMessage};
 
 #[derive(Debug, Clone)]
-pub struct Net<E>(pub E);
+pub struct PeerNet<E>(pub E);
 
-impl<E: SendEvent<(PeerId, M)>, M> SendMessage<PeerId, M> for Net<E> {
+impl<E: SendEvent<(PeerId, M)>, M> SendMessage<PeerId, M> for PeerNet<E> {
     fn send(&mut self, dest: PeerId, message: M) -> anyhow::Result<()> {
         self.0.send((dest, message))
     }
@@ -27,14 +27,17 @@ pub struct Multicast(pub Target, pub usize);
 
 // is it useful to have a variant that suppress loopback?
 
-impl<E: SendEvent<(Multicast, M)>, M> SendMessage<Multicast, M> for Net<E> {
+impl<E: SendEvent<(Multicast, M)>, M> SendMessage<Multicast, M> for PeerNet<E> {
     fn send(&mut self, dest: Multicast, message: M) -> anyhow::Result<()> {
         self.0.send((dest, message))
     }
 }
 
+pub trait Net<A, M>: SendMessage<A, M> + for<'a> SendMessage<IterAddr<'a, A>, M> {}
+impl<T: SendMessage<A, M> + for<'a> SendMessage<IterAddr<'a, A>, M>, A, M> Net<A, M> for T {}
+
 pub struct Control<M, A> {
-    inner_net: Box<dyn SendMessage<A, M> + Send + Sync>,
+    inner_net: Box<dyn Net<A, M> + Send + Sync>,
     peer: Box<dyn SendEvent<Query> + Send + Sync>, // sender handle of a kademlia Peer
     querying_unicasts: HashMap<PeerId, Vec<M>>,
     querying_multicasts: HashMap<Target, (usize, Vec<(usize, M)>)>,
@@ -54,7 +57,7 @@ impl<M: Debug, A: Debug> Debug for Control<M, A> {
 impl<M, A> Control<M, A> {
     // peer must have finished bootstrap
     pub fn new(
-        inner_net: impl SendMessage<A, M> + Send + Sync + 'static,
+        inner_net: impl Net<A, M> + Send + Sync + 'static,
         peer: impl SendEvent<Query> + Send + Sync + 'static,
     ) -> Self {
         Self {
@@ -140,9 +143,12 @@ impl<M: Clone, A: Addr> OnEvent<QueryResult<A>> for Control<M, A> {
         }
         if let Some((_, multicasts)) = self.querying_multicasts.remove(&upcall.target) {
             for (count, message) in multicasts {
-                for record in upcall.closest.iter().take(count) {
-                    self.inner_net.send(record.addr.clone(), message.clone())?
-                }
+                let mut addrs = upcall
+                    .closest
+                    .iter()
+                    .take(count)
+                    .map(|record| record.addr.clone());
+                self.inner_net.send(IterAddr(&mut addrs), message.clone())?
             }
         }
         // assert at least one branch above has been entered

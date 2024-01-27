@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     event::{OnEvent, SendEvent, Timer},
-    net::{Addr, Buf, SendMessage},
+    net::{Addr, IterAddr, SendMessage},
 };
 
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]
@@ -141,23 +141,24 @@ impl<N: SendMessage<A, M>, A: Addr, M> SendMessage<u8, M> for ReplicaNet<N, A> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct AllReplica;
 
-// intentionally (seems unnecessarily) restrict message type to `Buf` instead
-// of just `Clone`
-// broadcast should be performed after serialization to avoid duplicated
-// serialization pitfall
-// in another word, always wrap a raw net with `ReplicaNet` first, then desired
-// message net
-impl<N: SendMessage<A, B>, A: Addr, B: Buf> SendMessage<AllReplica, B> for ReplicaNet<N, A> {
-    fn send(&mut self, AllReplica: AllReplica, message: B) -> anyhow::Result<()> {
-        for (id, dest) in self.replica_addrs.iter().enumerate() {
-            if self.all_except == Some(id) {
-                continue;
-            }
-            self.inner_net.send(dest.clone(), message.clone())?
-        }
-        Ok(())
+impl<N: for<'a> SendMessage<IterAddr<'a, A>, M>, A: Addr, M> SendMessage<AllReplica, M>
+    for ReplicaNet<N, A>
+{
+    fn send(&mut self, AllReplica: AllReplica, message: M) -> anyhow::Result<()> {
+        let mut addrs = self
+            .replica_addrs
+            .iter()
+            .enumerate()
+            .filter_map(|(id, addr)| {
+                if self.all_except == Some(id) {
+                    None
+                } else {
+                    Some(addr.clone())
+                }
+            });
+        self.inner_net.send(IterAddr(&mut addrs), message)
     }
 }
