@@ -188,6 +188,9 @@ impl<M: Send + 'static> Timer<M> for Session<M> {
         self.timer_id += 1;
         let timer_id = self.timer_id;
         let sender = self.sender.clone();
+        // broken error propagation in detached task
+        // the error probably only happens when session exits, which (currently) only happens when
+        // some (more essential) error happens
         let timer = tokio::spawn(async move {
             tokio::time::sleep(duration).await;
             sender.send(SessionEvent::Timer(timer_id, event)).unwrap();

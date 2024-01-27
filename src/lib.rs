@@ -45,7 +45,7 @@ pub mod worker;
 // decide to choose the type parameter since it make better use of the compiler
 //
 // when working with these traits, either to keep type parameters or make them
-// into trait objects is mostly by personal tastes. (at least when most traits
+// into trait objects is mostly a matter of taste. (at least when most traits
 // can be made into trait objects.) there are certain cases where a type
 // parameter must be inroduced e.g. when it is propagated across interfaces, and
 // ther are also other cases where a trait object must be used e.g. when sending
@@ -94,3 +94,51 @@ pub mod worker;
 // cannot be performed. if multiple `M`s has been `impl SendMessage<A, M>`, then
 // they are probably get unified into single representation as the shared "wire
 // format" e.g. enum variants.
+//
+// i feel sorry to have so many `anyhow::Result<()>` all over the codebase. i
+// should have aliased it so i foreseed it's this many. nevertheless, i guess
+// the enhancement of std error will not get stablized in any time soon, so
+// there still a long time before i need to consider replace these results with
+// `Result<(), Box<dyn Error + Send + Sync>>`. probably the codebase has been
+// gone before that
+//
+// the error rules are roughly:
+//   use panic when it suppose to not panic. it's kind of in the same situation
+//   of unsafe in this codebase: i know and guarantee it is safe/not going to
+//   panic, but cannot convince compiler because of the lack of expressiveness,
+//   so i assert it to compiler. one decent example is to "pop" a random entry
+//   from hash map
+//     if let Some(k) = m.keys().next() { let v = m.remove(k).unwrap(); }
+//   another is to turn non-zero integer literal into NonZero* type
+//
+//   use unstructured/ad-hoc error i.e. anyhow::anyhow!() when there's no upper
+//   layer can handle that error, and it suppose to lead to crash. the
+//   oppotunity of making such conclusion is usually rare, but in this codebase
+//   i happen to get a lot of chance, since myself is the only downstream user
+//   of the library part of code. actually, all errors has been unstructured
+//   until now, and the very first ones that are likely to be turned into
+//   structured errors are the ones for disconnected channels. those are usually
+//   because of unexpected exiting that caused by some other, root errors, so
+//   filter them off helps focus on other meaningful errors
+//
+//   and lastly, create on-demand structured errors when it is required to be
+//   downcast and captured. in some sense unstructured error offers more
+//   information on control flow: it always leads to program termination, and
+//   should never happen when evaluation goes as expect, so it is preferred over
+//   structured error
+//
+// the boundary between panic and unstructured error becomes blur: they both
+// should never happen when everything goes well, but also both are still
+// possible to happen (for panic it is when i make mistakes), so the artifacts
+// must be prepared for both to happen and try their best to do reliable
+// crashing. this is the main reason that i used to only do panic in the past.
+// (the other reason is panic has builtin backtrace support, which denimished
+// after anyhow supports backtrace in stable.)
+//
+// tentatively the rule of thumb is that, when things indeed go unexpectedly, if
+// i will tend to rule out the unexpected case and stick on the original
+// assumption, then go with panic (which is also aligned with the intent
+// of assert!(); the most concise equivalent `if (...) { anyhow::bail!() }`` is
+// still too verbose); otherwise, propagate the error. in another word, whoever
+// causes the panic take responsibility of consolidating the "truth"; propagate
+// if the truth cannot/should not be built around this layer

@@ -381,6 +381,7 @@ dependencies = [
  "derive_more",
  "serde",
  "tokio",
+ "tokio-util",
  "wirehair",
 ]
 
