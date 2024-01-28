@@ -10,7 +10,9 @@ anyhow = { version = "1.0.79", features = ["backtrace"] }
 augustus = { version = "0.1.0", path = "../.." }
 axum = "0.7.4"
 derive_more = "0.99.17"
+entropy-control-messages = { version = "0.1.0", path = "../../tools/entropy-control-messages" }
+rand = "0.8.5"
 serde = { version = "1.0.195", features = ["derive"] }
-tokio = { version = "1.35.1", features = ["rt", "fs", "macros", "sync"] }
+tokio = { version = "1.35.1", features = ["rt", "fs", "macros", "sync", "rt-multi-thread"] }
 tokio-util = "0.7.10"
 wirehair = { git = "https://github.com/sgdxbc/wirehair", version = "0.1.0" }

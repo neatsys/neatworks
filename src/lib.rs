@@ -132,8 +132,15 @@ pub mod worker;
 // possible to happen (for panic it is when i make mistakes), so the artifacts
 // must be prepared for both to happen and try their best to do reliable
 // crashing. this is the main reason that i used to only do panic in the past.
-// (the other reason is panic has builtin backtrace support, which denimished
-// after anyhow supports backtrace in stable.)
+// the other reasons include panic has builtin backtrace support, which (
+// denimished after anyhow supports backtrace in stable), and panic is reported
+// when it's happening (no matter whether or not get caught later), so it's very
+// convenient to reliably both crash and report by using panic and
+// `panic = "abort"` in cargo config. The latter has disadvantage of panic
+// messages mess up when there's multiple panic happens (why not locking
+// standard error before reporting? guess for the case where execution panic
+// while holding the standard error lock). also, `panic = "abort"` does not work
+// well with test profile, so test cases behavior will diverge from expectation
 //
 // tentatively the rule of thumb is that, when things indeed go unexpectedly, if
 // i will tend to rule out the unexpected case and stick on the original
@@ -142,3 +149,8 @@ pub mod worker;
 // still too verbose); otherwise, propagate the error. in another word, whoever
 // causes the panic take responsibility of consolidating the "truth"; propagate
 // if the truth cannot/should not be built around this layer
+//
+// it feels like no much difference to panic or return error from top level
+// routine, so the choice is mostly credit to convenience: it's easier to return
+// error from a regular `main` function, but for axum server handlers, panic
+// is probably the easier one

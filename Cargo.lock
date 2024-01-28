@@ -379,10 +379,19 @@ dependencies = [
  "augustus",
  "axum",
  "derive_more",
+ "entropy-control-messages",
+ "rand",
  "serde",
  "tokio",
  "tokio-util",
  "wirehair",
+]
+
+[[package]]
+name = "entropy-control-messages"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

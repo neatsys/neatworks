@@ -236,28 +236,25 @@ pub mod erased {
         fn on_event(&mut self, event: M, timer: &mut impl Timer<Self>) -> anyhow::Result<()>;
     }
 
-    type Event<S> = Box<dyn FnOnce(&mut S, &mut Session<S>) -> anyhow::Result<()> + Send + Sync>;
+    impl<S: SendEvent<M>, M> OnEvent<M> for S {
+        fn on_event(&mut self, event: M, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
+            self.send(event)
+        }
+    }
+
+    pub struct Inline<'a, S: ?Sized, T: ?Sized>(pub &'a mut S, pub &'a mut T);
+
+    impl<S: OnEvent<M>, M, T: Timer<S>> SendEvent<M> for Inline<'_, S, T> {
+        fn send(&mut self, event: M) -> anyhow::Result<()> {
+            self.0.on_event(event, self.1)
+        }
+    }
+
+    // TODO convert to enum when there's second implementation
+    pub type Sender<S> = SessionSender<S>;
 
     #[derive(Debug)]
-    pub struct Sender<'a, M, S>(&'a UnboundedSender<M>, std::marker::PhantomData<S>);
-
-    impl<'a, M, S> Sender<'a, M, S> {
-        pub fn new(inner: &'a UnboundedSender<M>) -> Self {
-            Self(inner, Default::default())
-        }
-    }
-
-    impl<S: OnEvent<M> + 'static, M: Send + Sync + 'static, N> SendEvent<M> for Sender<'_, N, S>
-    where
-        Event<S>: Into<N>,
-    {
-        fn send(&mut self, event: M) -> anyhow::Result<()> {
-            let event = move |state: &mut S, timer: &mut _| state.on_event(event, timer);
-            self.0
-                .send((Box::new(event) as Event<_>).into())
-                .map_err(|_| anyhow::anyhow!("channel closed"))
-        }
-    }
+    pub struct SessionSender<S>(UnboundedSender<SessionEvent<S>>);
 
     #[derive(derive_more::From)]
     enum SessionEvent<S: ?Sized> {
@@ -265,8 +262,7 @@ pub mod erased {
         Other(Event<S>),
     }
 
-    #[derive(Debug)]
-    pub struct SessionSender<S>(UnboundedSender<SessionEvent<S>>);
+    type Event<S> = Box<dyn FnOnce(&mut S, &mut Session<S>) -> anyhow::Result<()> + Send + Sync>;
 
     impl<S> Clone for SessionSender<S> {
         fn clone(&self) -> Self {
@@ -276,7 +272,10 @@ pub mod erased {
 
     impl<S: OnEvent<M> + 'static, M: Send + Sync + 'static> SendEvent<M> for SessionSender<S> {
         fn send(&mut self, event: M) -> anyhow::Result<()> {
-            Sender::new(&self.0).send(event)
+            let event = move |state: &mut S, timer: &mut _| state.on_event(event, timer);
+            self.0
+                .send((Box::new(event) as Event<_>).into())
+                .map_err(|_| anyhow::anyhow!("channel closed"))
         }
     }
 
