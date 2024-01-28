@@ -115,6 +115,17 @@ impl<
 {
 }
 
+#[derive(Debug, Clone)]
+pub struct SendCodec<E>(pub E);
+
+impl<'a, E: SendCodecEvent + Send + Sync + 'a> AsMut<dyn SendCodecEvent + Send + Sync + 'a>
+    for SendCodec<E>
+{
+    fn as_mut(&mut self) -> &mut (dyn SendCodecEvent + Send + Sync + 'a) {
+        &mut self.0
+    }
+}
+
 pub trait SendFsEvent: SendEvent<fs::Store> + SendEvent<fs::Load> {}
 impl<T: SendEvent<fs::Store> + SendEvent<fs::Load>> SendFsEvent for T {}
 
@@ -201,6 +212,41 @@ enum PersistStatus {
 impl Debug for Peer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Peer").finish_non_exhaustive()
+    }
+}
+
+impl Peer {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: PeerId,
+        crypto: Crypto<PeerId>,
+        fragment_len: u32,
+        chunk_k: NonZeroUsize,
+        chunk_n: NonZeroUsize,
+        chunk_m: NonZeroUsize,
+        net: impl Net + Send + Sync + 'static,
+        blob: impl TransferBlob + Send + Sync + 'static,
+        upcall: impl Upcall + Send + Sync + 'static,
+        codec_worker: CodecWorker,
+        fs: impl SendFsEvent + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            id,
+            crypto,
+            fragment_len,
+            chunk_k,
+            chunk_n,
+            chunk_m,
+            net: Box::new(net),
+            blob: Box::new(blob),
+            upcall: Box::new(upcall),
+            codec_worker,
+            fs: Box::new(fs),
+            uploads: Default::default(),
+            downloads: Default::default(),
+            persists: Default::default(),
+            pending_pulls: Default::default(),
+        }
     }
 }
 
@@ -583,6 +629,7 @@ pub enum Message<A> {
     Invite(Invite),
     InviteOk(InviteOk),
     Pull(Pull),
+    FragmentAvailable(Verifiable<FragmentAvailable>),
 
     FindPeer(Verifiable<FindPeer<A>>),
     FindPeerOk(Verifiable<FindPeerOk<A>>),
@@ -593,11 +640,18 @@ pub enum Message<A> {
 pub type MessageNet<T, A> = augustus::net::MessageNet<T, Message<A>>;
 
 pub trait SendRecvEvent:
-    SendEvent<Recv<Invite>> + SendEvent<Recv<InviteOk>> + SendEvent<Recv<Pull>>
+    SendEvent<Recv<Invite>>
+    + SendEvent<Recv<InviteOk>>
+    + SendEvent<Recv<Pull>>
+    + SendEvent<Recv<Verifiable<FragmentAvailable>>>
 {
 }
-impl<T: SendEvent<Recv<Invite>> + SendEvent<Recv<InviteOk>> + SendEvent<Recv<Pull>>> SendRecvEvent
-    for T
+impl<
+        T: SendEvent<Recv<Invite>>
+            + SendEvent<Recv<InviteOk>>
+            + SendEvent<Recv<Pull>>
+            + SendEvent<Recv<Verifiable<FragmentAvailable>>>,
+    > SendRecvEvent for T
 {
 }
 
@@ -611,6 +665,7 @@ pub fn on_buf<A: Addr>(
         Message::Invite(message) => entropy_sender.send(Recv(message)),
         Message::InviteOk(message) => entropy_sender.send(Recv(message)),
         Message::Pull(message) => entropy_sender.send(Recv(message)),
+        Message::FragmentAvailable(message) => entropy_sender.send(Recv(message)),
         Message::FindPeer(message) => kademlia_sender.send(Recv(message)),
         Message::FindPeerOk(message) => kademlia_sender.send(Recv(message)),
         Message::BlobServe(message) => blob_sender.send(Recv(message)),

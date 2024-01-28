@@ -2,11 +2,8 @@ use std::{env::args, net::SocketAddr};
 
 use augustus::{
     crypto::{Crypto, Verifiable},
-    event::{
-        erased::{Session, SessionSender},
-        SendEvent,
-    },
-    kademlia::{Buckets, FindPeer, FindPeerOk, Peer, PeerId, PeerRecord, SendCryptoEvent},
+    event::{erased::Session, SendEvent},
+    kademlia::{Buckets, FindPeer, FindPeerOk, Peer, PeerId, PeerRecord, SendCrypto},
     net::{
         events::Recv,
         kademlia::{Control, Multicast, PeerNet},
@@ -126,15 +123,7 @@ async fn main() -> anyhow::Result<()> {
         Ok(())
     });
 
-    #[derive(Clone)]
-    struct S(SessionSender<Peer<SocketAddr>>);
-    impl AsMut<dyn SendCryptoEvent<SocketAddr> + Send + Sync + 'static> for S {
-        fn as_mut(&mut self) -> &mut (dyn SendCryptoEvent<SocketAddr> + Send + Sync + 'static) {
-            &mut self.0
-        }
-    }
-
-    let crypto_session = crypto_session.run(S(peer_session.sender()));
+    let crypto_session = crypto_session.run(SendCrypto(peer_session.sender()));
     let mut control = Control::new(
         augustus::net::MessageNet::<_, Message>::new(socket_net.clone()),
         peer_session.sender(),
