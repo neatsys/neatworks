@@ -17,14 +17,17 @@ use axum::{
     Json, Router,
 };
 
-use entropy::{clients, GetOk, MessageNet, Peer, PutOk};
+use entropy::{GetOk, MessageNet, Peer, PutOk};
 use entropy_control_messages::StartPeersConfig;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use tokio::{
     fs::create_dir,
     net::UdpSocket,
     signal::ctrl_c,
-    sync::{mpsc::unbounded_channel, Mutex},
+    sync::{
+        mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+        Mutex,
+    },
     task::JoinSet,
     time::timeout,
 };
@@ -33,10 +36,13 @@ use tokio::{
 async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/ok", get(ok))
-        .route("/start-peers", post(start_peers))
-        .with_state(AppState {
-            sessions: Default::default(),
-        });
+        .route("/start-peers", post(start_peers));
+    let (upcall_sender, upcall_receiver) = unbounded_channel();
+    let app = app.with_state(AppState {
+        sessions: Default::default(),
+        upcall_sender,
+        upcall_receiver: Arc::new(Mutex::new(upcall_receiver)),
+    });
     let url = args().nth(1).ok_or(anyhow::anyhow!("not specify url"))?;
     let listener = tokio::net::TcpListener::bind(&url).await?;
     axum::serve(listener, app)
@@ -48,6 +54,8 @@ async fn main() -> anyhow::Result<()> {
 #[derive(Debug, Clone)]
 struct AppState {
     sessions: Arc<Mutex<JoinSet<anyhow::Result<()>>>>,
+    upcall_sender: UnboundedSender<Upcall>,
+    upcall_receiver: Arc<Mutex<UnboundedReceiver<Upcall>>>,
 }
 
 async fn ok(State(state): State<AppState>) {
@@ -76,7 +84,13 @@ async fn start_peers(State(state): State<AppState>, Json(config): Json<StartPeer
         }
     }
     for (record, crypto, rng) in local_peers {
-        sessions.spawn(start_peer(record, crypto, rng, records.clone()));
+        sessions.spawn(start_peer(
+            record,
+            crypto,
+            rng,
+            records.clone(),
+            state.upcall_sender.clone(),
+        ));
     }
 }
 
@@ -91,6 +105,7 @@ async fn start_peer(
     crypto: Crypto<PeerId>,
     mut rng: StdRng,
     mut records: Vec<PeerRecord<SocketAddr>>,
+    upcall_sender: UnboundedSender<Upcall>,
 ) -> anyhow::Result<()> {
     let peer_id = record.id;
     let path = format!("/tmp/entropy-{:x}", H256(peer_id));
@@ -115,7 +130,7 @@ async fn start_peer(
 
     let mut kademlia_peer = kademlia::Peer::new(
         buckets,
-        MessageNet::<_, SocketAddr, _>::new(socket_net.clone()),
+        MessageNet::new(socket_net.clone()),
         control_session.sender(),
         crypto_worker,
     );
@@ -127,9 +142,9 @@ async fn start_peer(
         1.try_into().unwrap(),
         1.try_into().unwrap(),
         1.try_into().unwrap(),
-        MessageNet::<_, SocketAddr, SocketAddr>::new(PeerNet(control_session.sender())),
+        MessageNet::<_, SocketAddr>::new(PeerNet(control_session.sender())),
         blob_sender.clone(),
-        clients::entropy::MessageNet::new(socket_net.clone()),
+        upcall_sender,
         codec_worker,
         fs_sender,
     );
@@ -151,7 +166,7 @@ async fn start_peer(
     let blob_session = blob::session(
         ip,
         blob_receiver,
-        MessageNet::<_, SocketAddr, SocketAddr>::new(PeerNet(control_session.sender())),
+        MessageNet::<_, SocketAddr>::new(PeerNet(control_session.sender())),
         peer_session.sender(),
     );
     let control_session = control_session.run(&mut control);
