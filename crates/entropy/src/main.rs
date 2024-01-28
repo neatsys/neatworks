@@ -1,3 +1,4 @@
+#![allow(unused)]
 use std::{env::args, net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use augustus::{
@@ -12,7 +13,7 @@ use augustus::{
     worker::erased::spawn_backend,
 };
 use axum::{
-    extract::State,
+    extract::{Multipart, State},
     routing::{get, post},
     Json, Router,
 };
@@ -23,6 +24,7 @@ use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use tokio::{
     fs::create_dir,
     net::UdpSocket,
+    runtime::{self, Runtime},
     signal::ctrl_c,
     sync::{
         mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
@@ -36,10 +38,15 @@ use tokio::{
 async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/ok", get(ok))
-        .route("/start-peers", post(start_peers));
+        .route("/start-peers", post(start_peers))
+        .route("/put-chunk", post(put_chunk));
     let (upcall_sender, upcall_receiver) = unbounded_channel();
     let app = app.with_state(AppState {
         sessions: Default::default(),
+        runtime: runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .into(),
         upcall_sender,
         upcall_receiver: Arc::new(Mutex::new(upcall_receiver)),
     });
@@ -54,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
 #[derive(Debug, Clone)]
 struct AppState {
     sessions: Arc<Mutex<JoinSet<anyhow::Result<()>>>>,
+    runtime: Arc<Runtime>,
     upcall_sender: UnboundedSender<Upcall>,
     upcall_receiver: Arc<Mutex<UnboundedReceiver<Upcall>>>,
 }
@@ -84,13 +92,16 @@ async fn start_peers(State(state): State<AppState>, Json(config): Json<StartPeer
         }
     }
     for (record, crypto, rng) in local_peers {
-        sessions.spawn(start_peer(
-            record,
-            crypto,
-            rng,
-            records.clone(),
-            state.upcall_sender.clone(),
-        ));
+        sessions.spawn_on(
+            start_peer(
+                record,
+                crypto,
+                rng,
+                records.clone(),
+                state.upcall_sender.clone(),
+            ),
+            state.runtime.handle(),
+        );
     }
 }
 
@@ -185,4 +196,8 @@ async fn start_peer(
         result = peer_session => result?,
     }
     Err(anyhow::anyhow!("unexpected shutdown"))
+}
+
+async fn put_chunk(State(state): State<AppState>, mut multipart: Multipart) {
+    //
 }
