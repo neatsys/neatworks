@@ -256,6 +256,8 @@ impl<K> Peer<K> {
 
 impl<K> OnEvent<Put<K>> for Peer<K>
 where
+    // according to `From` doc this seems to be an incorrect use of the trait
+    // should consider invent dedicated trait for converting preimage
     for<'a> &'a K: Into<Target>,
 {
     fn on_event(
