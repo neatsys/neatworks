@@ -12,7 +12,7 @@ use augustus::{
         erased::{OnEvent, Timer},
         SendEvent,
     },
-    kademlia::{self, FindPeer, FindPeerOk, PeerId},
+    kademlia::{self, FindPeer, FindPeerOk, PeerId, Target},
     net::{deserialize, events::Recv, kademlia::Multicast, Addr, SendMessage},
     worker::erased::Worker,
 };
@@ -20,15 +20,17 @@ use augustus::{
 use serde::{Deserialize, Serialize};
 use wirehair::{Decoder, Encoder};
 
+type Chunk = Target;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Invite {
-    chunk: [u8; 32],
+    chunk: Chunk,
     peer_id: PeerId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InviteOk {
-    chunk: [u8; 32],
+    chunk: Chunk,
     index: u32,
     proof: (),
     peer_id: PeerId,
@@ -36,21 +38,21 @@ pub struct InviteOk {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendFragment {
-    chunk: [u8; 32],
+    chunk: Chunk,
     index: u32,
     peer_id: Option<PeerId>, // Some(id) if expecting receipt
 }
 
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]
 pub struct FragmentAvailable {
-    chunk: [u8; 32],
+    chunk: Chunk,
     peer_id: PeerId,
     peer_key: PublicKey,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pull {
-    chunk: [u8; 32],
+    chunk: Chunk,
     peer_id: PeerId,
 }
 
@@ -74,28 +76,28 @@ pub trait TransferBlob: SendEvent<Transfer<PeerId, SendFragment>> {}
 impl<T: SendEvent<Transfer<PeerId, SendFragment>>> TransferBlob for T {}
 
 #[derive(Debug, Clone)]
-pub struct Put(pub [u8; 32], pub Vec<u8>);
+pub struct Put<K>(pub K, pub Vec<u8>);
 #[derive(Debug, Clone)]
-pub struct Get(pub [u8; 32]);
+pub struct Get<K>(pub K);
 
 #[derive(Debug, Clone)]
-pub struct PutOk(pub [u8; 32]);
+pub struct PutOk<K>(pub K);
 #[derive(Debug, Clone)]
-pub struct GetOk(pub [u8; 32], pub Vec<u8>);
+pub struct GetOk<K>(pub K, pub Vec<u8>);
 
-pub trait Upcall: SendEvent<PutOk> + SendEvent<GetOk> {}
-impl<T: SendEvent<PutOk> + SendEvent<GetOk>> Upcall for T {}
+pub trait Upcall<K>: SendEvent<PutOk<K>> + SendEvent<GetOk<K>> {}
+impl<T: SendEvent<PutOk<K>> + SendEvent<GetOk<K>>, K> Upcall<K> for T {}
 
 #[derive(Debug)]
-pub struct NewEncoder([u8; 32], Encoder);
+pub struct NewEncoder(Chunk, Encoder);
 #[derive(Debug, Clone)]
-pub struct Encode([u8; 32], u32, Vec<u8>);
+pub struct Encode(Chunk, u32, Vec<u8>);
 #[derive(Debug)]
-pub struct Decode([u8; 32], Decoder);
+pub struct Decode(Chunk, Decoder);
 #[derive(Debug, Clone)]
-pub struct Recover([u8; 32], Vec<u8>);
+pub struct Recover(Chunk, Vec<u8>);
 #[derive(Debug, Clone)]
-pub struct RecoverEncode([u8; 32], Vec<u8>);
+pub struct RecoverEncode(Chunk, Vec<u8>);
 
 pub trait SendCodecEvent:
     SendEvent<NewEncoder>
@@ -129,7 +131,7 @@ impl<'a, E: SendCodecEvent + Send + Sync + 'a> AsMut<dyn SendCodecEvent + Send +
 pub trait SendFsEvent: SendEvent<fs::Store> + SendEvent<fs::Load> {}
 impl<T: SendEvent<fs::Store> + SendEvent<fs::Load>> SendFsEvent for T {}
 
-pub struct Peer {
+pub struct Peer<K> {
     id: PeerId,
     fragment_len: u32,
     chunk_k: NonZeroUsize, // the number of honest peers to recover a chunk
@@ -143,14 +145,14 @@ pub struct Peer {
     // alternatively, Put peer can incrementally Invite more and more peers until enough peers
     // replies. that approach would involve timeout and does not fit evaluation purpose
     //
-    uploads: HashMap<[u8; 32], UploadState>,
-    downloads: HashMap<[u8; 32], DownloadState>,
-    persists: HashMap<[u8; 32], PersistState>,
-    pending_pulls: HashMap<[u8; 32], Vec<PeerId>>,
+    uploads: HashMap<Chunk, UploadState<K>>,
+    downloads: HashMap<Chunk, DownloadState<K>>,
+    persists: HashMap<Chunk, PersistState>,
+    pending_pulls: HashMap<Chunk, Vec<PeerId>>,
 
     net: Box<dyn Net + Send + Sync>,
     blob: Box<dyn TransferBlob + Send + Sync>,
-    upcall: Box<dyn Upcall + Send + Sync>,
+    upcall: Box<dyn Upcall<K> + Send + Sync>,
     codec_worker: CodecWorker,
     fs: Box<dyn SendFsEvent + Send + Sync>,
     // well, in the context of entropy "computationally intensive" refers to some millisecond-scale
@@ -164,14 +166,16 @@ pub struct Peer {
 pub type CodecWorker = Worker<(), dyn SendCodecEvent + Send + Sync>;
 
 #[derive(Debug)]
-struct UploadState {
-    encoder: Arc<Encoder>,
+struct UploadState<K> {
+    preimage: K,
+    encoder: Option<Arc<Encoder>>,
     pending: HashMap<u32, PeerId>,
     available: HashSet<PeerId>,
 }
 
 #[derive(Debug)]
-struct DownloadState {
+struct DownloadState<K> {
+    preimage: K,
     recover: RecoverState,
 }
 
@@ -209,13 +213,13 @@ enum PersistStatus {
     Available,
 }
 
-impl Debug for Peer {
+impl<K> Debug for Peer<K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Peer").finish_non_exhaustive()
     }
 }
 
-impl Peer {
+impl<K> Peer<K> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: PeerId,
@@ -226,7 +230,7 @@ impl Peer {
         chunk_m: NonZeroUsize,
         net: impl Net + Send + Sync + 'static,
         blob: impl TransferBlob + Send + Sync + 'static,
-        upcall: impl Upcall + Send + Sync + 'static,
+        upcall: impl Upcall<K> + Send + Sync + 'static,
         codec_worker: CodecWorker,
         fs: impl SendFsEvent + Send + Sync + 'static,
     ) -> Self {
@@ -250,8 +254,16 @@ impl Peer {
     }
 }
 
-impl OnEvent<Put> for Peer {
-    fn on_event(&mut self, Put(chunk, buf): Put, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
+impl<K> OnEvent<Put<K>> for Peer<K>
+where
+    for<'a> &'a K: Into<Target>,
+{
+    fn on_event(
+        &mut self,
+        Put(preimage, buf): Put<K>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
+        let chunk = (&preimage).into();
         if buf.len() != self.fragment_len as usize * self.chunk_k.get() {
             anyhow::bail!(
                 "expect chunk len {} * {}, actual {}",
@@ -259,6 +271,18 @@ impl OnEvent<Put> for Peer {
                 self.chunk_k,
                 buf.len()
             )
+        }
+        let replaced = self.uploads.insert(
+            chunk,
+            UploadState {
+                preimage,
+                encoder: None,
+                pending: Default::default(),
+                available: Default::default(),
+            },
+        );
+        if replaced.is_some() {
+            anyhow::bail!("duplicated upload chunk {}", H256(chunk))
         }
         let fragment_len = self.fragment_len;
         self.codec_worker.submit(Box::new(move |(), sender| {
@@ -268,23 +292,17 @@ impl OnEvent<Put> for Peer {
     }
 }
 
-impl OnEvent<NewEncoder> for Peer {
+impl<K> OnEvent<NewEncoder> for Peer<K> {
     fn on_event(
         &mut self,
         NewEncoder(chunk, encoder): NewEncoder,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        let replaced = self.uploads.insert(
-            chunk,
-            UploadState {
-                encoder: encoder.into(),
-                pending: Default::default(),
-                available: Default::default(),
-            },
-        );
-        if replaced.is_some() {
-            anyhow::bail!("duplicated upload chunk {}", H256(chunk))
-        }
+        let Some(state) = self.uploads.get_mut(&chunk) else {
+            return Ok(()); // ok?
+        };
+        let replaced = state.encoder.replace(encoder.into());
+        assert!(replaced.is_none());
         let invite = Invite {
             chunk,
             peer_id: self.id,
@@ -293,7 +311,7 @@ impl OnEvent<NewEncoder> for Peer {
     }
 }
 
-impl OnEvent<Recv<Invite>> for Peer {
+impl<K> OnEvent<Recv<Invite>> for Peer<K> {
     fn on_event(
         &mut self,
         Recv(invite): Recv<Invite>,
@@ -322,7 +340,7 @@ impl OnEvent<Recv<Invite>> for Peer {
     }
 }
 
-impl OnEvent<Recv<InviteOk>> for Peer {
+impl<K> OnEvent<Recv<InviteOk>> for Peer<K> {
     fn on_event(
         &mut self,
         Recv(invite_ok): Recv<InviteOk>,
@@ -331,7 +349,7 @@ impl OnEvent<Recv<InviteOk>> for Peer {
         // TODO verify
         if let Some(state) = self.uploads.get_mut(&invite_ok.chunk) {
             state.pending.insert(invite_ok.index, invite_ok.peer_id);
-            let encoder = state.encoder.clone();
+            let encoder = state.encoder.clone().unwrap();
             return self.codec_worker.submit(Box::new(move |(), sender| {
                 let fragment = encoder.encode(invite_ok.index)?;
                 sender.send(Encode(invite_ok.chunk, invite_ok.index, fragment))
@@ -349,7 +367,7 @@ impl OnEvent<Recv<InviteOk>> for Peer {
     }
 }
 
-impl OnEvent<Encode> for Peer {
+impl<K> OnEvent<Encode> for Peer<K> {
     fn on_event(
         &mut self,
         Encode(chunk, index, fragment): Encode,
@@ -371,7 +389,7 @@ impl OnEvent<Encode> for Peer {
     }
 }
 
-impl OnEvent<RecvBlob<SendFragment>> for Peer {
+impl<K> OnEvent<RecvBlob<SendFragment>> for Peer<K> {
     fn on_event(
         &mut self,
         RecvBlob(send_fragment, fragment): RecvBlob<SendFragment>,
@@ -413,7 +431,7 @@ impl OnEvent<RecvBlob<SendFragment>> for Peer {
 impl RecoverState {
     fn submit_decode(
         &mut self,
-        chunk: [u8; 32],
+        chunk: Chunk,
         index: u32,
         fragment: Vec<u8>,
         encode_index: Option<u32>,
@@ -440,7 +458,7 @@ impl RecoverState {
     }
 }
 
-impl OnEvent<fs::StoreOk> for Peer {
+impl<K> OnEvent<fs::StoreOk> for Peer<K> {
     fn on_event(
         &mut self,
         fs::StoreOk(chunk): fs::StoreOk,
@@ -465,7 +483,7 @@ impl OnEvent<fs::StoreOk> for Peer {
     }
 }
 
-impl OnEvent<Recv<Verifiable<FragmentAvailable>>> for Peer {
+impl<K> OnEvent<Recv<Verifiable<FragmentAvailable>>> for Peer<K> {
     fn on_event(
         &mut self,
         Recv(fragment_available): Recv<Verifiable<FragmentAvailable>>,
@@ -488,18 +506,23 @@ impl OnEvent<Recv<Verifiable<FragmentAvailable>>> for Peer {
         }
         state.available.insert(fragment_available.peer_id);
         if state.available.len() == self.chunk_n.into() {
-            self.uploads.remove(&fragment_available.chunk);
-            self.upcall.send(PutOk(fragment_available.chunk))?
+            let state = self.uploads.remove(&fragment_available.chunk).unwrap();
+            self.upcall.send(PutOk(state.preimage))?
         }
         Ok(())
     }
 }
 
-impl OnEvent<Get> for Peer {
-    fn on_event(&mut self, Get(chunk): Get, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
+impl<K> OnEvent<Get<K>> for Peer<K>
+where
+    for<'a> &'a K: Into<Target>,
+{
+    fn on_event(&mut self, Get(preimage): Get<K>, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
+        let chunk = (&preimage).into();
         let replaced = self.downloads.insert(
             chunk,
             DownloadState {
+                preimage,
                 recover: RecoverState::new(self.fragment_len, self.chunk_k)?,
             },
         );
@@ -514,7 +537,7 @@ impl OnEvent<Get> for Peer {
     }
 }
 
-impl OnEvent<Recv<Pull>> for Peer {
+impl<K> OnEvent<Recv<Pull>> for Peer<K> {
     fn on_event(&mut self, Recv(pull): Recv<Pull>, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
         let Some(state) = self.persists.get(&pull.chunk) else {
             return Ok(());
@@ -530,7 +553,7 @@ impl OnEvent<Recv<Pull>> for Peer {
     }
 }
 
-impl OnEvent<fs::LoadOk> for Peer {
+impl<K> OnEvent<fs::LoadOk> for Peer<K> {
     fn on_event(
         &mut self,
         fs::LoadOk(chunk, index, fragment): fs::LoadOk,
@@ -555,7 +578,7 @@ impl OnEvent<fs::LoadOk> for Peer {
     }
 }
 
-impl OnEvent<Decode> for Peer {
+impl<K> OnEvent<Decode> for Peer<K> {
     fn on_event(
         &mut self,
         Decode(chunk, decoder): Decode,
@@ -579,7 +602,7 @@ impl OnEvent<Decode> for Peer {
 impl RecoverState {
     fn on_decode(
         &mut self,
-        chunk: [u8; 32],
+        chunk: Chunk,
         decoder: Decoder,
         encode_index: Option<u32>,
         worker: &CodecWorker,
@@ -595,21 +618,21 @@ impl RecoverState {
     }
 }
 
-impl OnEvent<Recover> for Peer {
+impl<K> OnEvent<Recover> for Peer<K> {
     fn on_event(
         &mut self,
         Recover(chunk, buf): Recover,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        if self.downloads.remove(&chunk).is_some() {
-            self.upcall.send(GetOk(chunk, buf))
+        if let Some(state) = self.downloads.remove(&chunk) {
+            self.upcall.send(GetOk(state.preimage, buf))
         } else {
             Ok(())
         }
     }
 }
 
-impl OnEvent<RecoverEncode> for Peer {
+impl<K> OnEvent<RecoverEncode> for Peer<K> {
     fn on_event(
         &mut self,
         RecoverEncode(chunk, fragment): RecoverEncode,
@@ -682,8 +705,10 @@ pub mod fs {
         task::JoinSet,
     };
 
+    use crate::Chunk;
+
     #[derive(Clone)]
-    pub struct Store(pub [u8; 32], pub u32, pub Vec<u8>);
+    pub struct Store(pub Chunk, pub u32, pub Vec<u8>);
 
     impl Debug for Store {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -698,13 +723,13 @@ pub mod fs {
     #[derive(Debug, Clone)]
     // Load(chunk, index, true) will delete fragment file while loading
     // not particual useful in practice, but good for evaluation with bounded storage usage
-    pub struct Load(pub [u8; 32], pub u32, pub bool);
+    pub struct Load(pub Chunk, pub u32, pub bool);
 
     #[derive(Debug, Clone)]
-    pub struct StoreOk(pub [u8; 32]);
+    pub struct StoreOk(pub Chunk);
 
     #[derive(Clone)]
-    pub struct LoadOk(pub [u8; 32], pub u32, pub Vec<u8>);
+    pub struct LoadOk(pub Chunk, pub u32, pub Vec<u8>);
 
     impl Debug for LoadOk {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -735,8 +760,8 @@ pub mod fs {
         loop {
             enum Select {
                 Recv(Event),
-                JoinNextStore([u8; 32]),
-                JoinNextLoad(([u8; 32], u32, Vec<u8>)),
+                JoinNextStore(Chunk),
+                JoinNextLoad((Chunk, u32, Vec<u8>)),
             }
             match tokio::select! {
                 event = events.recv() => Select::Recv(event.ok_or(anyhow::anyhow!("channel closed"))?),

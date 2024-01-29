@@ -18,8 +18,8 @@ async fn benchmark_session(control_client: reqwest::Client) -> anyhow::Result<()
         .map(|i| format!("http://localhost:{}", 5000 + i))
         .collect::<Vec<_>>();
     let chunk_len = 100;
-    let k = 4.try_into().unwrap();
-    let n = 5;
+    let k = 5.try_into().unwrap();
+    let n = 4;
 
     let put_peer_urls = peer_urls
         .choose_multiple(&mut thread_rng(), n)
@@ -54,7 +54,8 @@ async fn benchmark_session(control_client: reqwest::Client) -> anyhow::Result<()
             break result;
         }
     };
-    println!("{result:?}");
+    println!("Put {:?}", result.latency);
+    let digest = result.digest;
 
     let get_peer_urls = peer_urls
         .choose_multiple(&mut thread_rng(), n)
@@ -87,6 +88,10 @@ async fn benchmark_session(control_client: reqwest::Client) -> anyhow::Result<()
             break result;
         }
     };
-    println!("{result:?}");
-    Ok(())
+    println!("Get {:?}", result.latency);
+    if result.digest == digest {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("digest mismatch"))
+    }
 }

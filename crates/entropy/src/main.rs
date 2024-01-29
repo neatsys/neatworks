@@ -48,8 +48,8 @@ use wirehair::{Decoder, Encoder};
 
 #[derive(Debug, Clone, derive_more::From)]
 enum Upcall {
-    PutOk(PutOk),
-    GetOk(GetOk),
+    PutOk(PutOk<[u8; 32]>),
+    GetOk(GetOk<[u8; 32]>),
 }
 
 #[tokio::main(flavor = "current_thread")]
