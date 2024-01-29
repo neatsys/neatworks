@@ -21,15 +21,6 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn host_session(ip: String, seed_addr: &mut Option<String>) -> anyhow::Result<()> {
-    let status = Command::new("ssh")
-        .arg(&ip)
-        .arg("rm -r /tmp/ipfs-*")
-        .stderr(Stdio::null())
-        .status()
-        .await?;
-    if status.success() {
-        println!("Removed previous IPFS data")
-    }
     for i in 0..10 {
         let status = Command::new("ssh")
             .arg(&ip)

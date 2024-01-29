@@ -1,3 +1,5 @@
+use std::process::Stdio;
+
 use tokio::{process::Command, task::JoinSet};
 
 #[tokio::main(flavor = "current_thread")]
@@ -22,6 +24,15 @@ async fn host_session(ip: String) -> anyhow::Result<()> {
         .await?;
     if status.success() {
         println!("Interrupted previous IPFS peers")
+    }
+    let status = Command::new("ssh")
+        .arg(&ip)
+        .arg("rm -r /tmp/ipfs-*")
+        .stderr(Stdio::null())
+        .status()
+        .await?;
+    if status.success() {
+        println!("Removed previous IPFS data")
     }
     Ok(())
 }

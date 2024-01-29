@@ -57,9 +57,9 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/ok", get(ok))
         .route("/benchmark-put", post(benchmark_put))
-        .route("/benchmark-put/{put_id}", get(poll_benchmark_put))
+        .route("/benchmark-put/:put_id", get(poll_benchmark_put))
         .route("/benchmark-get", post(benchmark_get))
-        .route("/benchmark-get/{get_id}", get(poll_benchmark_get))
+        .route("/benchmark-get/:get_id", get(poll_benchmark_get))
         .route("/start-peers", post(start_peers))
         .route("/put-chunk", post(put_chunk));
     let (upcall_sender, mut upcall_receiver) = unbounded_channel();
@@ -68,12 +68,10 @@ async fn main() -> anyhow::Result<()> {
             //
         }
     });
+    let runtime = Arc::new(runtime::Builder::new_multi_thread().enable_all().build()?);
     let app = app.with_state(AppState {
         sessions: Default::default(),
-        runtime: runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?
-            .into(),
+        runtime: runtime.clone(),
         upcall_sender,
         op_client: reqwest::Client::new(),
         benchmark_op_id: Default::default(),
@@ -90,6 +88,9 @@ async fn main() -> anyhow::Result<()> {
         result = serve => result?,
         result = upcall_session => result?,
     }
+    Arc::try_unwrap(runtime)
+        .map_err(|_| anyhow::anyhow!("cannot shutdown runtime"))?
+        .shutdown_background();
     Ok(())
 }
 
@@ -256,6 +257,16 @@ async fn benchmark_put(State(state): State<AppState>, Json(config): Json<PutConf
             let op_client = state.op_client.clone();
             encode_sessions.spawn(async move {
                 let buf = encoder.encode(index)?;
+                // {
+                //     use std::io::Write;
+                //     let mut stdout = std::io::stdout().lock();
+                //     for chunk in buf.chunks(32) {
+                //         for byte in chunk {
+                //             write!(&mut stdout, "{byte:02x} ")?
+                //         }
+                //         writeln!(&mut stdout)?
+                //     }
+                // }
                 let mut put_sessions = JoinSet::<anyhow::Result<_>>::new();
                 for peer_url in peer_url_group {
                     let op_client = op_client.clone();
@@ -328,7 +339,7 @@ async fn benchmark_get(State(state): State<AppState>, Json(config): Json<GetConf
                     arg: String,
                 }
                 let buf = op_client
-                    .post(format!("{peer_url}/api/v0/get"))
+                    .post(format!("{peer_url}/api/v0/cat"))
                     .query(&Query { arg: chunk })
                     .send()
                     .await?
@@ -344,6 +355,16 @@ async fn benchmark_get(State(state): State<AppState>, Json(config): Json<GetConf
         )?;
         while let Some(result) = get_sessions.join_next().await {
             let (index, buf) = result??;
+            // {
+            //     use std::io::Write;
+            //     let mut stdout = std::io::stdout().lock();
+            //     for chunk in buf.chunks(32) {
+            //         for byte in chunk {
+            //             write!(&mut stdout, "{byte:02x} ")?
+            //         }
+            //         writeln!(&mut stdout)?
+            //     }
+            // }
             if decoder.decode(index, &buf)? {
                 get_sessions.abort_all();
                 let buf = decoder.recover()?;
