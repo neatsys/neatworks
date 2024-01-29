@@ -154,3 +154,9 @@ pub mod worker;
 // routine, so the choice is mostly credit to convenience: it's easier to return
 // error from a regular `main` function, but for axum server handlers, panic
 // is probably the easier one
+//
+// (well, if you want to propagate error from server to client, then return
+// error is much more preferred; but in the discussed use case there's direct
+// access to the server's internal log, and the only thing i need to know is
+// which server looks abnormal, the demand panic can fulfill automatically with
+// a 500 http code)

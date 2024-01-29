@@ -80,8 +80,9 @@ async fn main() -> anyhow::Result<()> {
         benchmark_puts: Default::default(),
         benchmark_gets: Default::default(),
     });
-    let url = args().nth(1).ok_or(anyhow::anyhow!("not specify url"))?;
-    let listener = tokio::net::TcpListener::bind(&url).await?;
+    let addr = args().nth(1);
+    let addr = addr.as_deref().unwrap_or("0.0.0.0:3000");
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
     let serve = axum::serve(listener, app)
         .with_graceful_shutdown(async { ctrl_c().await.unwrap() })
         .into_future();
@@ -236,7 +237,7 @@ async fn put_chunk(State(state): State<AppState>, mut multipart: Multipart) {
     //
 }
 
-async fn benchmark_put(State(state): State<AppState>, Json(config): Json<PutConfig>) {
+async fn benchmark_put(State(state): State<AppState>, Json(config): Json<PutConfig>) -> Json<u32> {
     let session = state.runtime.spawn(async move {
         let mut buf = vec![0; config.chunk_len as usize * config.k.get()];
         thread_rng().fill_bytes(&mut buf);
@@ -300,6 +301,7 @@ async fn benchmark_put(State(state): State<AppState>, Json(config): Json<PutConf
     });
     let put_id = state.benchmark_op_id.fetch_add(1, SeqCst);
     state.benchmark_puts.lock().await.insert(put_id, session);
+    Json(put_id)
 }
 
 async fn poll_benchmark_put(
@@ -314,7 +316,7 @@ async fn poll_benchmark_put(
     }
 }
 
-async fn benchmark_get(State(state): State<AppState>, Json(config): Json<GetConfig>) {
+async fn benchmark_get(State(state): State<AppState>, Json(config): Json<GetConfig>) -> Json<u32> {
     let session = state.runtime.spawn(async move {
         let start = Instant::now();
         let mut get_sessions = JoinSet::<anyhow::Result<_>>::new();
@@ -356,6 +358,7 @@ async fn benchmark_get(State(state): State<AppState>, Json(config): Json<GetConf
     });
     let get_id = state.benchmark_op_id.fetch_add(1, SeqCst);
     state.benchmark_gets.lock().await.insert(get_id, session);
+    Json(get_id)
 }
 
 async fn poll_benchmark_get(

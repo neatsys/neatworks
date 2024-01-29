@@ -7,6 +7,8 @@ edition = "2021"
 
 [dependencies]
 anyhow = { version = "1.0.79", features = ["backtrace"] }
+entropy-control-messages = { version = "0.1.0", path = "../entropy-control-messages" }
+rand = "0.8.5"
 reqwest = { version = "0.11.23", features = ["json"], default-features = false }
 serde = { version = "1.0.196", features = ["derive"] }
 serde_json = "1.0.112"
