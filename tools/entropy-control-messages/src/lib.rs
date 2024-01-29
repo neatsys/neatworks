@@ -23,6 +23,21 @@ pub struct PutConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PutResult {
-    pub chunks: Vec<String>,
+    pub digest: [u8; 32],
+    pub chunks: Vec<(u32, String)>,
+    pub latency: Duration,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetConfig {
+    pub chunk_len: u32,
+    pub k: NonZeroUsize,
+    pub chunks: Vec<(u32, String)>,
+    pub peer_urls: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetResult {
+    pub digest: [u8; 32],
     pub latency: Duration,
 }

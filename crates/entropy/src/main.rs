@@ -12,7 +12,7 @@ use std::{
 
 use augustus::{
     blob,
-    crypto::{Crypto, H256},
+    crypto::{Crypto, DigestHash, H256},
     event::erased::Session,
     kademlia::{self, Buckets, PeerId, PeerRecord},
     net::{
@@ -28,10 +28,10 @@ use axum::{
 };
 
 use entropy::{GetOk, MessageNet, Peer, PutOk};
-use entropy_control_messages::{PutConfig, PutResult, StartPeersConfig};
+use entropy_control_messages::{GetConfig, GetResult, PutConfig, PutResult, StartPeersConfig};
 use rand::{rngs::StdRng, seq::SliceRandom, thread_rng, RngCore, SeedableRng};
 use reqwest::multipart::{Form, Part};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::{
     fs::create_dir,
     net::UdpSocket,
@@ -44,7 +44,7 @@ use tokio::{
     task::{JoinHandle, JoinSet},
     time::timeout,
 };
-use wirehair::Encoder;
+use wirehair::{Decoder, Encoder};
 
 #[derive(Debug, Clone, derive_more::From)]
 enum Upcall {
@@ -58,6 +58,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/ok", get(ok))
         .route("/benchmark-put", post(benchmark_put))
         .route("/benchmark-put/{put_id}", get(poll_benchmark_put))
+        .route("/benchmark-get", post(benchmark_get))
+        .route("/benchmark-get/{get_id}", get(poll_benchmark_get))
         .route("/start-peers", post(start_peers))
         .route("/put-chunk", post(put_chunk));
     let (upcall_sender, mut upcall_receiver) = unbounded_channel();
@@ -74,8 +76,9 @@ async fn main() -> anyhow::Result<()> {
             .into(),
         upcall_sender,
         op_client: reqwest::Client::new(),
+        benchmark_op_id: Default::default(),
         benchmark_puts: Default::default(),
-        benchmark_put_id: Default::default(),
+        benchmark_gets: Default::default(),
     });
     let url = args().nth(1).ok_or(anyhow::anyhow!("not specify url"))?;
     let listener = tokio::net::TcpListener::bind(&url).await?;
@@ -95,8 +98,9 @@ struct AppState {
     runtime: Arc<Runtime>,
     upcall_sender: UnboundedSender<Upcall>,
     op_client: reqwest::Client,
+    benchmark_op_id: Arc<AtomicU32>,
     benchmark_puts: Arc<Mutex<HashMap<u32, JoinHandle<anyhow::Result<PutResult>>>>>,
-    benchmark_put_id: Arc<AtomicU32>,
+    benchmark_gets: Arc<Mutex<HashMap<u32, JoinHandle<anyhow::Result<GetResult>>>>>,
 }
 
 async fn ok(State(state): State<AppState>) {
@@ -233,23 +237,24 @@ async fn put_chunk(State(state): State<AppState>, mut multipart: Multipart) {
 }
 
 async fn benchmark_put(State(state): State<AppState>, Json(config): Json<PutConfig>) {
-    let put_session = state.runtime.spawn(async move {
+    let session = state.runtime.spawn(async move {
         let mut buf = vec![0; config.chunk_len as usize * config.k.get()];
         thread_rng().fill_bytes(&mut buf);
+        let digest = buf.sha256();
         let start = Instant::now();
         let encoder = Arc::new(Encoder::new(&buf, config.chunk_len)?);
         let mut encode_sessions = JoinSet::<anyhow::Result<_>>::new();
-        let mut chunks = HashSet::<u32>::new();
+        let mut chunk_indexes = HashSet::<u32>::new();
         for peer_url_group in config.peer_urls {
-            let mut buf;
+            let mut index;
             while {
-                buf = rand::random();
-                !chunks.insert(buf)
+                index = rand::random();
+                !chunk_indexes.insert(index)
             } {}
             let encoder = encoder.clone();
             let op_client = state.op_client.clone();
             encode_sessions.spawn(async move {
-                let buf = encoder.encode(buf)?;
+                let buf = encoder.encode(index)?;
                 let mut put_sessions = JoinSet::<anyhow::Result<_>>::new();
                 for peer_url in peer_url_group {
                     let op_client = op_client.clone();
@@ -280,24 +285,21 @@ async fn benchmark_put(State(state): State<AppState>, Json(config): Json<PutConf
                         anyhow::bail!("inconsistent chunk among peers")
                     }
                 }
-                Ok(chunk)
+                Ok((index, chunk))
             });
         }
         let mut chunks = Vec::new();
-        while let Some(chunk) = encode_sessions.join_next().await {
-            chunks.push(chunk??)
+        while let Some(result) = encode_sessions.join_next().await {
+            chunks.push(result??)
         }
         Ok(PutResult {
+            digest,
             chunks,
             latency: start.elapsed(),
         })
     });
-    let put_id = state.benchmark_put_id.fetch_add(1, SeqCst);
-    state
-        .benchmark_puts
-        .lock()
-        .await
-        .insert(put_id, put_session);
+    let put_id = state.benchmark_op_id.fetch_add(1, SeqCst);
+    state.benchmark_puts.lock().await.insert(put_id, session);
 }
 
 async fn poll_benchmark_put(
@@ -309,5 +311,61 @@ async fn poll_benchmark_put(
         Json(None)
     } else {
         Json(Some(puts.remove(&put_id).unwrap().await.unwrap().unwrap()))
+    }
+}
+
+async fn benchmark_get(State(state): State<AppState>, Json(config): Json<GetConfig>) {
+    let session = state.runtime.spawn(async move {
+        let start = Instant::now();
+        let mut get_sessions = JoinSet::<anyhow::Result<_>>::new();
+        for ((index, chunk), peer_url) in config.chunks.into_iter().zip(config.peer_urls) {
+            let op_client = state.op_client.clone();
+            get_sessions.spawn(async move {
+                #[derive(Serialize)]
+                struct Query {
+                    arg: String,
+                }
+                let buf = op_client
+                    .post(format!("{peer_url}/api/v0/get"))
+                    .query(&Query { arg: chunk })
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .bytes()
+                    .await?;
+                Ok((index, buf))
+            });
+        }
+        let mut decoder = Decoder::new(
+            config.chunk_len as u64 * config.k.get() as u64,
+            config.chunk_len,
+        )?;
+        while let Some(result) = get_sessions.join_next().await {
+            let (index, buf) = result??;
+            if decoder.decode(index, &buf)? {
+                get_sessions.abort_all();
+                let buf = decoder.recover()?;
+                let latency = start.elapsed();
+                return Ok(GetResult {
+                    digest: buf.sha256(),
+                    latency,
+                });
+            }
+        }
+        Err(anyhow::anyhow!("recover fail"))
+    });
+    let get_id = state.benchmark_op_id.fetch_add(1, SeqCst);
+    state.benchmark_gets.lock().await.insert(get_id, session);
+}
+
+async fn poll_benchmark_get(
+    State(state): State<AppState>,
+    Path(get_id): Path<u32>,
+) -> Json<Option<GetResult>> {
+    let mut gets = state.benchmark_gets.lock().await;
+    if !gets[&get_id].is_finished() {
+        Json(None)
+    } else {
+        Json(Some(gets.remove(&get_id).unwrap().await.unwrap().unwrap()))
     }
 }
