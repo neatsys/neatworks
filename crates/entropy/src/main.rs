@@ -209,7 +209,7 @@ async fn start_peer(
     });
     let crypto_session = crypto_session.run(kademlia::SendCrypto(kademlia_session.sender()));
     let kademlia_session = kademlia_session.run(&mut kademlia_peer);
-    let blob_session = blob::session(
+    let blob_session = blob::stream::session(
         ip,
         blob_receiver,
         MessageNet::<_, SocketAddr>::new(PeerNet(control_session.sender())),
