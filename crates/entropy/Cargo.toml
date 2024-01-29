@@ -9,6 +9,7 @@ edition = "2021"
 anyhow = { version = "1.0.79", features = ["backtrace"] }
 augustus = { version = "0.1.0", path = "../.." }
 axum = { version = "0.7.4", features = ["multipart"] }
+bytes = "1.5.0"
 derive_more = "0.99.17"
 entropy-control-messages = { version = "0.1.0", path = "../../tools/entropy-control-messages" }
 rand = "0.8.5"

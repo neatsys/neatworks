@@ -13,7 +13,10 @@ use std::{
 use augustus::{
     blob,
     crypto::{Crypto, DigestHash, H256},
-    event::erased::Session,
+    event::{
+        erased::{Sender, Session},
+        SendEvent,
+    },
     kademlia::{self, Buckets, PeerId, PeerRecord},
     net::{
         kademlia::{Control, PeerNet},
@@ -27,7 +30,7 @@ use axum::{
     Json, Router,
 };
 
-use entropy::{GetOk, MessageNet, Peer, PutOk};
+use entropy::{Get, GetOk, MessageNet, Peer, Put, PutOk};
 use entropy_control_messages::{GetConfig, GetResult, PutConfig, PutResult, StartPeersConfig};
 use rand::{rngs::StdRng, seq::SliceRandom, thread_rng, RngCore, SeedableRng};
 use reqwest::multipart::{Form, Part};
@@ -39,7 +42,7 @@ use tokio::{
     signal::ctrl_c,
     sync::{
         mpsc::{unbounded_channel, UnboundedSender},
-        Mutex,
+        oneshot, Mutex,
     },
     task::{JoinHandle, JoinSet},
     time::timeout,
@@ -61,23 +64,45 @@ async fn main() -> anyhow::Result<()> {
         .route("/benchmark-get", post(benchmark_get))
         .route("/benchmark-get/:get_id", get(poll_benchmark_get))
         .route("/start-peers", post(start_peers))
-        .route("/put-chunk", post(put_chunk));
+        .route("/put-chunk/:peer_index", post(put_chunk))
+        .route("/get-chunk/:peer_index/:chunk", post(get_chunk));
     let (upcall_sender, mut upcall_receiver) = unbounded_channel();
-    let upcall_session = tokio::spawn(async move {
-        while let Some(_upcall) = upcall_receiver.recv().await {
-            //
-        }
-    });
+    let pending_puts = Arc::new(Mutex::new(HashMap::new()));
+    let pending_gets = Arc::new(Mutex::new(HashMap::new()));
     let runtime = Arc::new(runtime::Builder::new_multi_thread().enable_all().build()?);
     let app = app.with_state(AppState {
-        sessions: Default::default(),
+        peers: Default::default(),
         runtime: runtime.clone(),
         upcall_sender,
+        pending_puts: pending_puts.clone(),
+        pending_gets: pending_gets.clone(),
         op_client: reqwest::Client::new(),
         benchmark_op_id: Default::default(),
         benchmark_puts: Default::default(),
         benchmark_gets: Default::default(),
     });
+
+    let upcall_session = tokio::spawn(async move {
+        while let Some(upcall) = upcall_receiver.recv().await {
+            match upcall {
+                Upcall::PutOk(PutOk(chunk)) => pending_puts
+                    .lock()
+                    .await
+                    .remove(&chunk)
+                    .unwrap()
+                    .send(())
+                    .unwrap(),
+                Upcall::GetOk(GetOk(chunk, buf)) => pending_gets
+                    .lock()
+                    .await
+                    .remove(&chunk)
+                    .unwrap()
+                    .send(buf)
+                    .unwrap(),
+            }
+        }
+    });
+
     let addr = args().nth(1);
     let addr = addr.as_deref().unwrap_or("0.0.0.0:3000");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -96,26 +121,35 @@ async fn main() -> anyhow::Result<()> {
 
 #[derive(Debug, Clone)]
 struct AppState {
-    sessions: Arc<Mutex<JoinSet<anyhow::Result<()>>>>,
+    peers: Arc<Mutex<PeersState>>,
     runtime: Arc<Runtime>,
     upcall_sender: UnboundedSender<Upcall>,
+    pending_puts: Arc<Mutex<HashMap<[u8; 32], oneshot::Sender<()>>>>,
+    #[allow(clippy::type_complexity)]
+    pending_gets: Arc<Mutex<HashMap<[u8; 32], oneshot::Sender<Vec<u8>>>>>,
     op_client: reqwest::Client,
     benchmark_op_id: Arc<AtomicU32>,
     benchmark_puts: Arc<Mutex<HashMap<u32, JoinHandle<anyhow::Result<PutResult>>>>>,
     benchmark_gets: Arc<Mutex<HashMap<u32, JoinHandle<anyhow::Result<GetResult>>>>>,
 }
 
+#[derive(Debug, Default)]
+struct PeersState {
+    sessions: JoinSet<anyhow::Result<()>>,
+    senders: Vec<Sender<Peer<[u8; 32]>>>,
+    // cancel
+}
+
 async fn ok(State(state): State<AppState>) {
-    let mut sessions = state.sessions.lock().await;
-    match timeout(Duration::ZERO, sessions.join_next()).await {
-        Err(_) | Ok(None) => {}
-        Ok(Some(result)) => result.unwrap().unwrap(),
+    let mut peers = state.peers.lock().await;
+    while let Ok(Some(result)) = timeout(Duration::ZERO, peers.sessions.join_next()).await {
+        result.unwrap().unwrap()
     }
 }
 
 async fn start_peers(State(state): State<AppState>, Json(config): Json<StartPeersConfig>) {
-    let mut sessions = state.sessions.lock().await;
-    assert!(sessions.is_empty());
+    let mut peers = state.peers.lock().await;
+    assert!(peers.sessions.is_empty());
     let mut rng = StdRng::seed_from_u64(117418);
     let mut records = Vec::new();
     let mut local_peers = Vec::new();
@@ -131,12 +165,15 @@ async fn start_peers(State(state): State<AppState>, Json(config): Json<StartPeer
         }
     }
     for (record, crypto, rng) in local_peers {
-        sessions.spawn_on(
+        let peer_session = Session::new();
+        peers.senders.push(peer_session.sender());
+        peers.sessions.spawn_on(
             start_peer(
                 record,
                 crypto,
                 rng,
                 records.clone(),
+                peer_session,
                 state.upcall_sender.clone(),
                 config.clone(),
             ),
@@ -150,6 +187,7 @@ async fn start_peer(
     crypto: Crypto<PeerId>,
     mut rng: StdRng,
     mut records: Vec<PeerRecord<SocketAddr>>,
+    mut peer_session: Session<Peer<[u8; 32]>>,
     upcall_sender: UnboundedSender<Upcall>,
     config: StartPeersConfig,
 ) -> anyhow::Result<()> {
@@ -172,7 +210,6 @@ async fn start_peer(
     let (fs_sender, fs_receiver) = unbounded_channel();
     let (crypto_worker, mut crypto_session) = spawn_backend(crypto.clone());
     let (codec_worker, mut codec_session) = spawn_backend(());
-    let mut peer_session = Session::new();
 
     let mut kademlia_peer = kademlia::Peer::new(
         buckets,
@@ -233,9 +270,42 @@ async fn start_peer(
     Err(anyhow::anyhow!("unexpected shutdown"))
 }
 
-#[allow(unused)]
-async fn put_chunk(State(state): State<AppState>, mut multipart: Multipart) {
-    //
+async fn put_chunk(
+    State(state): State<AppState>,
+    Path(peer_index): Path<usize>,
+    mut multipart: Multipart,
+) -> String {
+    let buf = multipart
+        .next_field()
+        .await
+        .unwrap()
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let chunk = buf.sha256();
+    let (sender, receiver) = oneshot::channel();
+    let replaced = state.pending_puts.lock().await.insert(chunk, sender);
+    assert!(replaced.is_none());
+    state.peers.lock().await.senders[peer_index]
+        .send(Put(chunk, buf))
+        .unwrap();
+    receiver.await.unwrap();
+    format!("{}", H256(chunk))
+}
+
+async fn get_chunk(
+    State(state): State<AppState>,
+    Path((peer_index, chunk)): Path<(usize, String)>,
+) -> Vec<u8> {
+    let chunk = chunk.parse::<H256>().unwrap().into();
+    let (sender, receiver) = oneshot::channel();
+    let replaced = state.pending_gets.lock().await.insert(chunk, sender);
+    assert!(replaced.is_none());
+    state.peers.lock().await.senders[peer_index]
+        .send(Get(chunk))
+        .unwrap();
+    receiver.await.unwrap()
 }
 
 async fn benchmark_put(State(state): State<AppState>, Json(config): Json<PutConfig>) -> Json<u32> {

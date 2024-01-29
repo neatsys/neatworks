@@ -21,6 +21,7 @@ use augustus::{
     worker::erased::Worker,
 };
 
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 use tokio_util::sync::CancellationToken;
@@ -82,7 +83,7 @@ pub trait TransferBlob: SendEvent<Transfer<PeerId, SendFragment>> {}
 impl<T: SendEvent<Transfer<PeerId, SendFragment>>> TransferBlob for T {}
 
 #[derive(Debug, Clone)]
-pub struct Put<K>(pub K, pub Vec<u8>);
+pub struct Put<K>(pub K, pub Bytes);
 #[derive(Debug, Clone)]
 pub struct Get<K>(pub K);
 
@@ -265,18 +266,22 @@ impl<K> Peer<K> {
     }
 }
 
-impl<K> OnEvent<Put<K>> for Peer<K>
-where
-    // according to `From` doc this seems to be an incorrect use of the trait
-    // should consider invent dedicated trait for converting preimage
-    for<'a> &'a K: Into<Target>,
-{
+pub trait Preimage {
+    fn target(&self) -> Target;
+}
+
+impl Preimage for [u8; 32] {
+    fn target(&self) -> Target {
+        *self
+    }
+}
+
+impl<K: Preimage> OnEvent<Put<K>> for Peer<K> {
     fn on_event(
         &mut self,
         Put(preimage, buf): Put<K>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        let chunk = (&preimage).into();
         if buf.len() != self.fragment_len as usize * self.chunk_k.get() {
             anyhow::bail!(
                 "expect chunk len {} * {}, actual {}",
@@ -285,6 +290,7 @@ where
                 buf.len()
             )
         }
+        let chunk = preimage.target();
         let replaced = self.uploads.insert(
             chunk,
             UploadState {
@@ -578,12 +584,9 @@ impl<K> OnEvent<Recv<Verifiable<FragmentAvailable>>> for Peer<K> {
     }
 }
 
-impl<K> OnEvent<Get<K>> for Peer<K>
-where
-    for<'a> &'a K: Into<Target>,
-{
+impl<K: Preimage> OnEvent<Get<K>> for Peer<K> {
     fn on_event(&mut self, Get(preimage): Get<K>, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
-        let chunk = (&preimage).into();
+        let chunk = preimage.target();
         let replaced = self.downloads.insert(
             chunk,
             DownloadState {

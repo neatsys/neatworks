@@ -36,8 +36,8 @@ async fn host_session(ip: String, seed_addr: &mut Option<String>) -> anyhow::Res
         let status = Command::new("ssh")
             .arg(&ip)
             .arg(format!(
-                "IPFS_PATH=/tmp/ipfs-{i} ipfs config Addresses.Swarm --json '[\"/ip4/{ip}/tcp/{}\"]'",
-                4000 + i
+                "IPFS_PATH=/tmp/ipfs-{i} ipfs config Addresses.Swarm --json '{}'",
+                serde_json::to_string(&[format!("/ip4/{ip}/tcp/{}", 4000 + i)])?
             ))
             .status()
             .await?;
@@ -47,8 +47,8 @@ async fn host_session(ip: String, seed_addr: &mut Option<String>) -> anyhow::Res
         let status = Command::new("ssh")
             .arg(&ip)
             .arg(format!(
-                "IPFS_PATH=/tmp/ipfs-{i} ipfs config Addresses.API --json '\"/ip4/{ip}/tcp/{}\"'",
-                5000 + i
+                "IPFS_PATH=/tmp/ipfs-{i} ipfs config Addresses.API --json '{}'",
+                serde_json::to_string(&format!("/ip4/{ip}/tcp/{}", 5000 + i))?
             ))
             .status()
             .await?;
@@ -58,8 +58,8 @@ async fn host_session(ip: String, seed_addr: &mut Option<String>) -> anyhow::Res
         let status = Command::new("ssh")
             .arg(&ip)
             .arg(format!(
-                "IPFS_PATH=/tmp/ipfs-{i} ipfs config Addresses.Gateway --json '\"/ip4/{ip}/tcp/{}\"'",
-                8000 + i
+                "IPFS_PATH=/tmp/ipfs-{i} ipfs config Addresses.Gateway --json '{}'",
+                serde_json::to_string(&[format!("/ip4/{ip}/tcp/{}", 8000 + i)])?
             ))
             .status()
             .await?;

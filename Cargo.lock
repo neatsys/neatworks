@@ -379,6 +379,7 @@ dependencies = [
  "anyhow",
  "augustus",
  "axum",
+ "bytes",
  "derive_more",
  "entropy-control-messages",
  "rand",
