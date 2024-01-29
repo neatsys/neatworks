@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::{net::IpAddr, num::NonZeroUsize, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
@@ -7,4 +7,22 @@ pub struct StartPeersConfig {
     pub ips: Vec<IpAddr>,
     pub ip_index: usize,
     pub num_peer_per_ip: usize,
+
+    pub fragment_len: u32,
+    pub chunk_k: NonZeroUsize,
+    pub chunk_n: NonZeroUsize,
+    pub chunk_m: NonZeroUsize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PutConfig {
+    pub chunk_len: u32,
+    pub k: NonZeroUsize,
+    pub peer_urls: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PutResult {
+    pub chunks: Vec<String>,
+    pub latency: Duration,
 }

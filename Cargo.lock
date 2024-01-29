@@ -382,6 +382,7 @@ dependencies = [
  "derive_more",
  "entropy-control-messages",
  "rand",
+ "reqwest",
  "serde",
  "tokio",
  "tokio-util",
