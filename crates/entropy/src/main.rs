@@ -1,5 +1,4 @@
-#![allow(unused)]
-use std::{env::args, net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use std::{env::args, future::IntoFuture, net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use augustus::{
     blob,
@@ -27,12 +26,18 @@ use tokio::{
     runtime::{self, Runtime},
     signal::ctrl_c,
     sync::{
-        mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+        mpsc::{unbounded_channel, UnboundedSender},
         Mutex,
     },
     task::JoinSet,
     time::timeout,
 };
+
+#[derive(Debug, Clone, derive_more::From)]
+enum Upcall {
+    PutOk(PutOk),
+    GetOk(GetOk),
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
@@ -40,7 +45,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/ok", get(ok))
         .route("/start-peers", post(start_peers))
         .route("/put-chunk", post(put_chunk));
-    let (upcall_sender, upcall_receiver) = unbounded_channel();
+    let (upcall_sender, mut upcall_receiver) = unbounded_channel();
+    let upcall_session = tokio::spawn(async move {
+        while let Some(_upcall) = upcall_receiver.recv().await {
+            //
+        }
+    });
     let app = app.with_state(AppState {
         sessions: Default::default(),
         runtime: runtime::Builder::new_multi_thread()
@@ -48,13 +58,16 @@ async fn main() -> anyhow::Result<()> {
             .build()?
             .into(),
         upcall_sender,
-        upcall_receiver: Arc::new(Mutex::new(upcall_receiver)),
     });
     let url = args().nth(1).ok_or(anyhow::anyhow!("not specify url"))?;
     let listener = tokio::net::TcpListener::bind(&url).await?;
-    axum::serve(listener, app)
+    let serve = axum::serve(listener, app)
         .with_graceful_shutdown(async { ctrl_c().await.unwrap() })
-        .await?;
+        .into_future();
+    tokio::select! {
+        result = serve => result?,
+        result = upcall_session => result?,
+    }
     Ok(())
 }
 
@@ -63,7 +76,6 @@ struct AppState {
     sessions: Arc<Mutex<JoinSet<anyhow::Result<()>>>>,
     runtime: Arc<Runtime>,
     upcall_sender: UnboundedSender<Upcall>,
-    upcall_receiver: Arc<Mutex<UnboundedReceiver<Upcall>>>,
 }
 
 async fn ok(State(state): State<AppState>) {
@@ -103,12 +115,6 @@ async fn start_peers(State(state): State<AppState>, Json(config): Json<StartPeer
             state.runtime.handle(),
         );
     }
-}
-
-#[derive(Debug, Clone, derive_more::From)]
-enum Upcall {
-    PutOk(PutOk),
-    GetOk(GetOk),
 }
 
 async fn start_peer(
@@ -198,6 +204,7 @@ async fn start_peer(
     Err(anyhow::anyhow!("unexpected shutdown"))
 }
 
+#[allow(unused)]
 async fn put_chunk(State(state): State<AppState>, mut multipart: Multipart) {
     //
 }
