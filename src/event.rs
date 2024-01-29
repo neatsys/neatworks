@@ -71,7 +71,7 @@ impl<M> dyn Timer<M> + '_ {
     }
 }
 
-#[derive(Debug, derive_more::From)]
+#[derive(Debug)]
 enum SessionEvent<M> {
     Timer(TimerId, M),
     Other(M),
@@ -96,7 +96,7 @@ impl<M> Eq for SessionSender<M> {}
 
 impl<M: Into<N>, N> SendEvent<M> for SessionSender<N> {
     fn send(&mut self, event: M) -> anyhow::Result<()> {
-        SendEvent::send(&mut self.0, event.into())
+        SendEvent::send(&mut self.0, SessionEvent::Other(event.into()))
     }
 }
 
@@ -256,7 +256,6 @@ pub mod erased {
     #[derive(Debug)]
     pub struct SessionSender<S>(UnboundedSender<SessionEvent<S>>);
 
-    #[derive(derive_more::From)]
     enum SessionEvent<S: ?Sized> {
         Timer(TimerId, Event<S>),
         Other(Event<S>),
@@ -274,7 +273,7 @@ pub mod erased {
         fn send(&mut self, event: M) -> anyhow::Result<()> {
             let event = move |state: &mut S, timer: &mut _| state.on_event(event, timer);
             self.0
-                .send((Box::new(event) as Event<_>).into())
+                .send(SessionEvent::Other(Box::new(event) as Event<_>))
                 .map_err(|_| anyhow::anyhow!("channel closed"))
         }
     }

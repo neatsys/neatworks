@@ -25,13 +25,15 @@ use augustus::{
     worker::erased::spawn_backend,
 };
 use axum::{
-    extract::{Multipart, Path, State},
+    extract::{DefaultBodyLimit, Multipart, Path, State},
     routing::{get, post},
     Json, Router,
 };
 
 use entropy::{Get, GetOk, MessageNet, Peer, Put, PutOk};
-use entropy_control_messages::{GetConfig, GetResult, PutConfig, PutResult, StartPeersConfig};
+use entropy_control_messages::{
+    GetConfig, GetResult, PeerUrl, PutConfig, PutResult, StartPeersConfig,
+};
 use rand::{rngs::StdRng, seq::SliceRandom, thread_rng, RngCore, SeedableRng};
 use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
@@ -64,7 +66,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/benchmark-get", post(benchmark_get))
         .route("/benchmark-get/:get_id", get(poll_benchmark_get))
         .route("/start-peers", post(start_peers))
-        .route("/put-chunk/:peer_index", post(put_chunk))
+        .route(
+            "/put-chunk/:peer_index",
+            post(put_chunk).layer(DefaultBodyLimit::max(1 << 30)),
+        )
         .route("/get-chunk/:peer_index/:chunk", post(get_chunk));
     let (upcall_sender, mut upcall_receiver) = unbounded_channel();
     let pending_puts = Arc::new(Mutex::new(HashMap::new()));
@@ -342,20 +347,34 @@ async fn benchmark_put(State(state): State<AppState>, Json(config): Json<PutConf
                     let op_client = op_client.clone();
                     let buf = buf.clone();
                     put_sessions.spawn(async move {
-                        #[allow(non_snake_case)]
-                        #[derive(Deserialize)]
-                        struct Response {
-                            Hash: String,
+                        let form = Form::new().part("", Part::bytes(buf));
+                        match peer_url {
+                            PeerUrl::Ipfs(peer_url) => {
+                                #[allow(non_snake_case)]
+                                #[derive(Deserialize)]
+                                struct Response {
+                                    Hash: String,
+                                }
+                                let response = op_client
+                                    .post(format!("{peer_url}/api/v0/add"))
+                                    .multipart(form)
+                                    .send()
+                                    .await?
+                                    .error_for_status()?
+                                    .json::<Response>()
+                                    .await?;
+                                Ok(response.Hash)
+                            }
+                            PeerUrl::Entropy(url, peer_index) => {
+                                let response = op_client
+                                    .post(format!("{url}/put-chunk/{peer_index}"))
+                                    .multipart(form)
+                                    .send()
+                                    .await?
+                                    .error_for_status()?;
+                                Ok(String::from_utf8(response.bytes().await?.to_vec())?)
+                            }
                         }
-                        let response = op_client
-                            .post(format!("{peer_url}/api/v0/add"))
-                            .multipart(Form::new().part("", Part::bytes(buf)))
-                            .send()
-                            .await?
-                            .error_for_status()?
-                            .json::<Response>()
-                            .await?;
-                        Ok(response.Hash)
                     });
                 }
                 let chunk = put_sessions
@@ -404,18 +423,31 @@ async fn benchmark_get(State(state): State<AppState>, Json(config): Json<GetConf
         for ((index, chunk), peer_url) in config.chunks.into_iter().zip(config.peer_urls) {
             let op_client = state.op_client.clone();
             get_sessions.spawn(async move {
-                #[derive(Serialize)]
-                struct Query {
-                    arg: String,
-                }
-                let buf = op_client
-                    .post(format!("{peer_url}/api/v0/cat"))
-                    .query(&Query { arg: chunk })
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .bytes()
-                    .await?;
+                let buf = match peer_url {
+                    PeerUrl::Ipfs(peer_url) => {
+                        #[derive(Serialize)]
+                        struct Query {
+                            arg: String,
+                        }
+                        op_client
+                            .post(format!("{peer_url}/api/v0/cat"))
+                            .query(&Query { arg: chunk })
+                            .send()
+                            .await?
+                            .error_for_status()?
+                            .bytes()
+                            .await?
+                    }
+                    PeerUrl::Entropy(url, peer_index) => {
+                        op_client
+                            .post(format!("{url}/get-chunk/{peer_index}/{chunk}"))
+                            .send()
+                            .await?
+                            .error_for_status()?
+                            .bytes()
+                            .await?
+                    }
+                };
                 Ok((index, buf))
             });
         }

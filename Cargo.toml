@@ -2,6 +2,7 @@
 name = "augustus"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.75.0"
 
 [workspace]
 members = [".", "crates/*", "tools/*"]
@@ -11,6 +12,11 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+[profile.artifact]
+inherits = "release"
+strip = true
+lto = true
 
 [dependencies]
 anyhow = { version = "1.0.79", features = ["backtrace"] }

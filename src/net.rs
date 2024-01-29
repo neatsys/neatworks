@@ -88,7 +88,7 @@ pub trait SendMessageToEachExt<A, M>: SendMessageToEach<A, M> {
 impl<T: ?Sized + SendMessageToEach<A, M>, A, M> SendMessageToEachExt<A, M> for T {}
 
 pub mod events {
-    #[derive(Debug, Clone, derive_more::Deref, derive_more::From)]
+    #[derive(Debug, Clone)]
     pub struct Recv<M>(pub M);
 }
 

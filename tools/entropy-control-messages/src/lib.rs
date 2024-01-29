@@ -15,10 +15,16 @@ pub struct StartPeersConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PeerUrl {
+    Ipfs(String),
+    Entropy(String, usize),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PutConfig {
     pub chunk_len: u32,
     pub k: NonZeroUsize,
-    pub peer_urls: Vec<Vec<String>>,
+    pub peer_urls: Vec<Vec<PeerUrl>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,7 +39,7 @@ pub struct GetConfig {
     pub chunk_len: u32,
     pub k: NonZeroUsize,
     pub chunks: Vec<(u32, String)>,
-    pub peer_urls: Vec<String>,
+    pub peer_urls: Vec<PeerUrl>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

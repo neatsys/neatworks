@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use entropy_control_messages::{GetConfig, GetResult, PutConfig, PutResult};
+use entropy_control_messages::{GetConfig, GetResult, PeerUrl, PutConfig, PutResult};
 use rand::{seq::SliceRandom, thread_rng};
 use tokio::time::sleep;
 
@@ -15,7 +15,7 @@ async fn main() -> anyhow::Result<()> {
 async fn benchmark_session(control_client: reqwest::Client) -> anyhow::Result<()> {
     let client_url = "http://localhost:3000".to_string();
     let peer_urls = (0..10)
-        .map(|i| format!("http://localhost:{}", 5000 + i))
+        .map(|i| PeerUrl::Ipfs(format!("http://localhost:{}", 5000 + i)))
         .collect::<Vec<_>>();
     let chunk_len = 100;
     let k = 5.try_into().unwrap();

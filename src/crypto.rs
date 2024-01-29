@@ -119,10 +119,10 @@ impl<M> Verifiable<M> {
 }
 
 pub mod events {
-    #[derive(Debug, Clone, derive_more::Deref, derive_more::From)]
+    #[derive(Debug, Clone)]
     pub struct Signed<M>(pub super::Verifiable<M>);
 
-    #[derive(Debug, Clone, derive_more::Deref, derive_more::From)]
+    #[derive(Debug, Clone)]
     pub struct Verified<M>(pub super::Verifiable<M>);
 }
 
