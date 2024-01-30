@@ -488,6 +488,9 @@ impl<K> OnEvent<fs::DownloadOk> for Peer<K> {
         fs::DownloadOk(chunk, index, fragment): fs::DownloadOk,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
+        if fragment.len() != self.fragment_len as usize {
+            return Ok(()); // incomplete sending, well, not very elegant
+        }
         if let Some(state) = self.downloads.get_mut(&chunk) {
             // println!("download {} index {index}", H256(chunk));
             return state

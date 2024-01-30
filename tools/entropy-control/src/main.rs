@@ -12,19 +12,19 @@ async fn main() -> anyhow::Result<()> {
         .timeout(Duration::from_secs(1))
         .build()?;
 
-    // let peer_urls = (0..10)
+    // let peer_urls = (0..100)
     //     .map(|i| PeerUrl::Ipfs(format!("http://localhost:{}", 5000 + i)))
     //     .collect::<Vec<_>>();
     let peer_urls = (0..100)
         .map(|i| PeerUrl::Entropy("http://localhost:3000".into(), i))
         .collect::<Vec<_>>();
 
-    let fragment_len = 100;
+    let fragment_len = 1 << 20;
     let chunk_k = 4.try_into().unwrap();
     let chunk_n = 5.try_into().unwrap();
-    let chunk_m = 6.try_into().unwrap();
-    let k = 2.try_into().unwrap();
-    let n = 3.try_into().unwrap();
+    let chunk_m = 8.try_into().unwrap();
+    let k = 8.try_into().unwrap();
+    let n = 10.try_into().unwrap();
 
     let mut start_peers_session = tokio::spawn(start_peers_session(
         control_client.clone(),
@@ -45,6 +45,7 @@ async fn main() -> anyhow::Result<()> {
             k,
             n,
             1,
+            // 3,
         );
         tokio::select! {
             result = &mut start_peers_session => result??,

@@ -21,7 +21,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn host_session(ip: String, seed_addr: &mut Option<String>) -> anyhow::Result<()> {
-    for i in 0..10 {
+    for i in 0..100 {
         let status = Command::new("ssh")
             .arg(&ip)
             .arg(format!(
