@@ -1,6 +1,8 @@
-use std::time::Duration;
+use std::{net::IpAddr, num::NonZeroUsize, time::Duration};
 
-use entropy_control_messages::{GetConfig, GetResult, PeerUrl, PutConfig, PutResult};
+use entropy_control_messages::{
+    GetConfig, GetResult, PeerUrl, PutConfig, PutResult, StartPeersConfig,
+};
 use rand::{seq::SliceRandom, thread_rng};
 use tokio::time::sleep;
 
@@ -9,20 +11,89 @@ async fn main() -> anyhow::Result<()> {
     let control_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(1))
         .build()?;
-    benchmark_session(control_client).await
+
+    // let peer_urls = (0..10)
+    //     .map(|i| PeerUrl::Ipfs(format!("http://localhost:{}", 5000 + i)))
+    //     .collect::<Vec<_>>();
+    let peer_urls = (0..100)
+        .map(|i| PeerUrl::Entropy("http://localhost:3000".into(), i))
+        .collect::<Vec<_>>();
+
+    let fragment_len = 100;
+    let chunk_k = 4.try_into().unwrap();
+    let chunk_n = 5.try_into().unwrap();
+    let chunk_m = 8.try_into().unwrap();
+    let k = 2.try_into().unwrap();
+    let n = 3.try_into().unwrap();
+
+    let start_peers_session = tokio::spawn(start_peers_session(
+        control_client.clone(),
+        "http://localhost:3000".into(),
+        fragment_len,
+        chunk_k,
+        chunk_n,
+        chunk_m,
+    ));
+    let benchmark_session = benchmark_session(
+        control_client,
+        "http://localhost:3000".into(),
+        "http://localhost:3000".into(),
+        peer_urls,
+        fragment_len * chunk_k.get() as u32,
+        k,
+        n,
+    );
+    tokio::select! {
+        result = start_peers_session => result??,
+        result = benchmark_session => result?,
+    }
+    Ok(())
 }
 
-async fn benchmark_session(control_client: reqwest::Client) -> anyhow::Result<()> {
-    let client_url = "http://localhost:3000".to_string();
-    let peer_urls = (0..10)
-        .map(|i| PeerUrl::Ipfs(format!("http://localhost:{}", 5000 + i)))
-        .collect::<Vec<_>>();
-    let chunk_len = 100;
-    let k = 5.try_into().unwrap();
-    let n = 4;
+async fn start_peers_session(
+    control_client: reqwest::Client,
+    url: String,
+    fragment_len: u32,
+    chunk_k: NonZeroUsize,
+    chunk_n: NonZeroUsize,
+    chunk_m: NonZeroUsize,
+) -> anyhow::Result<()> {
+    let config = StartPeersConfig {
+        ips: vec![IpAddr::from([127, 0, 0, 1])],
+        ip_index: 0,
+        num_peer_per_ip: 100,
+        fragment_len,
+        chunk_k,
+        chunk_n,
+        chunk_m,
+    };
+    control_client
+        .post(format!("{url}/start-peers"))
+        .json(&config)
+        .send()
+        .await?
+        .error_for_status()?;
+    loop {
+        sleep(Duration::from_secs(1)).await;
+        control_client
+            .get(format!("{url}/ok"))
+            .send()
+            .await?
+            .error_for_status()?;
+    }
+}
 
+async fn benchmark_session(
+    control_client: reqwest::Client,
+    put_url: String,
+    get_url: String,
+    peer_urls: Vec<PeerUrl>,
+    chunk_len: u32,
+    k: NonZeroUsize,
+    n: NonZeroUsize,
+) -> anyhow::Result<()> {
     let put_peer_urls = peer_urls
-        .choose_multiple(&mut thread_rng(), n)
+        .choose_multiple(&mut thread_rng(), n.into())
         .cloned()
         .collect::<Vec<_>>()
         .chunks_exact(1)
@@ -34,7 +105,7 @@ async fn benchmark_session(control_client: reqwest::Client) -> anyhow::Result<()
         peer_urls: put_peer_urls,
     };
     let put_id = control_client
-        .post(format!("{client_url}/benchmark-put"))
+        .post(format!("{put_url}/benchmark-put"))
         .json(&config)
         .send()
         .await?
@@ -44,7 +115,7 @@ async fn benchmark_session(control_client: reqwest::Client) -> anyhow::Result<()
     let result = loop {
         sleep(Duration::from_secs(1)).await;
         if let Some(result) = control_client
-            .get(format!("{client_url}/benchmark-put/{put_id}"))
+            .get(format!("{put_url}/benchmark-put/{put_id}"))
             .send()
             .await?
             .error_for_status()?
@@ -58,7 +129,7 @@ async fn benchmark_session(control_client: reqwest::Client) -> anyhow::Result<()
     let digest = result.digest;
 
     let get_peer_urls = peer_urls
-        .choose_multiple(&mut thread_rng(), n)
+        .choose_multiple(&mut thread_rng(), n.into())
         .cloned()
         .collect();
     let config = GetConfig {
@@ -68,7 +139,7 @@ async fn benchmark_session(control_client: reqwest::Client) -> anyhow::Result<()
         peer_urls: get_peer_urls,
     };
     let get_id = control_client
-        .post(format!("{client_url}/benchmark-get"))
+        .post(format!("{get_url}/benchmark-get"))
         .json(&config)
         .send()
         .await?
@@ -78,7 +149,7 @@ async fn benchmark_session(control_client: reqwest::Client) -> anyhow::Result<()
     let result = loop {
         sleep(Duration::from_secs(1)).await;
         if let Some(result) = control_client
-            .get(format!("{client_url}/benchmark-get/{get_id}"))
+            .get(format!("{get_url}/benchmark-get/{get_id}"))
             .send()
             .await?
             .error_for_status()?

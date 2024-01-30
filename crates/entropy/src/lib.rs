@@ -63,6 +63,8 @@ pub struct Pull {
     peer_id: PeerId,
 }
 
+// TODO generialize on address types, lifting up underlying `PeerNet` type
+// parameter
 pub trait Net:
     SendMessage<Multicast, Invite>
     + SendMessage<PeerId, InviteOk>
