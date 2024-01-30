@@ -330,6 +330,7 @@ impl<K> OnEvent<NewEncoder> for Peer<K> {
             chunk,
             peer_id: self.id,
         };
+        // println!("multicast Invite {}", H256(chunk));
         self.net.send(Multicast(chunk, self.chunk_m), invite)
     }
 }
@@ -439,6 +440,7 @@ impl<K> OnEvent<RecvBlob<SendFragment>> for Peer<K> {
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if let Some(state) = self.downloads.get_mut(&send_fragment.chunk) {
+            // println!("recv blob {}", H256(send_fragment.chunk));
             return self.fs.send(fs::Download(
                 send_fragment.chunk,
                 send_fragment.index,
@@ -448,19 +450,33 @@ impl<K> OnEvent<RecvBlob<SendFragment>> for Peer<K> {
         }
         if let Some(state) = self.persists.get_mut(&send_fragment.chunk) {
             let PersistStatus::Recovering(recover) = &mut state.status else {
+                if send_fragment.index == state.index {
+                    let peer_id = send_fragment
+                        .peer_id
+                        .ok_or(anyhow::anyhow!("expected peer id in SendFragment"))?;
+                    let fragment_available = FragmentAvailable {
+                        chunk: send_fragment.chunk,
+                        peer_id: self.id,
+                        peer_key: self.crypto.public_key(),
+                    };
+                    self.net
+                        .send(peer_id, self.crypto.sign(fragment_available))?
+                }
                 return Ok(());
             };
             if send_fragment.index == state.index {
                 assert!(state.notify.is_none());
-                state.notify = send_fragment.peer_id;
+                let peer_id = send_fragment
+                    .peer_id
+                    .ok_or(anyhow::anyhow!("expected peer id in SendFragment"))?;
+                state.notify = Some(peer_id);
             }
-            return {
-                let this = &mut *recover;
-                let chunk = send_fragment.chunk;
-                let index = send_fragment.index;
-                let fs: &mut dyn SendFsEvent = &mut *self.fs;
-                fs.send(fs::Download(chunk, index, stream, this.cancel.clone()))
-            };
+            return self.fs.send(fs::Download(
+                send_fragment.chunk,
+                send_fragment.index,
+                stream,
+                recover.cancel.clone(),
+            ));
         }
         Ok(())
     }
@@ -473,6 +489,7 @@ impl<K> OnEvent<fs::DownloadOk> for Peer<K> {
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if let Some(state) = self.downloads.get_mut(&chunk) {
+            // println!("download {} index {index}", H256(chunk));
             return state
                 .recover
                 .submit_decode(chunk, index, fragment, None, &self.codec_worker);
@@ -484,7 +501,7 @@ impl<K> OnEvent<fs::DownloadOk> for Peer<K> {
             if index == state.index {
                 state.status = PersistStatus::Storing;
                 self.fs.send(fs::Store(chunk, state.index, fragment))?
-            } else {
+            } else if recover.received.insert(index) {
                 recover.submit_decode(
                     chunk,
                     index,
@@ -492,7 +509,7 @@ impl<K> OnEvent<fs::DownloadOk> for Peer<K> {
                     Some(state.index),
                     &self.codec_worker,
                 )?
-            }
+            } // otherwise it's either decoded or pending
             return Ok(());
         }
         Ok(())
@@ -508,10 +525,8 @@ impl RecoverState {
         encode_index: Option<u32>,
         worker: &CodecWorker,
     ) -> anyhow::Result<()> {
-        if !self.received.insert(index) {
-            return Ok(());
-        }
         if let Some(mut decoder) = self.decoder.take() {
+            // println!("submit decode {} index {index}", H256(chunk));
             worker.submit(Box::new(move |(), sender| {
                 if !decoder.decode(index, &fragment)? {
                     sender.send(Decode(chunk, decoder))
@@ -603,6 +618,7 @@ impl<K: Preimage> OnEvent<Get<K>> for Peer<K> {
             chunk,
             peer_id: self.id,
         };
+        // println!("multicast Pull {}", H256(chunk));
         self.net.send(Multicast(chunk, self.chunk_m), pull)
     }
 }
@@ -610,15 +626,18 @@ impl<K: Preimage> OnEvent<Get<K>> for Peer<K> {
 impl<K> OnEvent<Recv<Pull>> for Peer<K> {
     fn on_event(&mut self, Recv(pull): Recv<Pull>, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
         let Some(state) = self.persists.get(&pull.chunk) else {
+            // println!("recv Pull {} (unknown)", H256(pull.chunk));
             return Ok(());
         };
         if !matches!(state.status, PersistStatus::Available) {
+            // println!("recv Pull {} (unavailable)", H256(pull.chunk));
             return Ok(());
         }
         self.pending_pulls
             .entry(pull.chunk)
             .or_default()
             .push(pull.peer_id);
+        // println!("recv Pull {}", H256(pull.chunk));
         self.fs.send(fs::Load(pull.chunk, state.index, true))
     }
 }
@@ -637,8 +656,10 @@ impl<K> OnEvent<fs::LoadOk> for Peer<K> {
             index,
             peer_id: None,
         };
+        let fragment = Bytes::from(fragment);
         for peer_id in pending {
             let fragment = fragment.clone();
+            // println!("blob transfer {}", H256(chunk));
             self.blob.send(Transfer(
                 peer_id,
                 send_fragment.clone(),
@@ -665,6 +686,7 @@ impl<K> OnEvent<Decode> for Peer<K> {
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if let Some(state) = self.downloads.get_mut(&chunk) {
+            // println!("decode {}", H256(chunk));
             return state
                 .recover
                 .on_decode(chunk, decoder, None, &self.codec_worker);
@@ -687,12 +709,12 @@ impl RecoverState {
         encode_index: Option<u32>,
         worker: &CodecWorker,
     ) -> anyhow::Result<()> {
-        assert!(self.decoder.is_none());
+        let replaced = self.decoder.replace(decoder);
+        assert!(replaced.is_none());
         if let Some(&index) = self.pending.keys().next() {
+            // println!("continue decode {} index {index}", H256(chunk));
             let fragment = self.pending.remove(&index).unwrap();
             self.submit_decode(chunk, index, fragment, encode_index, worker)?
-        } else {
-            self.decoder = Some(decoder)
         }
         Ok(())
     }
@@ -704,6 +726,7 @@ impl<K> OnEvent<Recover> for Peer<K> {
         Recover(chunk, buf): Recover,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
+        // println!("recover {}", H256(chunk));
         if let Some(state) = self.downloads.remove(&chunk) {
             state.recover.cancel.cancel();
             self.upcall.send(GetOk(state.preimage, buf))

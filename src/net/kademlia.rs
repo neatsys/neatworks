@@ -90,6 +90,7 @@ impl<M, A: Addr> OnEvent<(PeerId, M)> for Control<M, A, PeerId> {
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if let Some(record) = self.records.get(&peer_id) {
+            // eprintln!("Unicast({}) cached", H256(peer_id));
             self.inner_net.send(record.addr.clone(), message)?
         } else if let Some(querying) = self.querying_multicasts.get_mut(&peer_id) {
             // the multicast query happens to accomplish the desired query, so "pretend" to be a
@@ -99,6 +100,7 @@ impl<M, A: Addr> OnEvent<(PeerId, M)> for Control<M, A, PeerId> {
         } else if let Some(querying) = self.querying_unicasts.get_mut(&peer_id) {
             querying.messages.push(message)
         } else {
+            // eprintln!("Unicast({}) start query", H256(peer_id));
             let query = Query(peer_id, 1.try_into().unwrap());
             self.peer.send(query)?;
             self.querying_unicasts.insert(
@@ -119,6 +121,7 @@ impl<M, A> OnEvent<(Multicast<Target>, M)> for Control<M, A, Target> {
         (Multicast(target, count), message): (Multicast<Target>, M),
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
+        // eprintln!("Multicast({}, {count})", H256(target));
         if let Some(querying) = self.querying_multicasts.get_mut(&target) {
             if count <= querying.count {
                 querying.messages.push((count, message))
@@ -171,11 +174,13 @@ impl<M: Clone, A: Addr> OnEvent<QueryResult<A>> for Control<M, A, PeerId> {
         upcall: QueryResult<A>,
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        // println!("{upcall:?}");
+        // eprintln!("{upcall:?}");
         for record in &upcall.closest {
             self.records.insert(record.id, record.clone());
             // the unicast happens to be resolved by this query result
             if let Some(querying) = self.querying_unicasts.remove(&record.id) {
+                // we don't care whether that original query will finish (or have finished) or not
+                timer.unset(querying.timer)?;
                 for message in querying.messages {
                     self.inner_net.send(record.addr.clone(), message)?
                 }

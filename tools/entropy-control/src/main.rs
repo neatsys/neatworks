@@ -22,11 +22,11 @@ async fn main() -> anyhow::Result<()> {
     let fragment_len = 100;
     let chunk_k = 4.try_into().unwrap();
     let chunk_n = 5.try_into().unwrap();
-    let chunk_m = 5.try_into().unwrap();
+    let chunk_m = 6.try_into().unwrap();
     let k = 2.try_into().unwrap();
     let n = 3.try_into().unwrap();
 
-    let start_peers_session = tokio::spawn(start_peers_session(
+    let mut start_peers_session = tokio::spawn(start_peers_session(
         control_client.clone(),
         "http://localhost:3000".into(),
         fragment_len,
@@ -34,18 +34,22 @@ async fn main() -> anyhow::Result<()> {
         chunk_n,
         chunk_m,
     ));
-    let benchmark_session = benchmark_session(
-        control_client,
-        "http://localhost:3000".into(),
-        "http://localhost:3000".into(),
-        peer_urls,
-        fragment_len * chunk_k.get() as u32,
-        k,
-        n,
-    );
-    tokio::select! {
-        result = start_peers_session => result??,
-        result = benchmark_session => result?,
+    for _ in 0..10 {
+        sleep(Duration::from_secs(1)).await;
+        let benchmark_session = benchmark_session(
+            control_client.clone(),
+            "http://localhost:3000".into(),
+            "http://localhost:3000".into(),
+            peer_urls.clone(),
+            fragment_len * chunk_k.get() as u32,
+            k,
+            n,
+            1,
+        );
+        tokio::select! {
+            result = &mut start_peers_session => result??,
+            result = benchmark_session => result?,
+        }
     }
     Ok(())
 }
@@ -91,12 +95,13 @@ async fn benchmark_session(
     chunk_len: u32,
     k: NonZeroUsize,
     n: NonZeroUsize,
+    replication_factor: usize,
 ) -> anyhow::Result<()> {
     let put_peer_urls = peer_urls
-        .choose_multiple(&mut thread_rng(), n.into())
+        .choose_multiple(&mut thread_rng(), n.get() * replication_factor)
         .cloned()
         .collect::<Vec<_>>()
-        .chunks_exact(1)
+        .chunks_exact(replication_factor)
         .map(<[_]>::to_vec)
         .collect::<Vec<_>>();
     let config = PutConfig {
@@ -129,6 +134,7 @@ async fn benchmark_session(
     // return Ok(());
     let digest = result.digest;
 
+    sleep(Duration::from_secs(1)).await;
     let get_peer_urls = peer_urls
         .choose_multiple(&mut thread_rng(), n.into())
         .cloned()

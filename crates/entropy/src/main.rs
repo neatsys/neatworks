@@ -209,6 +209,7 @@ async fn start_peer(
 
     let ip = record.addr.ip();
     let mut buckets = Buckets::new(record);
+    // we don't really need this reproducible actually... just realized too late
     records.shuffle(&mut rng);
     for record in records {
         if record.id == peer_id {

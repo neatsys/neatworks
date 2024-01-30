@@ -40,11 +40,21 @@ fn distance_from(peer_id: &PeerId, distance: U256) -> Target {
     target
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PeerRecord<A> {
     pub id: PeerId,
     pub key: PublicKey,
     pub addr: A,
+}
+
+impl<A: Debug> Debug for PeerRecord<A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PeerRecord")
+            .field("id", &format!("{}", H256(self.id)))
+            .field("key", &"..")
+            .field("addr", &self.addr)
+            .finish()
+    }
 }
 
 impl<A> PeerRecord<A> {
@@ -212,7 +222,6 @@ impl<
 #[derive(Debug, Clone, Copy)]
 pub struct Query(pub Target, pub NonZeroUsize);
 
-#[derive(Debug)]
 pub struct QueryResult<A> {
     pub status: QueryStatus,
     pub target: Target,
@@ -231,6 +240,16 @@ pub enum QueryStatus {
     // this can either because the total number of discovered peers is less than `count`, otherwise
     // i'm not sure
     Halted,
+}
+
+impl<A: Debug> Debug for QueryResult<A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QueryResult")
+            .field("status", &self.status)
+            .field("target", &format!("{}", H256(self.target)))
+            .field("closest", &self.closest)
+            .finish()
+    }
 }
 
 pub trait Upcall<A>: SendEvent<QueryResult<A>> {}
@@ -382,14 +401,15 @@ impl<A: Addr> OnEvent<Signed<FindPeer<A>>> for Peer<A> {
         if records.is_empty() {
             anyhow::bail!("empty buckets when finding {}", H256(target))
         }
-        let mut contacting = records
+        let (contacting, addrs) = records
             .iter()
+            .filter(|record| record.id != self.record.id)
+            .take(NUM_CONCURRENCY)
             .map(|record| (record.id, record.addr.clone()))
-            .collect::<HashMap<_, _>>();
-        contacting.remove(&self.record.id);
+            .unzip::<_, _, _, Vec<_>>();
         let state = QueryState {
             find_peer: find_peer.clone(),
-            contacting: contacting.keys().copied().collect(),
+            contacting,
             contacted: [self.record.id].into_iter().collect(),
             records,
         };
@@ -397,7 +417,7 @@ impl<A: Addr> OnEvent<Signed<FindPeer<A>>> for Peer<A> {
         if replaced.is_some() {
             anyhow::bail!("concurrent query to {}", H256(target))
         }
-        self.net.send_to_each(contacting.into_values(), find_peer)
+        self.net.send_to_each(addrs.into_iter(), find_peer)
     }
 }
 
@@ -407,6 +427,11 @@ impl<A: Addr> OnEvent<Recv<Verifiable<FindPeer<A>>>> for Peer<A> {
         Recv(find_peer): Recv<Verifiable<FindPeer<A>>>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
+        // eprintln!(
+        //     "{} contacted for target {}",
+        //     H256(self.record.id),
+        //     H256(find_peer.target)
+        // );
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
             if crypto
                 .verify_with_public_key(
@@ -418,6 +443,7 @@ impl<A: Addr> OnEvent<Recv<Verifiable<FindPeer<A>>>> for Peer<A> {
             {
                 sender.send(Verified(find_peer))
             } else {
+                eprintln!("fail to verify FindPeer");
                 Ok(())
             }
         }))
@@ -483,6 +509,7 @@ impl<A: Addr> OnEvent<Recv<Verifiable<FindPeerOk<A>>>> for Peer<A> {
             {
                 sender.send(Verified(find_peer_ok))
             } else {
+                eprintln!("fail to verify FindPeerOk");
                 Ok(())
             }
         }))
@@ -522,6 +549,20 @@ impl<A: Addr> OnEvent<Verified<FindPeerOk<A>>> for Peer<A> {
                 Err(index) => state.records.insert(index, record),
             }
         }
+        // use std::fmt::Write;
+        // let mut out = String::new();
+        // writeln!(&mut out, "records of {}", H256(target))?;
+        // for record in &state.records {
+        //     write!(&mut out, "  {record:?}")?;
+        //     if state.contacted.contains(&record.id) {
+        //         writeln!(&mut out, " (contacted)")?
+        //     } else if state.contacting.contains(&record.id) {
+        //         writeln!(&mut out, " (contacting)")?
+        //     } else {
+        //         writeln!(&mut out)?
+        //     }
+        // }
+        // eprint!("{out}");
         let closest = state
             .records
             .iter()
@@ -539,10 +580,6 @@ impl<A: Addr> OnEvent<Verified<FindPeerOk<A>>> for Peer<A> {
                 self.query_states.remove(&target);
                 break 'upcall QueryStatus::Converge;
             }
-            if count == state.records.len() {
-                self.query_states.remove(&target);
-                break 'upcall QueryStatus::Halted;
-            }
             let mut addrs = Vec::new();
             while state.contacting.len() < NUM_CONCURRENCY {
                 let Some(record) = state.records.iter().find(|record| {
@@ -550,8 +587,13 @@ impl<A: Addr> OnEvent<Verified<FindPeerOk<A>>> for Peer<A> {
                 }) else {
                     break;
                 };
+                // eprintln!("contacting {record:?}");
                 state.contacting.insert(record.id);
                 addrs.push(record.addr.clone());
+            }
+            if state.contacting.is_empty() {
+                self.query_states.remove(&target);
+                break 'upcall QueryStatus::Halted;
             }
             if !addrs.is_empty() {
                 self.net

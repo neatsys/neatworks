@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 
 use tokio::{
+    runtime::{self, RuntimeFlavor},
     sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
     task::JoinSet,
 };
@@ -35,6 +36,9 @@ impl<S, M> SpawnExecutor<S, M> {
         M: 'static,
     {
         // println!("executor run");
+        if runtime::Handle::current().runtime_flavor() != RuntimeFlavor::MultiThread {
+            eprintln!("SpawnExecutor should be better run in multithread runtime")
+        }
         loop {
             enum Select<S, E> {
                 Recv(Work<S, E>),
