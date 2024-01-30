@@ -22,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
     let fragment_len = 100;
     let chunk_k = 4.try_into().unwrap();
     let chunk_n = 5.try_into().unwrap();
-    let chunk_m = 8.try_into().unwrap();
+    let chunk_m = 5.try_into().unwrap();
     let k = 2.try_into().unwrap();
     let n = 3.try_into().unwrap();
 
@@ -126,6 +126,7 @@ async fn benchmark_session(
         }
     };
     println!("Put {:?}", result.latency);
+    // return Ok(());
     let digest = result.digest;
 
     let get_peer_urls = peer_urls

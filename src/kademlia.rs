@@ -93,7 +93,10 @@ impl<A> Buckets<A> {
         distance(&self.origin.id, target).leading_zeros() as _
     }
 
-    pub fn insert(&mut self, record: PeerRecord<A>) {
+    pub fn insert(&mut self, record: PeerRecord<A>) -> anyhow::Result<()> {
+        if record.id == self.origin.id {
+            anyhow::bail!("cannot insert origin id")
+        }
         let index = self.index(&record.id);
         let bucket = &mut self.distances[index];
         // if record exists in the bucket, move it to the end
@@ -107,7 +110,7 @@ impl<A> Buckets<A> {
         }
         if bucket.records.len() < BUCKET_SIZE {
             bucket.records.push(record);
-            return;
+            return Ok(());
         }
 
         // repeat on cached entries, only shifting on a full cache
@@ -122,7 +125,8 @@ impl<A> Buckets<A> {
         if bucket.cached_records.len() == BUCKET_SIZE {
             bucket.cached_records.remove(0);
         }
-        bucket.cached_records.push(record)
+        bucket.cached_records.push(record);
+        Ok(())
     }
 }
 
@@ -428,7 +432,7 @@ impl<A: Addr> OnEvent<Verified<FindPeer<A>>> for Peer<A> {
     ) -> anyhow::Result<()> {
         let find_peer = find_peer.into_inner();
         let dest = find_peer.record.addr.clone();
-        self.buckets.insert(find_peer.record);
+        self.buckets.insert(find_peer.record)?;
         self.find_peer_ok_seq += 1;
         let find_peer_ok = FindPeerOk {
             seq: self.find_peer_ok_seq,
@@ -493,7 +497,7 @@ impl<A: Addr> OnEvent<Verified<FindPeerOk<A>>> for Peer<A> {
     ) -> anyhow::Result<()> {
         let find_peer_ok = find_peer_ok.into_inner();
         let peer_id = find_peer_ok.record.id;
-        self.buckets.insert(find_peer_ok.record);
+        self.buckets.insert(find_peer_ok.record)?;
         // any necessity of ignoring replies of previous queries (that happens to be for the same
         // target)?
         let target = find_peer_ok.target;
@@ -673,7 +677,7 @@ mod tests {
         let mut buckets = Buckets::new(origin);
         for _ in 0..1000 {
             let (_, public_key) = secp.generate_keypair(&mut rand::thread_rng());
-            buckets.insert(PeerRecord::new(public_key, ()))
+            buckets.insert(PeerRecord::new(public_key, ()))?
         }
         for _ in 0..1000 {
             let records = buckets.find_closest(&rand::random(), 20.try_into().unwrap());

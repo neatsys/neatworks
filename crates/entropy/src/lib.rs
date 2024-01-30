@@ -23,7 +23,7 @@ use augustus::{
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use tokio::{io::AsyncWriteExt, net::TcpStream};
+use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use wirehair::{Decoder, Encoder};
 
@@ -183,6 +183,7 @@ struct UploadState<K> {
     encoder: Option<Arc<Encoder>>,
     pending: HashMap<u32, PeerId>,
     available: HashSet<PeerId>,
+    cancel: CancellationToken,
 }
 
 #[derive(Debug)]
@@ -300,6 +301,7 @@ impl<K: Preimage> OnEvent<Put<K>> for Peer<K> {
                 encoder: None,
                 pending: Default::default(),
                 available: Default::default(),
+                cancel: CancellationToken::new(),
             },
         );
         if replaced.is_some() {
@@ -344,7 +346,7 @@ impl<K> OnEvent<Recv<Invite>> for Peer<K> {
         if invite.peer_id == self.id {
             return Ok(());
         }
-        let index = 0; // TODO
+        let index = rand::random(); // TODO
         self.persists.entry(invite.chunk).or_insert(PersistState {
             index,
             status: PersistStatus::Recovering(RecoverState::new(self.fragment_len, self.chunk_k)?),
@@ -407,13 +409,20 @@ impl<K> OnEvent<Encode> for Peer<K> {
             index,
             peer_id: Some(self.id),
         };
+        let cancel = state.cancel.clone();
         self.blob.send(Transfer(
             *peer_id,
             send_fragment,
             Box::new(move |mut stream| {
                 Box::pin(async move {
+                    if tokio::select! {
+                        result = stream.write_all(&fragment) => result,
+                        // concurrent sending finished on some other n peers
+                        () = cancel.cancelled() => return Ok(()),
+                    }
                     // possible due to the invited peer has recovered from other concurrent sendings
-                    if stream.write_all(&fragment).await.is_err() {
+                    .is_err()
+                    {
                         //
                     }
                     Ok(())
@@ -430,12 +439,12 @@ impl<K> OnEvent<RecvBlob<SendFragment>> for Peer<K> {
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if let Some(state) = self.downloads.get_mut(&send_fragment.chunk) {
-            return state.recover.submit_download(
+            return self.fs.send(fs::Download(
                 send_fragment.chunk,
                 send_fragment.index,
                 stream,
-                &mut *self.fs,
-            );
+                state.recover.cancel.clone(),
+            ));
         }
         if let Some(state) = self.persists.get_mut(&send_fragment.chunk) {
             let PersistStatus::Recovering(recover) = &mut state.status else {
@@ -445,29 +454,15 @@ impl<K> OnEvent<RecvBlob<SendFragment>> for Peer<K> {
                 assert!(state.notify.is_none());
                 state.notify = send_fragment.peer_id;
             }
-            return recover.submit_download(
-                send_fragment.chunk,
-                send_fragment.index,
-                stream,
-                &mut *self.fs,
-            );
+            return {
+                let this = &mut *recover;
+                let chunk = send_fragment.chunk;
+                let index = send_fragment.index;
+                let fs: &mut dyn SendFsEvent = &mut *self.fs;
+                fs.send(fs::Download(chunk, index, stream, this.cancel.clone()))
+            };
         }
         Ok(())
-    }
-}
-
-impl RecoverState {
-    fn submit_download(
-        &mut self,
-        chunk: Chunk,
-        index: u32,
-        stream: TcpStream,
-        fs: &mut dyn SendFsEvent,
-    ) -> anyhow::Result<()> {
-        if !self.received.insert(index) {
-            return Ok(());
-        }
-        fs.send(fs::Download(chunk, index, stream, self.cancel.clone()))
     }
 }
 
@@ -513,14 +508,18 @@ impl RecoverState {
         encode_index: Option<u32>,
         worker: &CodecWorker,
     ) -> anyhow::Result<()> {
+        if !self.received.insert(index) {
+            return Ok(());
+        }
         if let Some(mut decoder) = self.decoder.take() {
             worker.submit(Box::new(move |(), sender| {
-                if decoder.decode(index, &fragment)? {
+                if !decoder.decode(index, &fragment)? {
                     sender.send(Decode(chunk, decoder))
                 } else if let Some(index) = encode_index {
                     let fragment = Encoder::try_from(decoder)?.encode(index)?;
                     sender.send(RecoverEncode(chunk, fragment))
                 } else {
+                    // recover does not return error when there's no sufficient block decoded??
                     sender.send(Recover(chunk, decoder.recover()?))
                 }
             }))
@@ -580,6 +579,7 @@ impl<K> OnEvent<Recv<Verifiable<FragmentAvailable>>> for Peer<K> {
         state.available.insert(fragment_available.peer_id);
         if state.available.len() == self.chunk_n.into() {
             let state = self.uploads.remove(&fragment_available.chunk).unwrap();
+            state.cancel.cancel();
             self.upcall.send(PutOk(state.preimage))?
         }
         Ok(())
@@ -603,7 +603,7 @@ impl<K: Preimage> OnEvent<Get<K>> for Peer<K> {
             chunk,
             peer_id: self.id,
         };
-        self.net.send(Multicast(chunk, self.chunk_n), pull)
+        self.net.send(Multicast(chunk, self.chunk_m), pull)
     }
 }
 
@@ -898,11 +898,12 @@ pub mod fs {
                 Select::Recv(Event::Download(Download(chunk, index, mut stream, cancel))) => {
                     download_tasks.spawn(async move {
                         let mut fragment = Vec::new();
-                        tokio::select! {
-                            fragment = stream.read_to_end(&mut fragment) => fragment?,
+                        let result = tokio::select! {
+                            result = stream.read_to_end(&mut fragment) => result,
                             () = cancel.cancelled() => return Ok(None),
                         };
-                        Ok(Some((chunk, index, fragment)))
+                        // Ok(None) if sender cancel the sending
+                        Ok(result.ok().map(|_| (chunk, index, fragment)))
                     });
                 }
                 Select::JoinNextStore(chunk) => upcall.send(StoreOk(chunk))?,

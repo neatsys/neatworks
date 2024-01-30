@@ -81,7 +81,7 @@ impl<M, A, B> Control<M, A, B> {
 }
 
 #[derive(Debug)]
-pub struct QueryTimeout(pub Target);
+pub struct QueryTimeout(pub Query);
 
 impl<M, A: Addr> OnEvent<(PeerId, M)> for Control<M, A, PeerId> {
     fn on_event(
@@ -99,12 +99,13 @@ impl<M, A: Addr> OnEvent<(PeerId, M)> for Control<M, A, PeerId> {
         } else if let Some(querying) = self.querying_unicasts.get_mut(&peer_id) {
             querying.messages.push(message)
         } else {
-            self.peer.send(Query(peer_id, 1.try_into().unwrap()))?;
+            let query = Query(peer_id, 1.try_into().unwrap());
+            self.peer.send(query)?;
             self.querying_unicasts.insert(
                 peer_id,
                 QueryingUnicast {
                     messages: vec![message],
-                    timer: timer.set(Duration::from_secs(10), QueryTimeout(peer_id))?,
+                    timer: timer.set(Duration::from_secs(1), QueryTimeout(query))?,
                 },
             );
         }
@@ -136,13 +137,14 @@ impl<M, A> OnEvent<(Multicast<Target>, M)> for Control<M, A, Target> {
                 .push((count, message));
             return Ok(());
         }
-        self.peer.send(Query(target, count))?;
+        let query = Query(target, count);
+        self.peer.send(query)?;
         self.querying_multicasts.insert(
             target,
             QueryMulticast {
                 count,
                 messages: vec![(count, message)],
-                timer: timer.set(Duration::from_secs(10), QueryTimeout(target))?,
+                timer: timer.set(Duration::from_secs(1), QueryTimeout(query))?,
             },
         );
         Ok(())
@@ -152,11 +154,14 @@ impl<M, A> OnEvent<(Multicast<Target>, M)> for Control<M, A, Target> {
 impl<M, A, B> OnEvent<QueryTimeout> for Control<M, A, B> {
     fn on_event(
         &mut self,
-        QueryTimeout(target): QueryTimeout,
+        QueryTimeout(Query(target, count)): QueryTimeout,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         // TODO gracefully handle if necessary
-        Err(anyhow::anyhow!("query timeout for {}", H256(target)))
+        Err(anyhow::anyhow!(
+            "query timeout for ({}, {count})",
+            H256(target)
+        ))
     }
 }
 
@@ -204,13 +209,14 @@ impl<M: Clone, A: Addr> OnEvent<QueryResult<A>> for Control<M, A, PeerId> {
             assert!(!self.querying_unicasts.contains_key(&upcall.target));
             assert!(!self.querying_multicasts.contains_key(&upcall.target));
             let count = *multicasts.iter().map(|(count, _)| count).max().unwrap();
-            self.peer.send(Query(upcall.target, count))?; // TODO set timer
+            let query = Query(upcall.target, count);
+            self.peer.send(query)?;
             self.querying_multicasts.insert(
                 upcall.target,
                 QueryMulticast {
                     count,
                     messages: multicasts,
-                    timer: timer.set(Duration::from_secs(10), QueryTimeout(upcall.target))?,
+                    timer: timer.set(Duration::from_secs(10), QueryTimeout(query))?,
                 },
             );
         }

@@ -355,11 +355,25 @@ pub mod erased {
         }
 
         fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()> {
+            Session::unset(self, timer_id)
+        }
+    }
+
+    impl<S: ?Sized> Session<S> {
+        fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()> {
             self.timers
                 .remove(&timer_id)
                 .ok_or(anyhow::anyhow!("timer not exists"))?
                 .abort();
             Ok(())
+        }
+    }
+
+    impl<S: ?Sized> Drop for Session<S> {
+        fn drop(&mut self) {
+            while let Some(timer_id) = self.timers.keys().next() {
+                self.unset(*timer_id).unwrap()
+            }
         }
     }
 }

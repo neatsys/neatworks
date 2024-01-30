@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
         let mut buckets = Buckets::new(peer_record);
         let seed_peer = PeerRecord::new(seed_crypto.public_key(), seed_addr.parse()?);
         send_hello = Some(seed_peer.id);
-        buckets.insert(seed_peer);
+        buckets.insert(seed_peer)?;
         peer = Peer::new(
             buckets,
             MessageNet::new(socket_net.clone()),

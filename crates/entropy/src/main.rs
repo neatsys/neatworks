@@ -89,6 +89,11 @@ async fn main() -> anyhow::Result<()> {
 
     let upcall_session = tokio::spawn(async move {
         while let Some(upcall) = upcall_receiver.recv().await {
+            // {
+            //     use std::io::Write;
+            //     let mut stdout = std::io::stdout().lock();
+            //     writeln!(&mut stdout, "{upcall:?}").unwrap();
+            // }
             match upcall {
                 Upcall::PutOk(PutOk(chunk)) => pending_puts
                     .lock()
@@ -206,7 +211,10 @@ async fn start_peer(
     let mut buckets = Buckets::new(record);
     records.shuffle(&mut rng);
     for record in records {
-        buckets.insert(record)
+        if record.id == peer_id {
+            continue;
+        }
+        buckets.insert(record)?
     }
 
     let mut kademlia_session = Session::new();
@@ -295,8 +303,9 @@ async fn put_chunk(
     state.peers.lock().await.senders[peer_index]
         .send(Put(chunk, buf))
         .unwrap();
-    receiver.await.unwrap();
-    format!("{}", H256(chunk))
+    // detach receiving, so that even if http connection closed receiver keeps alive
+    tokio::spawn(receiver).await.unwrap().unwrap();
+    format!("{:x}", H256(chunk))
 }
 
 async fn get_chunk(
@@ -310,7 +319,7 @@ async fn get_chunk(
     state.peers.lock().await.senders[peer_index]
         .send(Get(chunk))
         .unwrap();
-    receiver.await.unwrap()
+    tokio::spawn(receiver).await.unwrap().unwrap()
 }
 
 async fn benchmark_put(State(state): State<AppState>, Json(config): Json<PutConfig>) -> Json<u32> {
