@@ -1,5 +1,6 @@
-use std::{collections::HashMap, fmt::Debug, num::NonZeroUsize, time::Duration};
+use std::{collections::HashMap, fmt::Debug, hash::Hash, num::NonZeroUsize, time::Duration};
 
+use lru::LruCache;
 use primitive_types::H256;
 
 use crate::{
@@ -38,10 +39,12 @@ pub struct Control<M, A, B = [u8; 32]> {
     querying_unicasts: HashMap<B, QueryingUnicast<M>>,
     querying_multicasts: HashMap<B, QueryMulticast<M>>,
     pending_multicasts: HashMap<B, Vec<(NonZeroUsize, M)>>,
-    records: HashMap<B, PeerRecord<A>>,
+    // addresses that recently send messages to
+    // assuming "address locality" that those addresses are more likely to be sent to later
+    records: LruCache<B, PeerRecord<A>>,
 }
 
-impl<M: Debug, A: Debug, B: Debug> Debug for Control<M, A, B> {
+impl<M: Debug, A: Debug, B: Debug + Eq + Hash> Debug for Control<M, A, B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Control")
             .field("pending_messages", &self.querying_unicasts)
@@ -63,7 +66,7 @@ struct QueryMulticast<M> {
     timer: TimerId,
 }
 
-impl<M, A, B> Control<M, A, B> {
+impl<M, A, B: Eq + Hash> Control<M, A, B> {
     // peer must have finished bootstrap
     pub fn new(
         inner_net: impl Net<A, M> + Send + Sync + 'static,
@@ -75,7 +78,10 @@ impl<M, A, B> Control<M, A, B> {
             querying_unicasts: Default::default(),
             querying_multicasts: Default::default(),
             pending_multicasts: Default::default(),
-            records: Default::default(),
+            // cache size is arbitrary picked for entropy
+            // in entropy an address may be unicast after it has been multicast, and the multicast
+            // has at most 120 receivers
+            records: LruCache::new(160.try_into().unwrap()),
         }
     }
 }
@@ -176,9 +182,9 @@ impl<M: Clone, A: Addr> OnEvent<QueryResult<A>> for Control<M, A, PeerId> {
     ) -> anyhow::Result<()> {
         // eprintln!("{upcall:?}");
         for record in &upcall.closest {
-            self.records.insert(record.id, record.clone());
             // the unicast happens to be resolved by this query result
             if let Some(querying) = self.querying_unicasts.remove(&record.id) {
+                self.records.push(record.id, record.clone());
                 // we don't care whether that original query will finish (or have finished) or not
                 timer.unset(querying.timer)?;
                 for message in querying.messages {
@@ -191,11 +197,14 @@ impl<M: Clone, A: Addr> OnEvent<QueryResult<A>> for Control<M, A, PeerId> {
         }
         if let Some(querying) = self.querying_unicasts.remove(&upcall.target) {
             timer.unset(querying.timer)?;
-            assert!(!self.records.contains_key(&upcall.target));
+            assert!(!self.records.contains(&upcall.target));
             // the destination is unreachable and the messages are dropped
             return Ok(());
         }
         if let Some(querying) = self.querying_multicasts.remove(&upcall.target) {
+            for record in &upcall.closest {
+                self.records.push(record.id, record.clone());
+            }
             timer.unset(querying.timer)?;
             for (count, message) in querying.messages {
                 if count.get() > upcall.closest.len() {
