@@ -60,6 +60,9 @@ enum Upcall {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let app = Router::new()
+        // interestingly this artifact/server has dual purposes
+        // it is a common (in this codebase) benchmark server that somehow accepts command line
+        // arguments and report results through HTTP, with following endpoints
         .route("/ok", get(ok))
         .route("/benchmark-put", post(benchmark_put))
         .route("/benchmark-put/:put_id", get(poll_benchmark_put))
@@ -67,11 +70,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/benchmark-get/:get_id", get(poll_benchmark_get))
         .route("/start-peers", post(start_peers))
         .route("/stop-peers", post(stop_peers))
+        // and the same time, it also includes the following endpoints that belongs to the internal
+        // of entropy, which happens to also communiate using HTTP (for aligning with IPFS)
         .route(
             "/put-chunk/:peer_index",
             post(put_chunk).layer(DefaultBodyLimit::max(1 << 30)),
         )
         .route("/get-chunk/:peer_index/:chunk", post(get_chunk));
+    // nevertheless, no significant workload running in the server loop still; the internal
+    // endpoints simply hand off requests to peers' dedicated runtime
+
     let (upcall_sender, mut upcall_receiver) = unbounded_channel();
     let pending_puts = Arc::new(Mutex::new(HashMap::new()));
     let pending_gets = Arc::new(Mutex::new(HashMap::new()));

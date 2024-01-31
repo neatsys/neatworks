@@ -1,4 +1,4 @@
-use std::{net::IpAddr, num::NonZeroUsize, time::Duration};
+use std::{env::args, net::IpAddr, num::NonZeroUsize, time::Duration};
 
 use entropy_control::terraform_instances;
 use entropy_control_messages::{
@@ -11,18 +11,17 @@ const NUM_PEER_PER_IP: usize = 100;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    let category = args().nth(1);
+    if category.as_deref() == Some("ipfs") {
+        return benchmark_ipfs().await;
+    }
+
     let control_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .build()?;
 
     let instances = terraform_instances().await?;
     // let instances = vec![instances[0].clone()];
-    // let peer_urls = instances
-    //     .iter()
-    //     .flat_map(|instance| {
-    //         (0..100).map(|i| PeerUrl::Ipfs(format!("http://{}:{}", instance.public_ip, 5000 + i)))
-    //     })
-    //     .collect::<Vec<_>>();
     let peer_urls = instances
         .iter()
         .flat_map(|instance| {
@@ -31,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
         })
         .collect::<Vec<_>>();
 
-    let fragment_len = 1 << 25;
+    let fragment_len = 100;
     let chunk_k = NonZeroUsize::new(4).unwrap();
     let chunk_n = NonZeroUsize::new(5).unwrap();
     let chunk_m = NonZeroUsize::new(8).unwrap();
@@ -77,7 +76,6 @@ async fn main() -> anyhow::Result<()> {
             k,
             n,
             1,
-            // 3,
         );
         tokio::select! {
             Some(result) = start_peers_sessions.join_next() => result??,
@@ -100,6 +98,54 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn benchmark_ipfs() -> anyhow::Result<()> {
+    let control_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()?;
+
+    let instances = terraform_instances().await?;
+    // let instances = vec![instances[0].clone()];
+    let peer_urls = instances
+        .iter()
+        .flat_map(|instance| {
+            (0..100).map(|i| PeerUrl::Ipfs(format!("http://{}:{}", instance.public_ip, 5000 + i)))
+        })
+        .collect::<Vec<_>>();
+
+    let fragment_len = 1 << 25;
+    let chunk_k = NonZeroUsize::new(4).unwrap();
+    let k = NonZeroUsize::new(8).unwrap();
+    let n = NonZeroUsize::new(10).unwrap();
+
+    for _ in 0..10 {
+        sleep(Duration::from_secs(3)).await;
+        let put_instance = instances
+            .choose(&mut thread_rng())
+            .ok_or(anyhow::anyhow!("no instance available"))?;
+        let get_instance = instances
+            .choose(&mut thread_rng())
+            .ok_or(anyhow::anyhow!("no instance available"))?;
+        println!(
+            "Put {} Get {}",
+            put_instance.public_ip, get_instance.public_ip
+        );
+        let benchmark_session = benchmark_session(
+            control_client.clone(),
+            format!("http://{}:3000", put_instance.public_ip),
+            format!("http://{}:3000", get_instance.public_ip),
+            peer_urls.clone(),
+            fragment_len * chunk_k.get() as u32,
+            k,
+            n,
+            3,
+        );
+        benchmark_session.await?
+        // break;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn start_peers_session(
     control_client: reqwest::Client,
     url: String,
@@ -146,6 +192,7 @@ async fn stop_peers_session(control_client: reqwest::Client, url: String) -> any
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn benchmark_session(
     control_client: reqwest::Client,
     put_url: String,
