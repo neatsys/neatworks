@@ -26,7 +26,10 @@ async fn main() -> anyhow::Result<()> {
         let public_ip = args()
             .nth(2)
             .ok_or(anyhow::anyhow!("public ip is not specified"))?;
-        let mut seed_addr = args().nth(3);
+        let private_ip = args()
+            .nth(3)
+            .ok_or(anyhow::anyhow!("private ip is not specified"))?;
+        let mut seed_addr = args().nth(4);
         for i in 0..100 {
             let ipfs = Ipfs(i);
             let status = ipfs
@@ -40,7 +43,10 @@ async fn main() -> anyhow::Result<()> {
             if !status.success() {
                 anyhow::bail!("Command `ipfs init` exit with {status}")
             }
-            let swarm_addrs = serde_json::to_string(&[format!("/ip4/0.0.0.0/tcp/{}", 4000 + i)])?;
+            let swarm_addrs = serde_json::to_string(&[
+                format!("/ip4/{public_ip}/tcp/{}", 4000 + i),
+                format!("/ip4/{private_ip}/tcp/{}", 4000 + i),
+            ])?;
             let status = ipfs
                 .run(|command| {
                     command
@@ -129,14 +135,13 @@ async fn main() -> anyhow::Result<()> {
                     Addresses: Option<Vec<String>>,
                 }
                 let Some(addresses) = serde_json::from_slice::<Out>(&out)?.Addresses else {
-                    println!("Wait seed peer to obtain address");
+                    eprintln!("Wait seed peer to obtain address");
                     continue;
                 };
                 let addr = addresses
                     .into_iter()
                     .next()
-                    .ok_or(anyhow::anyhow!("seed peer has no address"))?
-                    .replace("127.0.0.1", &public_ip);
+                    .ok_or(anyhow::anyhow!("seed peer has no address"))?;
                 print!("{addr}");
                 seed_addr = Some(addr);
                 // println!("Seed address {seed_addr:?}")

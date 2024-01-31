@@ -1,5 +1,6 @@
 use std::{net::IpAddr, num::NonZeroUsize, time::Duration};
 
+use entropy_control::terraform_instances;
 use entropy_control_messages::{
     GetConfig, GetResult, PeerUrl, PutConfig, PutResult, StartPeersConfig,
 };
@@ -12,34 +13,48 @@ async fn main() -> anyhow::Result<()> {
         .timeout(Duration::from_secs(1))
         .build()?;
 
-    let peer_urls = (0..100)
-        .map(|i| PeerUrl::Ipfs(format!("http://localhost:{}", 5000 + i)))
+    let instances = terraform_instances().await?;
+    let peer_urls = instances
+        .iter()
+        .flat_map(|instance| {
+            (0..100).map(|i| PeerUrl::Ipfs(format!("http://{}:{}", instance.public_ip, 5000 + i)))
+        })
         .collect::<Vec<_>>();
     // let peer_urls = (0..100)
     //     .map(|i| PeerUrl::Entropy("http://localhost:3000".into(), i))
     //     .collect::<Vec<_>>();
 
     let fragment_len = 1 << 20;
-    let chunk_k = 4.try_into().unwrap();
-    let chunk_n = 5.try_into().unwrap();
-    let chunk_m = 8.try_into().unwrap();
+    let chunk_k = NonZeroUsize::new(4).unwrap();
+    let chunk_n = NonZeroUsize::new(5).unwrap();
+    let chunk_m = NonZeroUsize::new(8).unwrap();
     let k = 8.try_into().unwrap();
     let n = 10.try_into().unwrap();
 
-    let mut start_peers_session = tokio::spawn(start_peers_session(
-        control_client.clone(),
-        "http://localhost:3000".into(),
-        fragment_len,
-        chunk_k,
-        chunk_n,
-        chunk_m,
-    ));
+    // let mut start_peers_session = tokio::spawn(start_peers_session(
+    //     control_client.clone(),
+    //     "http://localhost:3000".into(),
+    //     fragment_len,
+    //     chunk_k,
+    //     chunk_n,
+    //     chunk_m,
+    // ));
     for _ in 0..10 {
         sleep(Duration::from_secs(1)).await;
+        let put_instance = instances
+            .choose(&mut thread_rng())
+            .ok_or(anyhow::anyhow!("no instance available"))?;
+        let get_instance = instances
+            .choose(&mut thread_rng())
+            .ok_or(anyhow::anyhow!("no instance available"))?;
+        println!(
+            "Put {} Get {}",
+            put_instance.public_ip, get_instance.public_ip
+        );
         let benchmark_session = benchmark_session(
             control_client.clone(),
-            "http://localhost:3000".into(),
-            "http://localhost:3000".into(),
+            format!("http://{}:3000", put_instance.public_ip),
+            format!("http://{}:3000", get_instance.public_ip),
             peer_urls.clone(),
             fragment_len * chunk_k.get() as u32,
             k,
@@ -48,11 +63,12 @@ async fn main() -> anyhow::Result<()> {
             3,
         );
         tokio::select! {
-            result = &mut start_peers_session => result??,
+            // result = &mut start_peers_session => result??,
             result = benchmark_session => result?,
         }
+        // break;
     }
-    stop_peers_session(control_client, "http://localhost:3000".into()).await?;
+    // stop_peers_session(control_client, "http://localhost:3000".into()).await?;
     Ok(())
 }
 

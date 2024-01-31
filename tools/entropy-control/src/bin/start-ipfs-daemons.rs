@@ -16,6 +16,7 @@ async fn main() -> anyhow::Result<()> {
     host_session(
         instances[0].public_dns.clone(),
         instances[0].public_ip,
+        instances[0].private_ip,
         &mut seed_addr,
     )
     .await?;
@@ -26,6 +27,7 @@ async fn main() -> anyhow::Result<()> {
             host_session(
                 instance.public_dns,
                 instance.public_ip,
+                instance.private_ip,
                 &mut Some(seed_addr),
             )
             .await
@@ -49,6 +51,7 @@ async fn join_sessions(sessions: &mut JoinSet<anyhow::Result<()>>) -> anyhow::Re
 async fn host_session(
     ssh_host: String,
     public_ip: IpAddr,
+    private_ip: IpAddr,
     seed_addr: &mut Option<String>,
 ) -> anyhow::Result<()> {
     let mut command = Command::new("ssh");
@@ -56,7 +59,8 @@ async fn host_session(
         .arg(ssh_host)
         .arg("./ipfs-script")
         .arg("start-peers")
-        .arg(public_ip.to_string());
+        .arg(public_ip.to_string())
+        .arg(private_ip.to_string());
     let status;
     if let Some(seed_addr) = seed_addr {
         command = command.arg(seed_addr);
