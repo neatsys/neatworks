@@ -16,6 +16,7 @@ struct TerraformOutputInstances {
 #[derive(Debug, Deserialize)]
 pub struct TerraformOutputInstance {
     pub public_ip: IpAddr,
+    pub private_ip: IpAddr,
     pub public_dns: String,
 }
 

@@ -45,7 +45,7 @@ variable "state" {
 module "group-1" {
   source = "./group"
   providers = {
-    aws = aws.ap-east-1
+    aws = aws.ap-southeast-1
   }
 
   instance_state = var.state

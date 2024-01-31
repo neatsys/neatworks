@@ -209,11 +209,14 @@ async fn start_peer(
     let path = std::path::Path::new(&path);
     let _ = remove_dir_all(path).await;
     create_dir(path).await?;
-    let socket_net = Udp(UdpSocket::bind(record.addr).await?.into());
+    // bind ADDR_ANY for working on EC2
+    let socket_net = Udp(UdpSocket::bind(format!("0.0.0.0:{}", record.addr.port()))
+        .await?
+        .into());
 
     let ip = record.addr.ip();
     let mut buckets = Buckets::new(record);
-    // we don't really need this reproducible actually... just realized too late
+    // we don't really need this to be deterministic actually... just too late to realize
     records.shuffle(&mut rng);
     for record in records {
         if record.id == peer_id {

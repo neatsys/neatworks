@@ -23,7 +23,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     if command.as_deref() == Some("start-peers") {
-        let mut seed_addr = args().nth(2);
+        let public_ip = args()
+            .nth(2)
+            .ok_or(anyhow::anyhow!("public ip is not specified"))?;
+        let mut seed_addr = args().nth(3);
         for i in 0..100 {
             let ipfs = Ipfs(i);
             let status = ipfs
@@ -65,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
             if !status.success() {
                 anyhow::bail!("Command `ipfs config Addresses.API` exit with {status}")
             }
-            let gateway_addr = serde_json::to_string(&format!("/ip4/0.0.0.0/tcp/{}", 8000 + i))?;
+            let gateway_addr = serde_json::to_string(&format!("/ip4/127.0.0.1/tcp/{}", 8000 + i))?;
             let status = ipfs
                 .run(|command| {
                     command
@@ -129,13 +132,14 @@ async fn main() -> anyhow::Result<()> {
                     println!("Wait seed peer to obtain address");
                     continue;
                 };
-                seed_addr = Some(
-                    addresses
-                        .into_iter()
-                        .next()
-                        .ok_or(anyhow::anyhow!("seed peer has no address"))?,
-                );
-                println!("Seed address {seed_addr:?}")
+                let addr = addresses
+                    .into_iter()
+                    .next()
+                    .ok_or(anyhow::anyhow!("seed peer has no address"))?
+                    .replace("127.0.0.1", &public_ip);
+                print!("{addr}");
+                seed_addr = Some(addr);
+                // println!("Seed address {seed_addr:?}")
             }
         }
         return Ok(());
