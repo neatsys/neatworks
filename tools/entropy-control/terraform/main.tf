@@ -45,7 +45,7 @@ variable "state" {
 module "group-1" {
   source = "./group"
   providers = {
-    aws = aws.ap-southeast-1
+    aws = aws.ap-east-1
   }
 
   instance_state = var.state
@@ -88,12 +88,12 @@ module "group-1" {
 #   instance_count = 20
 # }
 
-# output "hosts" {
-#   value = concat(
-#     module.group-1.instances,
-#     #     module.group-2.instances,
-#     #     module.group-3.instances,
-#     #     module.group-4.instances,
-#     #     module.group-5.instances,
-#   )
-# }
+output "instances" {
+  value = concat(
+    module.group-1.instances,
+    #     module.group-2.instances,
+    #     module.group-3.instances,
+    #     module.group-4.instances,
+    #     module.group-5.instances,
+  )
+}
