@@ -49,6 +49,7 @@ async fn host_session(ssh_host: String, sync: bool) -> anyhow::Result<()> {
     if sync {
         let status = Command::new("rsync")
             .arg("target/artifact/entropy")
+            // .arg("target/debug/entropy")
             .arg(format!("{ssh_host}:"))
             .status()
             .await?;
@@ -58,7 +59,8 @@ async fn host_session(ssh_host: String, sync: bool) -> anyhow::Result<()> {
     }
     let status = Command::new("ssh")
         .arg(ssh_host)
-        .arg("pkill -x entropy; sleep 1; tmux new -d -s entropy ./entropy")
+        .arg("pkill -x entropy; sleep 1; tmux new -d -s entropy \"./entropy 2> entropy.errors\"")
+        // .arg("pkill -x entropy; sleep 1; tmux new -d -s entropy \"RUST_BACKTRACE=1 ./entropy 2> entropy.errors\"")
         .status()
         .await?;
     if !status.success() {

@@ -13,7 +13,7 @@ struct TerraformOutputInstances {
     value: Vec<TerraformOutputInstance>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct TerraformOutputInstance {
     pub public_ip: IpAddr,
     pub private_ip: IpAddr,

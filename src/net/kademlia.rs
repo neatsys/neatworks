@@ -114,7 +114,7 @@ impl<M, A: Addr> OnEvent<(PeerId, M)> for Control<M, A, PeerId> {
                 peer_id,
                 QueryingUnicast {
                     messages: vec![message],
-                    timer: timer.set(Duration::from_secs(1), QueryTimeout(query))?,
+                    timer: timer.set(Duration::from_secs(10), QueryTimeout(query))?,
                 },
             );
         }
@@ -154,7 +154,7 @@ impl<M, A> OnEvent<(Multicast<Target>, M)> for Control<M, A, Target> {
             QueryMulticast {
                 count,
                 messages: vec![(count, message)],
-                timer: timer.set(Duration::from_secs(1), QueryTimeout(query))?,
+                timer: timer.set(Duration::from_secs(10), QueryTimeout(query))?,
             },
         );
         Ok(())

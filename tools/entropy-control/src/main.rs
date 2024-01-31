@@ -5,42 +5,59 @@ use entropy_control_messages::{
     GetConfig, GetResult, PeerUrl, PutConfig, PutResult, StartPeersConfig,
 };
 use rand::{seq::SliceRandom, thread_rng};
-use tokio::time::sleep;
+use tokio::{task::JoinSet, time::sleep};
+
+const NUM_PEER_PER_IP: usize = 100;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let control_client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(1))
+        .timeout(Duration::from_secs(3))
         .build()?;
 
     let instances = terraform_instances().await?;
+    // let instances = vec![instances[0].clone()];
+    // let peer_urls = instances
+    //     .iter()
+    //     .flat_map(|instance| {
+    //         (0..100).map(|i| PeerUrl::Ipfs(format!("http://{}:{}", instance.public_ip, 5000 + i)))
+    //     })
+    //     .collect::<Vec<_>>();
     let peer_urls = instances
         .iter()
         .flat_map(|instance| {
-            (0..100).map(|i| PeerUrl::Ipfs(format!("http://{}:{}", instance.public_ip, 5000 + i)))
+            (0..NUM_PEER_PER_IP)
+                .map(|i| PeerUrl::Entropy(format!("http://{}:3000", instance.public_ip), i))
         })
         .collect::<Vec<_>>();
-    // let peer_urls = (0..100)
-    //     .map(|i| PeerUrl::Entropy("http://localhost:3000".into(), i))
-    //     .collect::<Vec<_>>();
 
-    let fragment_len = 1 << 20;
+    let fragment_len = 1 << 25;
     let chunk_k = NonZeroUsize::new(4).unwrap();
     let chunk_n = NonZeroUsize::new(5).unwrap();
     let chunk_m = NonZeroUsize::new(8).unwrap();
-    let k = 8.try_into().unwrap();
-    let n = 10.try_into().unwrap();
+    let k = NonZeroUsize::new(8).unwrap();
+    let n = NonZeroUsize::new(10).unwrap();
 
-    // let mut start_peers_session = tokio::spawn(start_peers_session(
-    //     control_client.clone(),
-    //     "http://localhost:3000".into(),
-    //     fragment_len,
-    //     chunk_k,
-    //     chunk_n,
-    //     chunk_m,
-    // ));
+    let public_ips = instances
+        .iter()
+        .map(|instance| instance.public_ip)
+        .collect::<Vec<_>>();
+    let mut start_peers_sessions = JoinSet::new();
+    for (index, instance) in instances.iter().enumerate() {
+        start_peers_sessions.spawn(start_peers_session(
+            control_client.clone(),
+            format!("http://{}:3000", instance.public_ip),
+            public_ips.clone(),
+            index,
+            instance.private_ip,
+            fragment_len,
+            chunk_k,
+            chunk_n,
+            chunk_m,
+        ));
+    }
     for _ in 0..10 {
-        sleep(Duration::from_secs(1)).await;
+        sleep(Duration::from_secs(3)).await;
         let put_instance = instances
             .choose(&mut thread_rng())
             .ok_or(anyhow::anyhow!("no instance available"))?;
@@ -59,31 +76,46 @@ async fn main() -> anyhow::Result<()> {
             fragment_len * chunk_k.get() as u32,
             k,
             n,
-            // 1,
-            3,
+            1,
+            // 3,
         );
         tokio::select! {
-            // result = &mut start_peers_session => result??,
+            Some(result) = start_peers_sessions.join_next() => result??,
             result = benchmark_session => result?,
         }
         // break;
     }
-    // stop_peers_session(control_client, "http://localhost:3000".into()).await?;
+    start_peers_sessions.shutdown().await;
+
+    let mut stop_peers_sessions = JoinSet::new();
+    for instance in instances {
+        stop_peers_sessions.spawn(stop_peers_session(
+            control_client.clone(),
+            format!("http://{}:3000", instance.public_ip),
+        ));
+    }
+    while let Some(result) = stop_peers_sessions.join_next().await {
+        result??
+    }
     Ok(())
 }
 
 async fn start_peers_session(
     control_client: reqwest::Client,
     url: String,
+    public_ips: Vec<IpAddr>,
+    index: usize,
+    private_ip: IpAddr,
     fragment_len: u32,
     chunk_k: NonZeroUsize,
     chunk_n: NonZeroUsize,
     chunk_m: NonZeroUsize,
 ) -> anyhow::Result<()> {
     let config = StartPeersConfig {
-        ips: vec![IpAddr::from([127, 0, 0, 1])],
-        ip_index: 0,
-        num_peer_per_ip: 100,
+        ips: public_ips,
+        ip_index: index,
+        bind_ip: private_ip,
+        num_peer_per_ip: NUM_PEER_PER_IP,
         fragment_len,
         chunk_k,
         chunk_n,

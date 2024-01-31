@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub struct StartPeersConfig {
     pub ips: Vec<IpAddr>,
     pub ip_index: usize,
+    pub bind_ip: IpAddr,
     pub num_peer_per_ip: usize,
 
     pub fragment_len: u32,

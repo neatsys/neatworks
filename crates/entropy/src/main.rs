@@ -209,10 +209,12 @@ async fn start_peer(
     let path = std::path::Path::new(&path);
     let _ = remove_dir_all(path).await;
     create_dir(path).await?;
-    // bind ADDR_ANY for working on EC2
-    let socket_net = Udp(UdpSocket::bind(format!("0.0.0.0:{}", record.addr.port()))
-        .await?
-        .into());
+    // let socket_net = Udp(UdpSocket::bind((config.bind_ip, record.addr.port()))
+    let socket_net = Udp(
+        UdpSocket::bind(SocketAddr::from(([0; 4], record.addr.port())))
+            .await?
+            .into(),
+    );
 
     let ip = record.addr.ip();
     let mut buckets = Buckets::new(record);

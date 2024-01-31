@@ -118,6 +118,7 @@ pub mod stream {
         pin::Pin,
     };
 
+    use anyhow::Context;
     use serde::{Deserialize, Serialize};
     use tokio::{
         net::{TcpListener, TcpStream},
@@ -191,11 +192,18 @@ pub mod stream {
             } {
                 Select::Recv(Event::Transfer(Transfer(dest, message, buf))) => {
                     pending_bind.push((dest, message, buf));
-                    bind_tasks.spawn(async move { Ok(TcpListener::bind((ip, 0)).await?) });
+                    // bind_tasks.spawn(async move { Ok(TcpListener::bind((ip, 0)).await?) });
+                    bind_tasks.spawn(async move {
+                        Ok(TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?)
+                    });
                 }
                 Select::JoinNextBind(listener) => {
                     let (dest, message, buf) = pending_bind.pop().unwrap();
-                    net.send(dest, Serve(message, listener.local_addr()?))?;
+                    // net.send(dest, Serve(message, listener.local_addr()?))?;
+                    net.send(
+                        dest,
+                        Serve(message, (ip, listener.local_addr()?.port()).into()),
+                    )?;
                     send_tasks.spawn(async move {
                         let (stream, _) = listener.accept().await?;
                         buf(stream).await
@@ -204,7 +212,7 @@ pub mod stream {
                 Select::JoinNextSend(()) => {}
                 Select::Recv(Event::RecvServe(Recv(Serve(message, blob_addr)))) => {
                     connect_tasks.spawn(async move {
-                        let stream = TcpStream::connect(blob_addr).await?;
+                        let stream = TcpStream::connect(blob_addr).await.context(blob_addr)?;
                         Ok((message, stream))
                     });
                 }
