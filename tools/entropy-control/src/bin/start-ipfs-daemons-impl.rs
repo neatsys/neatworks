@@ -8,6 +8,36 @@ async fn main() -> anyhow::Result<()> {
     let ip = args().nth(1);
     let ip = ip.as_deref().unwrap_or("127.0.0.1");
     let mut seed_addr = args().nth(2);
+
+    let status = Command::new("ipfs").arg("--version").status().await?;
+    if !status.success() {
+        let status = Command::new("curl")
+            .args([
+                "--silent",
+                "--remote-name",
+                "https://dist.ipfs.tech/kubo/v0.26.0/kubo_v0.26.0_linux-amd64.tar.gz",
+            ])
+            .status()
+            .await?;
+        if !status.success() {
+            anyhow::bail!("Command `curl` exit with {status}")
+        }
+        let status = Command::new("tar")
+            .args(["-xf", "kubo_v0.26.0_linux-amd64.tar.gz"])
+            .status()
+            .await?;
+        if !status.success() {
+            anyhow::bail!("Command `tar` exit with {status}")
+        }
+        let status = Command::new("move")
+            .args(["kubo/ipfs", ".local/bin"])
+            .status()
+            .await?;
+        if !status.success() {
+            anyhow::bail!("Command `mv` exit with {status}")
+        }
+    }
+
     struct Ipfs(usize);
     impl Ipfs {
         fn run<T>(&self, f: impl FnOnce(&mut Command) -> T) -> T {
