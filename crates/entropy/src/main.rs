@@ -38,7 +38,7 @@ use rand::{rngs::StdRng, seq::SliceRandom, thread_rng, RngCore, SeedableRng};
 use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
 use tokio::{
-    fs::create_dir,
+    fs::{create_dir, remove_dir_all},
     net::UdpSocket,
     runtime::{self, Runtime},
     signal::ctrl_c,
@@ -66,6 +66,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/benchmark-get", post(benchmark_get))
         .route("/benchmark-get/:get_id", get(poll_benchmark_get))
         .route("/start-peers", post(start_peers))
+        .route("/stop-peers", post(stop_peers))
         .route(
             "/put-chunk/:peer_index",
             post(put_chunk).layer(DefaultBodyLimit::max(1 << 30)),
@@ -99,6 +100,8 @@ async fn main() -> anyhow::Result<()> {
                     .lock()
                     .await
                     .remove(&chunk)
+                    // if the sender is not present a premature stop-peers is probably executed
+                    // which is unexpected
                     .unwrap()
                     .send(())
                     .unwrap(),
@@ -204,6 +207,7 @@ async fn start_peer(
     let peer_id = record.id;
     let path = format!("/tmp/entropy-{:x}", H256(peer_id));
     let path = std::path::Path::new(&path);
+    let _ = remove_dir_all(path).await;
     create_dir(path).await?;
     let socket_net = Udp(UdpSocket::bind(record.addr).await?.into());
 
@@ -284,6 +288,12 @@ async fn start_peer(
     Err(anyhow::anyhow!("unexpected shutdown"))
 }
 
+async fn stop_peers(State(state): State<AppState>) {
+    let mut peers = state.peers.lock().await;
+    peers.sessions.shutdown().await;
+    peers.senders.clear();
+}
+
 async fn put_chunk(
     State(state): State<AppState>,
     Path(peer_index): Path<usize>,
@@ -353,7 +363,7 @@ async fn benchmark_put(State(state): State<AppState>, Json(config): Json<PutConf
                 //     }
                 // }
                 let mut put_sessions = JoinSet::<anyhow::Result<_>>::new();
-                for peer_url in peer_url_group {
+                for (i, peer_url) in peer_url_group.into_iter().enumerate() {
                     let op_client = op_client.clone();
                     let buf = buf.clone();
                     put_sessions.spawn(async move {
@@ -376,6 +386,7 @@ async fn benchmark_put(State(state): State<AppState>, Json(config): Json<PutConf
                                 Ok(response.Hash)
                             }
                             PeerUrl::Entropy(url, peer_index) => {
+                                assert_eq!(i, 0);
                                 let response = op_client
                                     .post(format!("{url}/put-chunk/{peer_index}"))
                                     .multipart(form)
@@ -481,6 +492,7 @@ async fn benchmark_get(State(state): State<AppState>, Json(config): Json<GetConf
                 get_sessions.abort_all();
                 let buf = decoder.recover()?;
                 let latency = start.elapsed();
+                get_sessions.shutdown().await;
                 return Ok(GetResult {
                     digest: buf.sha256(),
                     latency,

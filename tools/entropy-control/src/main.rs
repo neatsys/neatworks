@@ -12,12 +12,12 @@ async fn main() -> anyhow::Result<()> {
         .timeout(Duration::from_secs(1))
         .build()?;
 
-    // let peer_urls = (0..100)
-    //     .map(|i| PeerUrl::Ipfs(format!("http://localhost:{}", 5000 + i)))
-    //     .collect::<Vec<_>>();
     let peer_urls = (0..100)
-        .map(|i| PeerUrl::Entropy("http://localhost:3000".into(), i))
+        .map(|i| PeerUrl::Ipfs(format!("http://localhost:{}", 5000 + i)))
         .collect::<Vec<_>>();
+    // let peer_urls = (0..100)
+    //     .map(|i| PeerUrl::Entropy("http://localhost:3000".into(), i))
+    //     .collect::<Vec<_>>();
 
     let fragment_len = 1 << 20;
     let chunk_k = 4.try_into().unwrap();
@@ -44,14 +44,15 @@ async fn main() -> anyhow::Result<()> {
             fragment_len * chunk_k.get() as u32,
             k,
             n,
-            1,
-            // 3,
+            // 1,
+            3,
         );
         tokio::select! {
             result = &mut start_peers_session => result??,
             result = benchmark_session => result?,
         }
     }
+    stop_peers_session(control_client, "http://localhost:3000".into()).await?;
     Ok(())
 }
 
@@ -86,6 +87,15 @@ async fn start_peers_session(
             .await?
             .error_for_status()?;
     }
+}
+
+async fn stop_peers_session(control_client: reqwest::Client, url: String) -> anyhow::Result<()> {
+    control_client
+        .post(format!("{url}/stop-peers"))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
 }
 
 async fn benchmark_session(

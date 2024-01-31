@@ -40,7 +40,8 @@ pub struct Control<M, A, B = [u8; 32]> {
     querying_multicasts: HashMap<B, QueryMulticast<M>>,
     pending_multicasts: HashMap<B, Vec<(NonZeroUsize, M)>>,
     // addresses that recently send messages to
-    // assuming "address locality" that those addresses are more likely to be sent to later
+    // assuming temporal locality of addresses that those sent addresses are more likely to be sent
+    // to (again) later
     records: LruCache<B, PeerRecord<A>>,
 }
 
@@ -78,7 +79,7 @@ impl<M, A, B: Eq + Hash> Control<M, A, B> {
             querying_unicasts: Default::default(),
             querying_multicasts: Default::default(),
             pending_multicasts: Default::default(),
-            // cache size is arbitrary picked for entropy
+            // cache size is arbitrary chosen for entropy
             // in entropy an address may be unicast after it has been multicast, and the multicast
             // has at most 120 receivers
             records: LruCache::new(160.try_into().unwrap()),
