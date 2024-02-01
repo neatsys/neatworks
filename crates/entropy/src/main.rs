@@ -34,7 +34,7 @@ use entropy::{Get, GetOk, MessageNet, Peer, Put, PutOk};
 use entropy_control_messages::{
     GetConfig, GetResult, PeerUrl, PutConfig, PutResult, StartPeersConfig,
 };
-use rand::{rngs::StdRng, seq::SliceRandom, thread_rng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, seq::SliceRandom, thread_rng, Rng as _, RngCore, SeedableRng};
 use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -59,6 +59,13 @@ enum Upcall {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    // just in case
+    let mut rlimit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+    if rlimit.maximum.is_some() && rlimit.current < rlimit.maximum {
+        rlimit.current = rlimit.maximum;
+        rustix::process::setrlimit(rustix::process::Resource::Nofile, rlimit)?
+    }
+
     let app = Router::new()
         // interestingly this artifact/server has dual purposes
         // it is a common (in this codebase) benchmark server that somehow accepts command line
@@ -94,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
         benchmark_op_id: Default::default(),
         benchmark_puts: Default::default(),
         benchmark_gets: Default::default(),
+        put_seed_rng: Arc::new(Mutex::new(StdRng::from_rng(&mut thread_rng())?)),
     });
 
     let upcall_session = tokio::spawn(async move {
@@ -152,6 +160,7 @@ struct AppState {
     benchmark_op_id: Arc<AtomicU32>,
     benchmark_puts: Arc<Mutex<HashMap<u32, JoinHandle<anyhow::Result<PutResult>>>>>,
     benchmark_gets: Arc<Mutex<HashMap<u32, JoinHandle<anyhow::Result<GetResult>>>>>,
+    put_seed_rng: Arc<Mutex<StdRng>>,
 }
 
 #[derive(Debug, Default)]
@@ -352,9 +361,10 @@ async fn get_chunk(
 }
 
 async fn benchmark_put(State(state): State<AppState>, Json(config): Json<PutConfig>) -> Json<u32> {
+    let mut put_rng = StdRng::from_rng(&mut *state.put_seed_rng.lock().await).unwrap();
     let session = state.runtime.spawn(async move {
         let mut buf = vec![0; config.chunk_len as usize * config.k.get()];
-        thread_rng().fill_bytes(&mut buf);
+        put_rng.fill_bytes(&mut buf);
         let digest = buf.sha256();
         let start = Instant::now();
         let encoder = Arc::new(Encoder::new(&buf, config.chunk_len)?);
@@ -363,7 +373,7 @@ async fn benchmark_put(State(state): State<AppState>, Json(config): Json<PutConf
         for peer_url_group in config.peer_urls {
             let mut index;
             while {
-                index = rand::random();
+                index = put_rng.gen();
                 !chunk_indexes.insert(index)
             } {}
             let encoder = encoder.clone();

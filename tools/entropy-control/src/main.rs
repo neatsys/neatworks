@@ -1,10 +1,20 @@
-use std::{env::args, net::IpAddr, num::NonZeroUsize, time::Duration};
+use std::{
+    env::args,
+    net::IpAddr,
+    num::NonZeroUsize,
+    ops::Range,
+    sync::{
+        atomic::{AtomicUsize, Ordering::SeqCst},
+        Arc,
+    },
+    time::Duration,
+};
 
 use entropy_control::terraform_instances;
 use entropy_control_messages::{
     GetConfig, GetResult, PeerUrl, PutConfig, PutResult, StartPeersConfig,
 };
-use rand::{seq::SliceRandom, thread_rng};
+use rand::{seq::SliceRandom, thread_rng, Rng};
 use tokio::{task::JoinSet, time::sleep};
 
 const NUM_PEER_PER_IP: usize = 100;
@@ -27,20 +37,16 @@ async fn main() -> anyhow::Result<()> {
         private_ip: [127, 0, 0, 1].into(),
         public_dns: "localhost".into(),
     }];
-    let peer_urls = instances
-        .iter()
-        .flat_map(|instance| {
-            (0..NUM_PEER_PER_IP)
-                .map(|i| PeerUrl::Entropy(format!("http://{}:3000", instance.public_ip), i))
-        })
-        .collect::<Vec<_>>();
 
-    let fragment_len = 1 << 25;
-    let chunk_k = NonZeroUsize::new(4).unwrap();
-    let chunk_n = NonZeroUsize::new(5).unwrap();
-    let chunk_m = NonZeroUsize::new(8).unwrap();
-    let k = NonZeroUsize::new(8).unwrap();
-    let n = NonZeroUsize::new(10).unwrap();
+    let fragment_len = 1 << 16;
+    let chunk_k = NonZeroUsize::new(8).unwrap();
+    let chunk_n = NonZeroUsize::new(10).unwrap();
+    let chunk_m = NonZeroUsize::new(12).unwrap();
+    let k = NonZeroUsize::new(32).unwrap();
+    let n = NonZeroUsize::new(80).unwrap();
+    let num_concurrency = 4;
+    // 1x for warmup, 1x for cooldown, 2x for data collection
+    let num_total = (num_concurrency * 4).max(10);
 
     let public_ips = instances
         .iter()
@@ -60,34 +66,48 @@ async fn main() -> anyhow::Result<()> {
             chunk_m,
         ));
     }
-    for _ in 0..10 {
-        sleep(Duration::from_secs(3)).await;
-        let put_instance = instances
-            .choose(&mut thread_rng())
-            .ok_or(anyhow::anyhow!("no instance available"))?;
-        let get_instance = instances
-            .choose(&mut thread_rng())
-            .ok_or(anyhow::anyhow!("no instance available"))?;
-        println!(
-            "Put {} Get {}",
-            put_instance.public_ip, get_instance.public_ip
-        );
-        let benchmark_session = benchmark_session(
+    tokio::select! {
+        () = sleep(Duration::from_secs(3)) => {}
+        Some(result) = start_peers_sessions.join_next() => result??
+    }
+
+    let peer_urls = instances
+        .iter()
+        .flat_map(|instance| {
+            (0..100).map(|i| PeerUrl::Entropy(format!("http://{}:3000", instance.public_ip), i))
+        })
+        .collect::<Vec<_>>();
+    let instance_urls = instances
+        .iter()
+        .map(|instance| format!("http://{}:3000", instance.public_ip))
+        .collect::<Vec<_>>();
+
+    let mut close_loop_sessions = JoinSet::new();
+    let count = Arc::new(AtomicUsize::new(0));
+    for _ in 0..num_concurrency {
+        close_loop_sessions.spawn(close_loop_session(
             control_client.clone(),
-            format!("http://{}:3000", put_instance.public_ip),
-            format!("http://{}:3000", get_instance.public_ip),
             peer_urls.clone(),
+            instance_urls.clone(),
             fragment_len * chunk_k.get() as u32,
             k,
             n,
             1,
-        );
-        tokio::select! {
-            Some(result) = start_peers_sessions.join_next() => result??,
-            result = benchmark_session => result?,
-        }
-        // break;
+            count.clone(),
+            num_concurrency..num_total,
+        ));
     }
+    let session = async {
+        while let Some(result) = close_loop_sessions.join_next().await {
+            result??
+        }
+        Result::<_, anyhow::Error>::Ok(())
+    };
+    tokio::select! {
+        result = session => result?,
+        Some(result) = start_peers_sessions.join_next() => result??,
+    }
+    assert!(close_loop_sessions.is_empty());
     start_peers_sessions.shutdown().await;
 
     let mut stop_peers_sessions = JoinSet::new();
@@ -107,45 +127,49 @@ async fn benchmark_ipfs() -> anyhow::Result<()> {
     let control_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .build()?;
-
     let instances = terraform_instances().await?;
     // let instances = vec![instances[0].clone()];
+    // let instances = vec![entropy_control::TerraformOutputInstance {
+    //     public_ip: [127, 0, 0, 1].into(),
+    //     private_ip: [127, 0, 0, 1].into(),
+    //     public_dns: "localhost".into(),
+    // }];
+
+    let fragment_len = 1 << 20;
+    let chunk_k = NonZeroUsize::new(4).unwrap();
+    let k = NonZeroUsize::new(8).unwrap();
+    let n = NonZeroUsize::new(10).unwrap();
+    let num_concurrency = 4;
+    let num_total = (num_concurrency * 4).max(10);
+
     let peer_urls = instances
         .iter()
         .flat_map(|instance| {
             (0..100).map(|i| PeerUrl::Ipfs(format!("http://{}:{}", instance.public_ip, 5000 + i)))
         })
         .collect::<Vec<_>>();
+    let instance_urls = instances
+        .iter()
+        .map(|instance| format!("http://{}:3000", instance.public_ip))
+        .collect::<Vec<_>>();
 
-    let fragment_len = 1 << 25;
-    let chunk_k = NonZeroUsize::new(4).unwrap();
-    let k = NonZeroUsize::new(8).unwrap();
-    let n = NonZeroUsize::new(10).unwrap();
-
-    for _ in 0..10 {
-        sleep(Duration::from_secs(3)).await;
-        let put_instance = instances
-            .choose(&mut thread_rng())
-            .ok_or(anyhow::anyhow!("no instance available"))?;
-        let get_instance = instances
-            .choose(&mut thread_rng())
-            .ok_or(anyhow::anyhow!("no instance available"))?;
-        println!(
-            "Put {} Get {}",
-            put_instance.public_ip, get_instance.public_ip
-        );
-        let benchmark_session = benchmark_session(
+    let mut close_loop_sessions = JoinSet::new();
+    let count = Arc::new(AtomicUsize::new(0));
+    for _ in 0..num_concurrency {
+        close_loop_sessions.spawn(close_loop_session(
             control_client.clone(),
-            format!("http://{}:3000", put_instance.public_ip),
-            format!("http://{}:3000", get_instance.public_ip),
             peer_urls.clone(),
+            instance_urls.clone(),
             fragment_len * chunk_k.get() as u32,
             k,
             n,
             3,
-        );
-        benchmark_session.await?
-        // break;
+            count.clone(),
+            num_concurrency..num_total,
+        ));
+    }
+    while let Some(result) = close_loop_sessions.join_next().await {
+        result??
     }
     Ok(())
 }
@@ -198,7 +222,7 @@ async fn stop_peers_session(control_client: reqwest::Client, url: String) -> any
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn benchmark_session(
+async fn operation_session(
     control_client: reqwest::Client,
     put_url: String,
     get_url: String,
@@ -207,7 +231,7 @@ async fn benchmark_session(
     k: NonZeroUsize,
     n: NonZeroUsize,
     replication_factor: usize,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(Duration, Duration)> {
     let put_peer_urls = peer_urls
         .choose_multiple(&mut thread_rng(), n.get() * replication_factor)
         .cloned()
@@ -241,7 +265,8 @@ async fn benchmark_session(
             break result;
         }
     };
-    println!("Put {:?}", result.latency);
+    let put_latency = result.latency;
+    println!("Put {put_latency:?}");
     // return Ok(());
     let digest = result.digest;
 
@@ -277,10 +302,62 @@ async fn benchmark_session(
             break result;
         }
     };
-    println!("Get {:?}", result.latency);
+    let get_latency = result.latency;
+    println!("Get {get_latency:?}");
     if result.digest == digest {
-        Ok(())
+        Ok((put_latency, get_latency))
     } else {
         Err(anyhow::anyhow!("digest mismatch"))
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn close_loop_session(
+    control_client: reqwest::Client,
+    peer_urls: Vec<PeerUrl>,    // choosen to serve put/get-chunk
+    instance_urls: Vec<String>, // choosen to serve benchmark-put/get
+    chunk_len: u32,
+    k: NonZeroUsize,
+    n: NonZeroUsize,
+    replication_factor: usize,
+    count: Arc<AtomicUsize>,
+    valid_range: Range<usize>,
+) -> anyhow::Result<()> {
+    while {
+        let backoff = Duration::from_millis(thread_rng().gen_range(0..5000));
+        sleep(backoff).await;
+        let put_url = instance_urls
+            .choose(&mut thread_rng())
+            .ok_or(anyhow::anyhow!("no instance available"))?;
+        let get_url = instance_urls
+            .choose(&mut thread_rng())
+            .ok_or(anyhow::anyhow!("no instance available"))?;
+        println!("Put {put_url} Get {get_url}",);
+        let (put_latency, get_latency) = operation_session(
+            control_client.clone(),
+            put_url.clone(),
+            get_url.clone(),
+            peer_urls.clone(),
+            chunk_len,
+            k,
+            n,
+            replication_factor,
+        )
+        .await?;
+        let count = count.fetch_add(1, SeqCst);
+        if valid_range.contains(&count) {
+            println!(
+                "HAHAHAHA,{},{},{},{k},{n},{},{}",
+                put_latency.as_millis(),
+                get_latency.as_millis(),
+                valid_range.start, // assuming to be concurrency^ ^
+                put_url,
+                get_url
+            )
+        } else {
+            println!("(Discard result of warmup/cooldown)")
+        }
+        count < valid_range.end
+    } {}
+    Ok(())
 }

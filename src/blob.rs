@@ -114,6 +114,7 @@ pub mod stream {
     use std::{
         fmt::Debug,
         future::Future,
+        io::ErrorKind,
         net::{IpAddr, SocketAddr},
         pin::Pin,
     };
@@ -195,7 +196,15 @@ pub mod stream {
                     // for working on EC2 instances. TODO configurable
                     // bind_tasks.spawn(async move { Ok(TcpListener::bind((ip, 0)).await?) });
                     bind_tasks.spawn(async move {
-                        Ok(TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?)
+                        // Ok(TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?)
+                        loop {
+                            match TcpListener::bind(SocketAddr::from(([0; 4], 0))).await {
+                                Ok(listener) => return Ok(listener),
+                                Err(err) if err.kind() == ErrorKind::AddrInUse => {}
+                                Err(err) => Err(err)?, // or map_err(Into::into)
+                            }
+                            // tokio::time::sleep(std::time::Duration::from_millis(10)).await
+                        }
                     });
                 }
                 Select::JoinNextBind(listener) => {

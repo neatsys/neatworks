@@ -450,10 +450,8 @@ impl<K> OnEvent<RecvBlob<SendFragment>> for Peer<K> {
         }
         if let Some(state) = self.persists.get_mut(&send_fragment.chunk) {
             let PersistStatus::Recovering(recover) = &mut state.status else {
-                if send_fragment.index == state.index {
-                    let peer_id = send_fragment
-                        .peer_id
-                        .ok_or(anyhow::anyhow!("expected peer id in SendFragment"))?;
+                if let Some(peer_id) = send_fragment.peer_id {
+                    assert_eq!(send_fragment.index, state.index);
                     let fragment_available = FragmentAvailable {
                         chunk: send_fragment.chunk,
                         peer_id: self.id,
@@ -493,9 +491,13 @@ impl<K> OnEvent<fs::DownloadOk> for Peer<K> {
         }
         if let Some(state) = self.downloads.get_mut(&chunk) {
             // println!("download {} index {index}", H256(chunk));
-            return state
-                .recover
-                .submit_decode(chunk, index, fragment, None, &mut self.codec_worker);
+            return state.recover.submit_decode(
+                chunk,
+                index,
+                fragment,
+                None,
+                &mut self.codec_worker,
+            );
         }
         if let Some(state) = self.persists.get_mut(&chunk) {
             let PersistStatus::Recovering(recover) = &mut state.status else {

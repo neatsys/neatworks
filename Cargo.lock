@@ -403,6 +403,7 @@ dependencies = [
  "entropy-control-messages",
  "rand",
  "reqwest",
+ "rustix",
  "serde",
  "tokio",
  "tokio-util",
