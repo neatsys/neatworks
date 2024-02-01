@@ -37,12 +37,12 @@ async fn main() -> anyhow::Result<()> {
     //     public_dns: "localhost".into(),
     // }];
 
-    let fragment_len = 1 << 20;
-    let chunk_k = NonZeroUsize::new(8).unwrap();
-    let chunk_n = NonZeroUsize::new(10).unwrap();
-    let chunk_m = NonZeroUsize::new(12).unwrap();
-    let k = NonZeroUsize::new(32).unwrap();
-    let n = NonZeroUsize::new(80).unwrap();
+    let fragment_len = 1 << 22;
+    let chunk_k = NonZeroUsize::new(32).unwrap();
+    let chunk_n = NonZeroUsize::new(80).unwrap();
+    let chunk_m = NonZeroUsize::new(88).unwrap();
+    let k = NonZeroUsize::new(8).unwrap();
+    let n = NonZeroUsize::new(10).unwrap();
     let num_concurrency = 1;
     // 1x for warmup, 1x for cooldown, 2x for data collection
     let num_total = (num_concurrency * 4).max(10);
@@ -135,10 +135,10 @@ async fn benchmark_ipfs() -> anyhow::Result<()> {
     //     public_dns: "localhost".into(),
     // }];
 
-    let fragment_len = 1 << 21;
-    let chunk_k = NonZeroUsize::new(8).unwrap();
-    let k = NonZeroUsize::new(32).unwrap();
-    let n = NonZeroUsize::new(80).unwrap();
+    let fragment_len = 1 << 22;
+    let chunk_k = NonZeroUsize::new(32).unwrap();
+    let k = NonZeroUsize::new(8).unwrap();
+    let n = NonZeroUsize::new(10).unwrap();
     let num_concurrency = 1;
     let num_total = (num_concurrency * 4).max(10);
 
@@ -166,7 +166,7 @@ async fn benchmark_ipfs() -> anyhow::Result<()> {
             3,
             count.clone(),
             num_concurrency..num_total,
-            // num_concurrency..num_concurrency,
+            // num_concurrency..0,
         ));
     }
     while let Some(result) = close_loop_sessions.join_next().await {

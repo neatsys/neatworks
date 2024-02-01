@@ -89,7 +89,7 @@ async fn host_session(
         anyhow::bail!("Command `ssh` exit with {status}")
     }
 
-    // principly the script should be idempotent, but this command is not
+    // principly the script should be idempotent, but the following commands are not
     // so offer some mercy
     let status = Command::new("ssh")
         .arg(&ssh_host)
@@ -106,10 +106,25 @@ async fn host_session(
     if !status.success() {
         // anyhow::bail!("Command `ssh` exit with {status}")
         use std::io::Write;
-        writeln!(
-            &mut std::io::stdout().lock(),
-            "Fail to bind public ip address to network interface"
-        )?
+        writeln!(&mut std::io::stdout().lock(), "Command `ip` failed")?
     }
+
+    let status = Command::new("ssh")
+        .arg(&ssh_host)
+        .arg("sudo")
+        .arg("ethtool")
+        .arg("-G")
+        .arg("ens5")
+        .arg("rx")
+        .arg("16384")
+        .stderr(Stdio::null())
+        .status()
+        .await?;
+    if !status.success() {
+        // anyhow::bail!("Command `ssh` exit with {status}")
+        use std::io::Write;
+        writeln!(&mut std::io::stdout().lock(), "Command `ethtool` failed")?
+    }
+
     Ok(())
 }
