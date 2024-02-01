@@ -199,6 +199,7 @@ async fn start_peers_session(
     };
     control_client
         .post(format!("{url}/start-peers"))
+        .timeout(Duration::from_secs(10))
         .json(&config)
         .send()
         .await?

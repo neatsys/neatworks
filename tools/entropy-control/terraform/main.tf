@@ -42,6 +42,14 @@ variable "state" {
   default = "running"
 }
 
+variable "mode" {
+  type = string
+  validation {
+    condition     = var.mode == "one" || var.mode == "five"
+    error_message = "Mode must be either 'one' or 'five'."
+  }
+}
+
 module "group-1" {
   source = "./group"
   providers = {
@@ -49,51 +57,62 @@ module "group-1" {
   }
 
   instance_state = var.state
-  #   instance_count = 20
+  instance_count = var.mode == "one" ? 3 : 0
 }
 
-# module "group-2" {
-#   source = "./group"
-#   providers = {
-#     aws = aws.us-west-1
-#   }
+module "group-5-1" {
+  source = "./group"
+  providers = {
+    aws = aws.ap-east-1
+  }
 
-#   instance_count = 20
-# }
+  instance_count = var.mode == "five" ? 1 : 0
+}
 
-# module "group-3" {
-#   source = "./group"
-#   providers = {
-#     aws = aws.eu-central-1
-#   }
 
-#   instance_count = 20
-# }
+module "group-5-2" {
+  source = "./group"
+  providers = {
+    aws = aws.us-west-1
+  }
 
-# module "group-4" {
-#   source = "./group"
-#   providers = {
-#     aws = aws.sa-east-1
-#   }
+  instance_count = var.mode == "five" ? 1 : 0
+}
 
-#   instance_count = 20
-# }
+module "group-5-3" {
+  source = "./group"
+  providers = {
+    aws = aws.eu-central-1
+  }
 
-# module "group-5" {
-#   source = "./group"
-#   providers = {
-#     aws = aws.af-south-1
-#   }
+  instance_count = var.mode == "five" ? 1 : 0
+}
 
-#   instance_count = 20
-# }
+module "group-5-4" {
+  source = "./group"
+  providers = {
+    aws = aws.sa-east-1
+  }
+
+  instance_count = var.mode == "five" ? 1 : 0
+}
+
+module "group-5-5" {
+  source = "./group"
+  providers = {
+    aws = aws.af-south-1
+  }
+
+  instance_count = var.mode == "five" ? 1 : 0
+}
 
 output "instances" {
   value = concat(
     module.group-1.instances,
-    #     module.group-2.instances,
-    #     module.group-3.instances,
-    #     module.group-4.instances,
-    #     module.group-5.instances,
+    module.group-5-1.instances,
+    module.group-5-2.instances,
+    module.group-5-3.instances,
+    module.group-5-4.instances,
+    module.group-5-5.instances,
   )
 }
