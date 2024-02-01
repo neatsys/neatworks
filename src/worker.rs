@@ -136,15 +136,13 @@ pub mod erased {
     pub enum Worker<S, E: ?Sized> {
         Spawn(SpawnWorker<S, E>),
         Null, // for testing
-        Inline(InlineWorker<S, E>),
     }
 
     impl<S, E: ?Sized> Worker<S, E> {
-        pub fn submit(&mut self, work: Work<S, E>) -> anyhow::Result<()> {
+        pub fn submit(&self, work: Work<S, E>) -> anyhow::Result<()> {
             match self {
                 Self::Spawn(worker) => worker.submit(work),
                 Self::Null => Ok(()),
-                Self::Inline(worker) => worker.submit(work),
             }
         }
     }
@@ -169,19 +167,5 @@ pub mod erased {
             handles: Default::default(),
         };
         (Worker::Spawn(worker), executor)
-    }
-
-    // somewhat unsatisfying that `E` must be boxed (and also hardcoded as boxed, not e.g.
-    // reference counted or static referenced)
-    // however `E` is use-site interface and it cannot mention concerte type (or type recursion may
-    // occur)
-    // TODO workaround it with yet another layer of trait object, ah that's awful
-    #[derive(Debug, Clone)]
-    pub struct InlineWorker<S, E: ?Sized>(pub S, pub Box<E>);
-
-    impl<S, E: ?Sized> InlineWorker<S, E> {
-        fn submit(&mut self, work: Work<S, E>) -> anyhow::Result<()> {
-            work(&self.0, &mut *self.1)
-        }
     }
 }

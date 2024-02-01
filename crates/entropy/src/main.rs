@@ -22,7 +22,7 @@ use augustus::{
         kademlia::{Control, PeerNet},
         Udp,
     },
-    worker::erased::{spawn_backend, InlineWorker, Worker},
+    worker::erased::spawn_backend,
 };
 use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, State},
@@ -34,7 +34,7 @@ use entropy::{Get, GetOk, MessageNet, Peer, Put, PutOk};
 use entropy_control_messages::{
     GetConfig, GetResult, PeerUrl, PutConfig, PutResult, StartPeersConfig,
 };
-use rand::{rngs::StdRng, seq::SliceRandom, thread_rng, Rng as _, RngCore, SeedableRng};
+use rand::{rngs::StdRng, seq::SliceRandom, thread_rng, RngCore, SeedableRng};
 use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -59,13 +59,6 @@ enum Upcall {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    // just in case
-    let mut rlimit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
-    if rlimit.maximum.is_some() && rlimit.current < rlimit.maximum {
-        rlimit.current = rlimit.maximum;
-        rustix::process::setrlimit(rustix::process::Resource::Nofile, rlimit)?
-    }
-
     let app = Router::new()
         // interestingly this artifact/server has dual purposes
         // it is a common (in this codebase) benchmark server that somehow accepts command line
@@ -85,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/get-chunk/:peer_index/:chunk", post(get_chunk));
     // nevertheless, no significant workload running in the server loop still; the internal
-    // endpoints simply hand over requests to peers' dedicated runtime
+    // endpoints simply hand off requests to peers' dedicated runtime
 
     let (upcall_sender, mut upcall_receiver) = unbounded_channel();
     let pending_puts = Arc::new(Mutex::new(HashMap::new()));
@@ -101,7 +94,6 @@ async fn main() -> anyhow::Result<()> {
         benchmark_op_id: Default::default(),
         benchmark_puts: Default::default(),
         benchmark_gets: Default::default(),
-        put_seed_rng: Arc::new(Mutex::new(StdRng::from_rng(&mut thread_rng())?)),
     });
 
     let upcall_session = tokio::spawn(async move {
@@ -160,7 +152,6 @@ struct AppState {
     benchmark_op_id: Arc<AtomicU32>,
     benchmark_puts: Arc<Mutex<HashMap<u32, JoinHandle<anyhow::Result<PutResult>>>>>,
     benchmark_gets: Arc<Mutex<HashMap<u32, JoinHandle<anyhow::Result<GetResult>>>>>,
-    put_seed_rng: Arc<Mutex<StdRng>>,
 }
 
 #[derive(Debug, Default)]
@@ -226,7 +217,6 @@ async fn start_peer(
     let path = std::path::Path::new(&path);
     let _ = remove_dir_all(path).await;
     create_dir(path).await?;
-    // for working on EC2
     // let socket_net = Udp(UdpSocket::bind((config.bind_ip, record.addr.port()))
     let socket_net = Udp(
         UdpSocket::bind(SocketAddr::from(([0; 4], record.addr.port())))
@@ -249,18 +239,14 @@ async fn start_peer(
     let mut control_session = Session::new();
     let (mut blob_sender, blob_receiver) = unbounded_channel();
     let (fs_sender, fs_receiver) = unbounded_channel();
-    // let (crypto_worker, mut crypto_session) = spawn_backend(crypto.clone());
+    let (crypto_worker, mut crypto_session) = spawn_backend(crypto.clone());
     let (codec_worker, mut codec_session) = spawn_backend(());
 
     let mut kademlia_peer = kademlia::Peer::new(
         buckets,
         MessageNet::new(socket_net.clone()),
         control_session.sender(),
-        // crypto_worker,
-        Worker::Inline(InlineWorker(
-            crypto.clone(),
-            Box::new(kademlia_session.sender()),
-        )),
+        crypto_worker,
     );
     let mut control = Control::new(socket_net.clone(), kademlia_session.sender());
     let mut peer = Peer::new(
@@ -289,7 +275,7 @@ async fn start_peer(
             )
         }
     });
-    // let crypto_session = crypto_session.run(kademlia::SendCrypto(kademlia_session.sender()));
+    let crypto_session = crypto_session.run(kademlia::SendCrypto(kademlia_session.sender()));
     let kademlia_session = kademlia_session.run(&mut kademlia_peer);
     let blob_session = blob::stream::session(
         ip,
@@ -308,7 +294,7 @@ async fn start_peer(
         result = control_session => result?,
         result = blob_session => result?,
         result = fs_session => result?,
-        // result = crypto_session => result?,
+        result = crypto_session => result?,
         result = codec_session => result?,
         result = peer_session => result?,
     }
@@ -361,10 +347,9 @@ async fn get_chunk(
 }
 
 async fn benchmark_put(State(state): State<AppState>, Json(config): Json<PutConfig>) -> Json<u32> {
-    let mut put_rng = StdRng::from_rng(&mut *state.put_seed_rng.lock().await).unwrap();
     let session = state.runtime.spawn(async move {
         let mut buf = vec![0; config.chunk_len as usize * config.k.get()];
-        put_rng.fill_bytes(&mut buf);
+        thread_rng().fill_bytes(&mut buf);
         let digest = buf.sha256();
         let start = Instant::now();
         let encoder = Arc::new(Encoder::new(&buf, config.chunk_len)?);
@@ -373,7 +358,7 @@ async fn benchmark_put(State(state): State<AppState>, Json(config): Json<PutConf
         for peer_url_group in config.peer_urls {
             let mut index;
             while {
-                index = put_rng.gen();
+                index = rand::random();
                 !chunk_indexes.insert(index)
             } {}
             let encoder = encoder.clone();
