@@ -155,6 +155,12 @@ impl<T, M> From<T> for MessageNet<T, M> {
     }
 }
 
+impl<T: Clone, M> Clone for MessageNet<T, M> {
+    fn clone(&self) -> Self {
+        Self::new(self.0.clone())
+    }
+}
+
 impl<T: SendMessage<A, Bytes>, A, M: Into<N>, N: Serialize> SendMessage<A, M> for MessageNet<T, N> {
     fn send(&mut self, dest: A, message: M) -> anyhow::Result<()> {
         // the `dest` may be an IterAddr, use Bytes to reduce cloning overhead

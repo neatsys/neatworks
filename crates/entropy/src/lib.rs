@@ -372,6 +372,9 @@ impl<K> OnEvent<Recv<InviteOk>> for Peer<K> {
     ) -> anyhow::Result<()> {
         // TODO verify
         if let Some(state) = self.uploads.get_mut(&invite_ok.chunk) {
+            if state.pending.contains_key(&invite_ok.index) {
+                return Ok(());
+            }
             state.pending.insert(invite_ok.index, invite_ok.peer_id);
             let encoder = state.encoder.clone().unwrap();
             return self.codec_worker.submit(Box::new(move |(), sender| {
