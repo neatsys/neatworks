@@ -192,6 +192,7 @@ pub mod stream {
             } {
                 Select::Recv(Event::Transfer(Transfer(dest, message, buf))) => {
                     pending_bind.push((dest, message, buf));
+                    // for working on EC2 instances. TODO configurable
                     // bind_tasks.spawn(async move { Ok(TcpListener::bind((ip, 0)).await?) });
                     bind_tasks.spawn(async move {
                         Ok(TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?)

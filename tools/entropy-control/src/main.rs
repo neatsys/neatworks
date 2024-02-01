@@ -20,8 +20,13 @@ async fn main() -> anyhow::Result<()> {
         .timeout(Duration::from_secs(3))
         .build()?;
 
-    let instances = terraform_instances().await?;
+    // let instances = terraform_instances().await?;
     // let instances = vec![instances[0].clone()];
+    let instances = vec![entropy_control::TerraformOutputInstance {
+        public_ip: [127, 0, 0, 1].into(),
+        private_ip: [127, 0, 0, 1].into(),
+        public_dns: "localhost".into(),
+    }];
     let peer_urls = instances
         .iter()
         .flat_map(|instance| {
@@ -30,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
         })
         .collect::<Vec<_>>();
 
-    let fragment_len = 100;
+    let fragment_len = 1 << 25;
     let chunk_k = NonZeroUsize::new(4).unwrap();
     let chunk_n = NonZeroUsize::new(5).unwrap();
     let chunk_m = NonZeroUsize::new(8).unwrap();

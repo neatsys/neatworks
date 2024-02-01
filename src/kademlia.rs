@@ -373,7 +373,7 @@ impl<A: Addr> OnEvent<Query> for Peer<A> {
 }
 
 impl<A: Addr> Peer<A> {
-    fn start_query(&self, target: &Target, count: NonZeroUsize) -> anyhow::Result<()> {
+    fn start_query(&mut self, target: &Target, count: NonZeroUsize) -> anyhow::Result<()> {
         // println!("start query {} {count}", primitive_types::H256(*target));
         let find_peer = FindPeer {
             target: *target,
@@ -631,8 +631,8 @@ impl<A: Addr> OnEvent<Verified<FindPeerOk<A>>> for Peer<A> {
         } else {
             let removed = self.refresh_targets.remove(&target);
             assert!(removed);
-            if let Some(target) = self.refresh_targets.iter().next() {
-                self.start_query(target, BUCKET_SIZE.try_into().unwrap())
+            if let Some(&target) = self.refresh_targets.iter().next() {
+                self.start_query(&target, BUCKET_SIZE.try_into().unwrap())
             } else {
                 self.on_bootstrap.take().unwrap()()
             }
@@ -662,8 +662,8 @@ impl<A: Addr> Peer<A> {
         // if refresh query for all buckets at the same time, testing on loopback network drops
         // maybe docker's loopback network is too bad, but mitigating transient performance
         // degradation caused by refreshing is still generally good to have
-        if let Some(target) = self.refresh_targets.iter().next() {
-            self.start_query(target, BUCKET_SIZE.try_into().unwrap())?
+        if let Some(&target) = self.refresh_targets.iter().next() {
+            self.start_query(&target, BUCKET_SIZE.try_into().unwrap())?
         }
         Ok(())
     }

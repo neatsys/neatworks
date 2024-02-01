@@ -22,7 +22,7 @@ use augustus::{
         kademlia::{Control, PeerNet},
         Udp,
     },
-    worker::erased::spawn_backend,
+    worker::erased::{spawn_backend, InlineWorker, Worker},
 };
 use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, State},
@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/get-chunk/:peer_index/:chunk", post(get_chunk));
     // nevertheless, no significant workload running in the server loop still; the internal
-    // endpoints simply hand off requests to peers' dedicated runtime
+    // endpoints simply hand over requests to peers' dedicated runtime
 
     let (upcall_sender, mut upcall_receiver) = unbounded_channel();
     let pending_puts = Arc::new(Mutex::new(HashMap::new()));
@@ -217,6 +217,7 @@ async fn start_peer(
     let path = std::path::Path::new(&path);
     let _ = remove_dir_all(path).await;
     create_dir(path).await?;
+    // for working on EC2
     // let socket_net = Udp(UdpSocket::bind((config.bind_ip, record.addr.port()))
     let socket_net = Udp(
         UdpSocket::bind(SocketAddr::from(([0; 4], record.addr.port())))
@@ -239,14 +240,18 @@ async fn start_peer(
     let mut control_session = Session::new();
     let (mut blob_sender, blob_receiver) = unbounded_channel();
     let (fs_sender, fs_receiver) = unbounded_channel();
-    let (crypto_worker, mut crypto_session) = spawn_backend(crypto.clone());
+    // let (crypto_worker, mut crypto_session) = spawn_backend(crypto.clone());
     let (codec_worker, mut codec_session) = spawn_backend(());
 
     let mut kademlia_peer = kademlia::Peer::new(
         buckets,
         MessageNet::new(socket_net.clone()),
         control_session.sender(),
-        crypto_worker,
+        // crypto_worker,
+        Worker::Inline(InlineWorker(
+            crypto.clone(),
+            Box::new(kademlia_session.sender()),
+        )),
     );
     let mut control = Control::new(socket_net.clone(), kademlia_session.sender());
     let mut peer = Peer::new(
@@ -275,7 +280,7 @@ async fn start_peer(
             )
         }
     });
-    let crypto_session = crypto_session.run(kademlia::SendCrypto(kademlia_session.sender()));
+    // let crypto_session = crypto_session.run(kademlia::SendCrypto(kademlia_session.sender()));
     let kademlia_session = kademlia_session.run(&mut kademlia_peer);
     let blob_session = blob::stream::session(
         ip,
@@ -294,7 +299,7 @@ async fn start_peer(
         result = control_session => result?,
         result = blob_session => result?,
         result = fs_session => result?,
-        result = crypto_session => result?,
+        // result = crypto_session => result?,
         result = codec_session => result?,
         result = peer_session => result?,
     }
