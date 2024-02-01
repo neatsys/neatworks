@@ -27,24 +27,23 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let control_client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(1))
         .build()?;
-
-    // let instances = terraform_instances().await?;
+    let instances = terraform_instances().await?;
     // let instances = vec![instances[0].clone()];
-    let instances = vec![entropy_control::TerraformOutputInstance {
-        public_ip: [127, 0, 0, 1].into(),
-        private_ip: [127, 0, 0, 1].into(),
-        public_dns: "localhost".into(),
-    }];
+    // let instances = vec![entropy_control::TerraformOutputInstance {
+    //     public_ip: [127, 0, 0, 1].into(),
+    //     private_ip: [127, 0, 0, 1].into(),
+    //     public_dns: "localhost".into(),
+    // }];
 
-    let fragment_len = 1 << 16;
+    let fragment_len = 1 << 20;
     let chunk_k = NonZeroUsize::new(8).unwrap();
     let chunk_n = NonZeroUsize::new(10).unwrap();
     let chunk_m = NonZeroUsize::new(12).unwrap();
     let k = NonZeroUsize::new(32).unwrap();
     let n = NonZeroUsize::new(80).unwrap();
-    let num_concurrency = 4;
+    let num_concurrency = 1;
     // 1x for warmup, 1x for cooldown, 2x for data collection
     let num_total = (num_concurrency * 4).max(10);
 
@@ -95,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
             1,
             count.clone(),
             num_concurrency..num_total,
+            // num_concurrency..0,
         ));
     }
     let session = async {
@@ -135,11 +135,11 @@ async fn benchmark_ipfs() -> anyhow::Result<()> {
     //     public_dns: "localhost".into(),
     // }];
 
-    let fragment_len = 1 << 20;
-    let chunk_k = NonZeroUsize::new(4).unwrap();
-    let k = NonZeroUsize::new(8).unwrap();
-    let n = NonZeroUsize::new(10).unwrap();
-    let num_concurrency = 4;
+    let fragment_len = 1 << 21;
+    let chunk_k = NonZeroUsize::new(8).unwrap();
+    let k = NonZeroUsize::new(32).unwrap();
+    let n = NonZeroUsize::new(80).unwrap();
+    let num_concurrency = 1;
     let num_total = (num_concurrency * 4).max(10);
 
     let peer_urls = instances
@@ -166,6 +166,7 @@ async fn benchmark_ipfs() -> anyhow::Result<()> {
             3,
             count.clone(),
             num_concurrency..num_total,
+            // num_concurrency..num_concurrency,
         ));
     }
     while let Some(result) = close_loop_sessions.join_next().await {
@@ -202,13 +203,30 @@ async fn start_peers_session(
         .send()
         .await?
         .error_for_status()?;
+    let mut count = 0;
     loop {
         sleep(Duration::from_secs(1)).await;
-        control_client
-            .get(format!("{url}/ok"))
-            .send()
-            .await?
-            .error_for_status()?;
+        let result = async {
+            control_client
+                .get(format!("{url}/ok"))
+                .send()
+                .await?
+                .error_for_status()
+        }
+        .await;
+        if let Err(err) = result {
+            if !err.is_timeout() {
+                return Err(err)?;
+            }
+            if count < 10 {
+                count += 1;
+                eprintln!("{err}")
+            } else {
+                Err(err)?
+            }
+        } else {
+            count = 0
+        }
     }
 }
 
@@ -252,17 +270,27 @@ async fn operation_session(
         .error_for_status()?
         .json::<u32>()
         .await?;
+    println!("PutId {put_id}");
     let result = loop {
         sleep(Duration::from_secs(1)).await;
-        if let Some(result) = control_client
-            .get(format!("{put_url}/benchmark-put/{put_id}"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<Option<PutResult>>()
-            .await?
-        {
-            break result;
+        let result = async {
+            control_client
+                .get(format!("{put_url}/benchmark-put/{put_id}"))
+                .send()
+                .await?
+                .error_for_status()
+        }
+        .await;
+        match result {
+            Err(err) => {
+                eprintln!("{err}");
+                continue;
+            }
+            Ok(result) => {
+                if let Some(result) = result.json::<Option<PutResult>>().await? {
+                    break result;
+                }
+            }
         }
     };
     let put_latency = result.latency;
@@ -289,17 +317,27 @@ async fn operation_session(
         .error_for_status()?
         .json::<u32>()
         .await?;
+    println!("GetId {get_id}");
     let result = loop {
         sleep(Duration::from_secs(1)).await;
-        if let Some(result) = control_client
-            .get(format!("{get_url}/benchmark-get/{get_id}"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<Option<GetResult>>()
-            .await?
-        {
-            break result;
+        let result = async {
+            control_client
+                .get(format!("{get_url}/benchmark-get/{get_id}"))
+                .send()
+                .await?
+                .error_for_status()
+        }
+        .await;
+        match result {
+            Err(err) => {
+                eprintln!("{err}");
+                continue;
+            }
+            Ok(result) => {
+                if let Some(result) = result.json::<Option<GetResult>>().await? {
+                    break result;
+                }
+            }
         }
     };
     let get_latency = result.latency;
@@ -324,7 +362,7 @@ async fn close_loop_session(
     valid_range: Range<usize>,
 ) -> anyhow::Result<()> {
     while {
-        let backoff = Duration::from_millis(thread_rng().gen_range(0..5000));
+        let backoff = Duration::from_millis(thread_rng().gen_range(1000..5000));
         sleep(backoff).await;
         let put_url = instance_urls
             .choose(&mut thread_rng())
@@ -347,9 +385,9 @@ async fn close_loop_session(
         let count = count.fetch_add(1, SeqCst);
         if valid_range.contains(&count) {
             println!(
-                "HAHAHAHA,{},{},{},{k},{n},{},{}",
-                put_latency.as_millis(),
-                get_latency.as_millis(),
+                "NEAT,{},{},{},{k},{n},{},{}",
+                put_latency.as_secs_f32(),
+                get_latency.as_secs_f32(),
                 valid_range.start, // assuming to be concurrency^ ^
                 put_url,
                 get_url

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     env::args,
     future::IntoFuture,
     net::SocketAddr,
@@ -40,7 +40,6 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{create_dir, remove_dir_all},
     net::UdpSocket,
-    runtime::{self, Runtime},
     signal::ctrl_c,
     sync::{
         mpsc::{unbounded_channel, UnboundedSender},
@@ -57,8 +56,14 @@ enum Upcall {
     GetOk(GetOk<[u8; 32]>),
 }
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let mut rlimit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+    if rlimit.current.is_some() && rlimit.current < rlimit.maximum {
+        rlimit.current = rlimit.maximum;
+        rustix::process::setrlimit(rustix::process::Resource::Nofile, rlimit)?
+    }
+
     let app = Router::new()
         // interestingly this artifact/server has dual purposes
         // it is a common (in this codebase) benchmark server that somehow accepts command line
@@ -77,16 +82,14 @@ async fn main() -> anyhow::Result<()> {
             post(put_chunk).layer(DefaultBodyLimit::max(1 << 30)),
         )
         .route("/get-chunk/:peer_index/:chunk", post(get_chunk));
-    // nevertheless, no significant workload running in the server loop still; the internal
-    // endpoints simply hand off requests to peers' dedicated runtime
 
     let (upcall_sender, mut upcall_receiver) = unbounded_channel();
     let pending_puts = Arc::new(Mutex::new(HashMap::new()));
     let pending_gets = Arc::new(Mutex::new(HashMap::new()));
-    let runtime = Arc::new(runtime::Builder::new_multi_thread().enable_all().build()?);
+    // let runtime = Arc::new(runtime::Builder::new_multi_thread().enable_all().build()?);
     let app = app.with_state(AppState {
         peers: Default::default(),
-        runtime: runtime.clone(),
+        // runtime: runtime.clone(),
         upcall_sender,
         pending_puts: pending_puts.clone(),
         pending_gets: pending_gets.clone(),
@@ -134,16 +137,16 @@ async fn main() -> anyhow::Result<()> {
         result = serve => result?,
         result = upcall_session => result?,
     }
-    Arc::try_unwrap(runtime)
-        .map_err(|_| anyhow::anyhow!("cannot shutdown runtime"))?
-        .shutdown_background();
+    // Arc::try_unwrap(runtime)
+    //     .map_err(|_| anyhow::anyhow!("cannot shutdown runtime"))?
+    //     .shutdown_background();
     Ok(())
 }
 
 #[derive(Debug, Clone)]
 struct AppState {
     peers: Arc<Mutex<PeersState>>,
-    runtime: Arc<Runtime>,
+    // runtime: Arc<Runtime>,
     upcall_sender: UnboundedSender<Upcall>,
     pending_puts: Arc<Mutex<HashMap<[u8; 32], oneshot::Sender<()>>>>,
     #[allow(clippy::type_complexity)]
@@ -188,7 +191,8 @@ async fn start_peers(State(state): State<AppState>, Json(config): Json<StartPeer
     for (record, crypto, rng) in local_peers {
         let peer_session = Session::new();
         peers.senders.push(peer_session.sender());
-        peers.sessions.spawn_on(
+        // peers.sessions.spawn_on(
+        peers.sessions.spawn(
             start_peer(
                 record,
                 crypto,
@@ -198,7 +202,7 @@ async fn start_peers(State(state): State<AppState>, Json(config): Json<StartPeer
                 state.upcall_sender.clone(),
                 config.clone(),
             ),
-            state.runtime.handle(),
+            // state.runtime.handle(),
         );
     }
 }
@@ -347,20 +351,23 @@ async fn get_chunk(
 }
 
 async fn benchmark_put(State(state): State<AppState>, Json(config): Json<PutConfig>) -> Json<u32> {
-    let session = state.runtime.spawn(async move {
+    // let session = state.runtime.spawn(async move {
+    let session = tokio::spawn(async move {
         let mut buf = vec![0; config.chunk_len as usize * config.k.get()];
         thread_rng().fill_bytes(&mut buf);
         let digest = buf.sha256();
         let start = Instant::now();
         let encoder = Arc::new(Encoder::new(buf, config.chunk_len)?);
         let mut encode_sessions = JoinSet::<anyhow::Result<_>>::new();
-        let mut chunk_indexes = HashSet::<u32>::new();
-        for peer_url_group in config.peer_urls {
-            let mut index;
-            while {
-                index = rand::random();
-                !chunk_indexes.insert(index)
-            } {}
+        // let mut chunk_indexes = HashSet::<u32>::new();
+        // for peer_url_group in config.peer_urls {
+        for (index, peer_url_group) in config.peer_urls.into_iter().enumerate() {
+            // let mut index;
+            // while {
+            //     index = rand::random();
+            //     !chunk_indexes.insert(index)
+            // } {}
+            let index = index as _;
             let encoder = encoder.clone();
             let op_client = state.op_client.clone();
             encode_sessions.spawn(async move {
@@ -451,7 +458,8 @@ async fn poll_benchmark_put(
 }
 
 async fn benchmark_get(State(state): State<AppState>, Json(config): Json<GetConfig>) -> Json<u32> {
-    let session = state.runtime.spawn(async move {
+    // let session = state.runtime.spawn(async move {
+    let session = tokio::spawn(async move {
         let start = Instant::now();
         let mut get_sessions = JoinSet::<anyhow::Result<_>>::new();
         for ((index, chunk), peer_url) in config.chunks.into_iter().zip(config.peer_urls) {
@@ -501,7 +509,7 @@ async fn benchmark_get(State(state): State<AppState>, Json(config): Json<GetConf
             //         writeln!(&mut stdout)?
             //     }
             // }
-            if decoder.decode(index, buf.into())? {
+            if decoder.decode(index, &buf)? {
                 get_sessions.abort_all();
                 let buf = decoder.recover()?;
                 let latency = start.elapsed();

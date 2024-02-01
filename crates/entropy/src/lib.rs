@@ -529,7 +529,7 @@ impl RecoverState {
         if let Some(mut decoder) = self.decoder.take() {
             // println!("submit decode {} index {index}", H256(chunk));
             worker.submit(Box::new(move |(), sender| {
-                if !decoder.decode(index, fragment)? {
+                if !decoder.decode(index, &fragment)? {
                     sender.send(Decode(chunk, decoder))
                 } else if let Some(index) = encode_index {
                     let fragment = Encoder::try_from(decoder)?.encode(index)?;
