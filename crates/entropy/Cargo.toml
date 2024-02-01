@@ -17,4 +17,4 @@ reqwest = { version = "0.11.23", default-features = false, features = ["json", "
 serde = { version = "1.0.195", features = ["derive"] }
 tokio = { version = "1.35.1", features = ["rt", "fs", "macros", "sync", "rt-multi-thread"] }
 tokio-util = "0.7.10"
-wirehair = { git = "https://github.com/sgdxbc/wirehair", version = "0.1.0" }
+wirehair = { git = "https://github.com/sgdxbc/wirehair", version = "0.1.1" }

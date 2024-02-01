@@ -352,7 +352,7 @@ async fn benchmark_put(State(state): State<AppState>, Json(config): Json<PutConf
         thread_rng().fill_bytes(&mut buf);
         let digest = buf.sha256();
         let start = Instant::now();
-        let encoder = Arc::new(Encoder::new(&buf, config.chunk_len)?);
+        let encoder = Arc::new(Encoder::new(buf, config.chunk_len)?);
         let mut encode_sessions = JoinSet::<anyhow::Result<_>>::new();
         let mut chunk_indexes = HashSet::<u32>::new();
         for peer_url_group in config.peer_urls {
@@ -501,7 +501,7 @@ async fn benchmark_get(State(state): State<AppState>, Json(config): Json<GetConf
             //         writeln!(&mut stdout)?
             //     }
             // }
-            if decoder.decode(index, &buf)? {
+            if decoder.decode(index, buf.into())? {
                 get_sessions.abort_all();
                 let buf = decoder.recover()?;
                 let latency = start.elapsed();

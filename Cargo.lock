@@ -1901,8 +1901,8 @@ dependencies = [
 
 [[package]]
 name = "wirehair"
-version = "0.1.0"
-source = "git+https://github.com/sgdxbc/wirehair#4304648651913cd389d46888255dbc51de848b5a"
+version = "0.1.1"
+source = "git+https://github.com/sgdxbc/wirehair#f2a743594f5dace317df929f0954ac3161da8f1f"
 dependencies = [
  "bindgen",
  "cmake",

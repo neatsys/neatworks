@@ -309,7 +309,7 @@ impl<K: Preimage> OnEvent<Put<K>> for Peer<K> {
         }
         let fragment_len = self.fragment_len;
         self.codec_worker.submit(Box::new(move |(), sender| {
-            let encoder = Encoder::new(&buf, fragment_len)?;
+            let encoder = Encoder::new(buf.into(), fragment_len)?;
             sender.send(NewEncoder(chunk, encoder))
         }))
     }
@@ -529,7 +529,7 @@ impl RecoverState {
         if let Some(mut decoder) = self.decoder.take() {
             // println!("submit decode {} index {index}", H256(chunk));
             worker.submit(Box::new(move |(), sender| {
-                if !decoder.decode(index, &fragment)? {
+                if !decoder.decode(index, fragment)? {
                     sender.send(Decode(chunk, decoder))
                 } else if let Some(index) = encode_index {
                     let fragment = Encoder::try_from(decoder)?.encode(index)?;

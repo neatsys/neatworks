@@ -121,7 +121,7 @@ pub mod stream {
     use anyhow::Context;
     use serde::{Deserialize, Serialize};
     use tokio::{
-        net::{TcpListener, TcpStream},
+        net::{TcpListener, TcpSocket, TcpStream},
         sync::mpsc::UnboundedReceiver,
         task::JoinSet,
     };
@@ -194,8 +194,16 @@ pub mod stream {
                     pending_bind.push((dest, message, buf));
                     // for working on EC2 instances. TODO configurable
                     // bind_tasks.spawn(async move { Ok(TcpListener::bind((ip, 0)).await?) });
+                    static PORT_I: std::sync::atomic::AtomicU16 =
+                        std::sync::atomic::AtomicU16::new(0);
                     bind_tasks.spawn(async move {
-                        Ok(TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?)
+                        let i = PORT_I.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let port = 61000 + i % 4000;
+                        // Ok(TcpListener::bind(SocketAddr::from(([0; 4], port))).await?)
+                        let socket = TcpSocket::new_v4()?;
+                        socket.set_reuseaddr(true)?;
+                        socket.bind(([0; 4], port).into())?;
+                        Ok(socket.listen(1)?)
                     });
                 }
                 Select::JoinNextBind(listener) => {
