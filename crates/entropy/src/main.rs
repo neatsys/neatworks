@@ -20,7 +20,7 @@ use augustus::{
     kademlia::{self, Buckets, PeerId, PeerRecord},
     net::{
         kademlia::{Control, PeerNet},
-        Udp,
+        tcp_listen_session, Tcp, TcpControl,
     },
     worker::erased::spawn_backend,
 };
@@ -39,7 +39,7 @@ use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{create_dir, remove_dir_all},
-    net::UdpSocket,
+    net::TcpListener,
     signal::ctrl_c,
     sync::{
         mpsc::{unbounded_channel, UnboundedSender},
@@ -222,11 +222,12 @@ async fn start_peer(
     let _ = remove_dir_all(path).await;
     create_dir(path).await?;
     // let socket_net = Udp(UdpSocket::bind((config.bind_ip, record.addr.port()))
-    let socket_net = Udp(
-        UdpSocket::bind(SocketAddr::from(([0; 4], record.addr.port())))
-            .await?
-            .into(),
-    );
+    // let socket_net = Udp(
+    //     UdpSocket::bind(SocketAddr::from(([0; 4], record.addr.port())))
+    //         .await?
+    //         .into(),
+    // );
+    let listener = TcpListener::bind(SocketAddr::from(([0; 4], record.addr.port()))).await?;
 
     let ip = record.addr.ip();
     let mut buckets = Buckets::new(record);
@@ -240,19 +241,25 @@ async fn start_peer(
     }
 
     let mut kademlia_session = Session::new();
-    let mut control_session = Session::new();
+    let mut kademlia_control_session = Session::new();
     let (mut blob_sender, blob_receiver) = unbounded_channel();
     let (fs_sender, fs_receiver) = unbounded_channel();
     let (crypto_worker, mut crypto_session) = spawn_backend(crypto.clone());
     let (codec_worker, mut codec_session) = spawn_backend(());
+    let mut tcp_control_session = Session::new();
 
     let mut kademlia_peer = kademlia::Peer::new(
         buckets,
-        MessageNet::new(socket_net.clone()),
-        control_session.sender(),
+        // MessageNet::new(socket_net.clone()),
+        MessageNet::new(Tcp(tcp_control_session.sender())),
+        kademlia_control_session.sender(),
         crypto_worker,
     );
-    let mut control = Control::new(socket_net.clone(), kademlia_session.sender());
+    let mut kademlia_control = Control::new(
+        // socket_net.clone(),
+        Tcp(tcp_control_session.sender()),
+        kademlia_session.sender(),
+    );
     let mut peer = Peer::new(
         peer_id,
         crypto,
@@ -260,14 +267,16 @@ async fn start_peer(
         config.chunk_k,
         config.chunk_n,
         config.chunk_m,
-        MessageNet::<_, SocketAddr>::new(PeerNet(control_session.sender())),
+        MessageNet::<_, SocketAddr>::new(PeerNet(kademlia_control_session.sender())),
         blob_sender.clone(),
         upcall_sender,
         codec_worker,
         fs_sender,
     );
+    let mut tcp_control = TcpControl::new();
 
-    let socket_session = socket_net.recv_session({
+    // let socket_session = socket_net.recv_session({
+    let socket_session = tcp_listen_session(listener, {
         let mut peer_sender = peer_session.sender();
         let mut kademlia_sender = kademlia_session.sender();
         move |buf| {
@@ -284,23 +293,25 @@ async fn start_peer(
     let blob_session = blob::stream::session(
         ip,
         blob_receiver,
-        MessageNet::<_, SocketAddr>::new(PeerNet(control_session.sender())),
+        MessageNet::<_, SocketAddr>::new(PeerNet(kademlia_control_session.sender())),
         peer_session.sender(),
     );
-    let control_session = control_session.run(&mut control);
+    let kademlia_control_session = kademlia_control_session.run(&mut kademlia_control);
     let fs_session = entropy::fs::session(path, fs_receiver, peer_session.sender());
     let codec_session = codec_session.run(entropy::SendCodec(peer_session.sender()));
     let peer_session = peer_session.run(&mut peer);
+    let tcp_control_session = tcp_control_session.run(&mut tcp_control);
 
     tokio::select! {
         result = socket_session => result?,
         result = kademlia_session => result?,
-        result = control_session => result?,
+        result = kademlia_control_session => result?,
         result = blob_session => result?,
         result = fs_session => result?,
         result = crypto_session => result?,
         result = codec_session => result?,
         result = peer_session => result?,
+        result = tcp_control_session => result?,
     }
     Err(anyhow::anyhow!("unexpected shutdown"))
 }

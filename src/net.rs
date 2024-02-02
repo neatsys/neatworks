@@ -9,7 +9,7 @@ use bytes::Bytes;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpSocket, TcpStream},
     sync::mpsc::{unbounded_channel, UnboundedSender},
     task::JoinSet,
 };
@@ -83,14 +83,14 @@ pub trait SendMessage<A, M> {
 // should be provided as long as SendMessage<A, M> and M is Clone. but in this
 // codebase "address" has been abused and certain address iterator e.g.
 // IterAddr<AllReplica> does not really make sense
-pub struct IterAddr<'a, A>(pub &'a mut dyn Iterator<Item = A>);
+pub struct IterAddr<'a, A>(pub &'a mut (dyn Iterator<Item = A> + Send + Sync));
 // TODO better name
 pub trait SendMessageToEach<A, M>: for<'a> SendMessage<IterAddr<'a, A>, M> {}
 impl<T: for<'a> SendMessage<IterAddr<'a, A>, M>, A, M> SendMessageToEach<A, M> for T {}
 pub trait SendMessageToEachExt<A, M>: SendMessageToEach<A, M> {
     fn send_to_each(
         &mut self,
-        mut addrs: impl Iterator<Item = A>,
+        mut addrs: impl Iterator<Item = A> + Send + Sync,
         message: M,
     ) -> anyhow::Result<()> {
         SendMessage::send(self, IterAddr(&mut addrs), message)
@@ -187,12 +187,25 @@ impl<B: Buf> SendMessage<IterAddr<'_, SocketAddr>, B> for Udp {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Tcp<E>(pub E);
 
-impl<E: SendEvent<(A, M)>, A, M> SendMessage<A, M> for Tcp<E> {
-    fn send(&mut self, dest: A, message: M) -> anyhow::Result<()> {
+impl<E: SendEvent<(SocketAddr, B)>, B> SendMessage<SocketAddr, B> for Tcp<E> {
+    fn send(&mut self, dest: SocketAddr, message: B) -> anyhow::Result<()> {
         self.0.send((dest, message))
+    }
+}
+
+impl<E: SendEvent<(SocketAddr, B)>, B: Buf> SendMessage<IterAddr<'_, SocketAddr>, B> for Tcp<E> {
+    fn send(
+        &mut self,
+        IterAddr(addrs): IterAddr<'_, SocketAddr>,
+        message: B,
+    ) -> anyhow::Result<()> {
+        for addr in addrs {
+            self.send(addr, message.clone())?
+        }
+        Ok(())
     }
 }
 
@@ -225,7 +238,10 @@ impl<B: Buf> OnEvent<(SocketAddr, B)> for TcpControl<B> {
         let (sender, in_use) = self.connections.entry(dest).or_insert_with(|| {
             let (sender, mut receiver) = unbounded_channel::<B>();
             tokio::spawn(async move {
-                let mut stream = TcpStream::connect(dest).await.unwrap();
+                // let mut stream = TcpStream::connect(dest).await.unwrap();
+                let socket = TcpSocket::new_v4().unwrap();
+                socket.set_reuseaddr(true).unwrap();
+                let mut stream = socket.connect(dest).await.unwrap();
                 while let Some(buf) = receiver.recv().await {
                     stream.write_u64(buf.as_ref().len() as _).await.unwrap();
                     stream.write_all(buf.as_ref()).await.unwrap();
