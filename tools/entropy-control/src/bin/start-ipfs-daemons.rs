@@ -1,13 +1,18 @@
-use std::{net::IpAddr, time::Duration};
+use std::{env::args, net::IpAddr, time::Duration};
 
-use entropy_control::terraform_instances;
+use entropy_control::{retain_instances, terraform_instances};
 use tokio::{process::Command, task::JoinSet, time::sleep};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     // let ssh_hosts = ["localhost".to_string()];
     // let ips = ["127.0.0.1".to_string()];
-    let instances = terraform_instances().await?;
+    let mut instances = terraform_instances().await?;
+    if let Some(num_peer) = args().nth(1) {
+        let num_peer = num_peer.parse::<usize>()?;
+        instances = retain_instances(&instances, num_peer / 5);
+        assert_eq!(instances.len(), num_peer)
+    }
     // println!("{instances:?}");
     // return Ok(());
 

@@ -1,12 +1,12 @@
 use std::{
     env::args,
-    io::{SeekFrom::Start, Write},
+    io::{SeekFrom::Start, Write as _},
     net::IpAddr,
     num::NonZeroUsize,
     ops::Range,
     sync::{
         atomic::{AtomicUsize, Ordering::SeqCst},
-        Arc, Mutex,
+        Arc,
     },
     time::Duration,
 };
@@ -19,8 +19,9 @@ use rand::{seq::SliceRandom, thread_rng, Rng};
 use tokio::{
     fs::OpenOptions,
     io::{AsyncReadExt, AsyncSeekExt},
+    sync::mpsc::unbounded_channel,
     task::JoinSet,
-    time::sleep,
+    time::{sleep, Instant},
 };
 
 const NUM_PEER_PER_IP: usize = 100;
@@ -153,6 +154,11 @@ async fn main() -> anyhow::Result<()> {
         }
 
         for num_per_region in [4, 8, 12, 16] {
+            if category.starts_with("ipfs")
+                && args().nth(2) != Some((num_per_region * 5).to_string())
+            {
+                continue;
+            }
             let instances = retain_instances(&instances, num_per_region);
             assert_eq!(instances.len(), num_per_region * 5);
             benchmark(
@@ -172,7 +178,34 @@ async fn main() -> anyhow::Result<()> {
             .await?;
         }
     } else {
-        todo!()
+        let mut out = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open("entropy-1.txt")
+            .await?;
+        let mut lines = String::new();
+        out.seek(Start(0)).await?;
+        out.read_to_string(&mut lines).await?;
+        let lines = lines.lines().map(ToString::to_string).collect::<Vec<_>>();
+        let mut out = out.into_std().await;
+        let mut out = |line| writeln!(&mut out, "{line}").unwrap();
+
+        benchmark(
+            control_client.clone(),
+            &instances,
+            &category,
+            1 << 22,
+            NonZeroUsize::new(32).unwrap(),
+            NonZeroUsize::new(80).unwrap(),
+            NonZeroUsize::new(88).unwrap(),
+            NonZeroUsize::new(8).unwrap(),
+            NonZeroUsize::new(10).unwrap(),
+            600,
+            &lines,
+            &mut out,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -192,7 +225,10 @@ async fn benchmark(
     lines: &[String],
     mut out: impl FnMut(String),
 ) -> anyhow::Result<()> {
-    // assert_eq!(fragment_len as usize * chunk_k.get() * k.get(), 1 << 30);
+    let chunk_len = fragment_len * chunk_k.get() as u32;
+    assert_eq!(chunk_len as usize * k.get(), 1 << 30);
+    let replication_factor = if category.starts_with("ipfs") { 3 } else { 1 };
+
     let prefix = format!(
         "NEAT,{},{chunk_k},{chunk_n},{chunk_m},{k},{n},{},{num_operation_per_hour}",
         if category.starts_with("ipfs") {
@@ -268,40 +304,89 @@ async fn benchmark(
             control_client.clone(),
             peer_urls.clone(),
             instance_urls.clone(),
-            fragment_len * chunk_k.get() as u32,
+            chunk_len,
             k,
             n,
-            1,
+            replication_factor,
             Arc::new(AtomicUsize::new(0)),
             0..num_total,
             |line| out(format!("{prefix},{line}")),
         )
         .await?
     } else {
-        // 1x for warmup, 1x for cooldown, save the middle 2x
-        let num_total = (num_operation_per_hour * 4).max(10);
+        let interval = Duration::from_secs(3600) / num_operation_per_hour as u32;
+        let interval_sleep = sleep(Duration::ZERO);
+        tokio::pin!(interval_sleep);
 
-        let mut close_loop_sessions = JoinSet::new();
-        let count = Arc::new(AtomicUsize::new(0));
-        let out_lines = Arc::new(Mutex::new(Vec::new()));
-        for _ in 0..num_operation_per_hour {
-            let out_lines = out_lines.clone();
-            close_loop_sessions.spawn(close_loop_session(
-                control_client.clone(),
-                peer_urls.clone(),
-                instance_urls.clone(),
-                fragment_len * chunk_k.get() as u32,
-                k,
-                n,
-                1,
-                count.clone(),
-                num_operation_per_hour..num_total,
-                // num_concurrency..0,
-                move |line| out_lines.lock().unwrap().push(line),
-            ));
+        let mut open_loop_sessions = JoinSet::<anyhow::Result<_>>::new();
+        let mut warmup_finish = false;
+        let mut count = 0;
+        let (out_sender, mut out_receiver) = unbounded_channel();
+        let mut out_lines = Vec::new();
+        loop {
+            enum Select {
+                Sleep,
+                JoinNext(()),
+                Recv(String),
+            }
+            match tokio::select! {
+                () = &mut interval_sleep => Select::Sleep,
+                result = open_loop_sessions.join_next() => Select::JoinNext(result.unwrap()??),
+                recv = out_receiver.recv() => Select::Recv(recv.unwrap()),
+            } {
+                Select::Sleep => {
+                    interval_sleep.as_mut().reset(Instant::now() + interval);
+
+                    let put_url = instance_urls
+                        .choose(&mut thread_rng())
+                        .ok_or(anyhow::anyhow!("no instance available"))?;
+                    let get_url = instance_urls
+                        .choose(&mut thread_rng())
+                        .ok_or(anyhow::anyhow!("no instance available"))?;
+                    println!("Put {put_url} Get {get_url}");
+
+                    if warmup_finish {
+                        count += 1;
+                        let out_sender = out_sender.clone();
+                        open_loop_sessions.spawn(operation_session(
+                            control_client.clone(),
+                            put_url.clone(),
+                            get_url.clone(),
+                            peer_urls.clone(),
+                            chunk_len,
+                            k,
+                            n,
+                            replication_factor,
+                            move |line| {
+                                let _ = out_sender.send(line);
+                            },
+                        ));
+                    } else {
+                        open_loop_sessions.spawn(operation_session(
+                            control_client.clone(),
+                            put_url.clone(),
+                            get_url.clone(),
+                            peer_urls.clone(),
+                            chunk_len,
+                            k,
+                            n,
+                            replication_factor,
+                            |_| {},
+                        ));
+                    }
+                }
+                Select::JoinNext(()) => warmup_finish = true,
+                Select::Recv(line) => {
+                    out_lines.push(format!("{prefix},{line}"));
+                    if count >= 10 {
+                        break;
+                    }
+                }
+            }
         }
+        out_receiver.close();
         let session = async {
-            while let Some(result) = close_loop_sessions.join_next().await {
+            while let Some(result) = open_loop_sessions.join_next().await {
                 result??
             }
             Result::<_, anyhow::Error>::Ok(())
@@ -310,7 +395,11 @@ async fn benchmark(
             result = session => result?,
             Some(result) = start_peers_sessions.join_next() => result??,
         }
-        assert!(close_loop_sessions.is_empty());
+        assert!(open_loop_sessions.is_empty());
+        while let Some(line) = out_receiver.recv().await {
+            out_lines.push(format!("{prefix},{line}"))
+        }
+        out(out_lines.join("\n"))
     }
 
     if !category.starts_with("ipfs") {
