@@ -389,6 +389,7 @@ impl<A: Addr> Peer<A> {
 }
 
 struct ResendFindPeer<A>(Target, PeerRecord<A>);
+const RESEND_FIND_PEER_DURATION: Duration = Duration::from_millis(2500);
 
 impl<A: Addr> OnEvent<Signed<FindPeer<A>>> for Peer<A> {
     fn on_event(
@@ -414,7 +415,7 @@ impl<A: Addr> OnEvent<Signed<FindPeer<A>>> for Peer<A> {
             contacting.insert(
                 record.id,
                 timer.set(
-                    Duration::from_secs(1),
+                    RESEND_FIND_PEER_DURATION,
                     ResendFindPeer(target, record.clone()),
                 )?,
             );
@@ -440,13 +441,17 @@ impl<A: Addr> OnEvent<ResendFindPeer<A>> for Peer<A> {
         ResendFindPeer(target, record): ResendFindPeer<A>,
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        eprintln!("Resend FindPeer({}) {record:?}", H256(target));
         let state = self.query_states.get_mut(&target).unwrap();
+        eprintln!(
+            "Resend FindPeer({}, {}) {record:?}",
+            H256(target),
+            state.find_peer.count
+        );
         self.net
             .send_to_each([record.addr.clone()].into_iter(), state.find_peer.clone())?;
         let peer_id = record.id;
         *state.contacting.get_mut(&peer_id).unwrap() =
-            timer.set(Duration::from_secs(1), ResendFindPeer(target, record))?;
+            timer.set(RESEND_FIND_PEER_DURATION, ResendFindPeer(target, record))?;
         Ok(())
     }
 }
@@ -626,7 +631,7 @@ impl<A: Addr> OnEvent<Verified<FindPeerOk<A>>> for Peer<A> {
                 state.contacting.insert(
                     record.id,
                     timer.set(
-                        Duration::from_secs(1),
+                        RESEND_FIND_PEER_DURATION,
                         ResendFindPeer(target, record.clone()),
                     )?,
                 );

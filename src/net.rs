@@ -228,12 +228,17 @@ impl<B> TcpControl<B> {
     }
 }
 
+const MAX_TCP_BUF_LEN: usize = 1 << 20;
+
 impl<B: Buf> OnEvent<(SocketAddr, B)> for TcpControl<B> {
     fn on_event(
         &mut self,
         (dest, buf): (SocketAddr, B),
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
+        if buf.as_ref().len() >= MAX_TCP_BUF_LEN {
+            anyhow::bail!("TCP buf too large: {}", buf.as_ref().len())
+        }
         let mut set_timer = false;
         let (sender, in_use) = self.connections.entry(dest).or_insert_with(|| {
             let (sender, mut receiver) = unbounded_channel::<B>();
@@ -304,6 +309,13 @@ pub async fn tcp_listen_session(
                 let sender = sender.clone();
                 stream_sessions.spawn(async move {
                     while let Ok(len) = stream.read_u64().await {
+                        if len as usize >= MAX_TCP_BUF_LEN {
+                            eprintln!(
+                                "Closing connection to {:?} for too large buf: {len}",
+                                stream.peer_addr()
+                            );
+                            break;
+                        }
                         let mut buf = vec![0; len as _];
                         stream.read_exact(&mut buf).await?;
                         sender

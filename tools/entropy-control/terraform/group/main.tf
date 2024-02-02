@@ -74,34 +74,38 @@ data "aws_ami" "debian" {
 
 variable "instance_type" {
   type    = string
-  default = "c5.4xlarge"
+  default = "m5.4xlarge"
 }
 
-variable "instance_count" {
+variable "instance-count" {
   type    = number
   default = 3
 }
 
 resource "aws_instance" "entropy" {
-  count = var.instance_count
+  count = var.instance-count
 
   ami                    = data.aws_ami.debian.id
   instance_type          = var.instance_type
   subnet_id              = resource.aws_subnet.entropy.id
   vpc_security_group_ids = [resource.aws_security_group.entropy.id]
   key_name               = "Ephemeral"
+
+  root_block_device {
+    volume_size = 20
+  }
 }
 
-variable "instance_state" {
+variable "instance-state" {
   type    = string
   default = "running"
 }
 
 resource "aws_ec2_instance_state" "entropy" {
-  count = var.instance_count
+  count = var.instance-count
 
   instance_id = aws_instance.entropy[count.index].id
-  state       = var.instance_state
+  state       = var.instance-state
 }
 
 output "instances" {

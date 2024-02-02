@@ -50,14 +50,19 @@ variable "mode" {
   }
 }
 
+variable "instance-count" {
+  type    = number
+  default = 3
+}
+
 module "group-1" {
   source = "./group"
   providers = {
     aws = aws.ap-southeast-1
   }
 
-  instance_state = var.state
-  instance_count = var.mode == "one" ? 3 : 0
+  instance-state = var.state
+  instance-count = var.mode == "one" ? var.instance-count : 0
 }
 
 module "group-5-1" {
@@ -66,7 +71,7 @@ module "group-5-1" {
     aws = aws.ap-east-1
   }
 
-  instance_count = var.mode == "five" ? 1 : 0
+  instance-count = var.mode == "five" ? var.instance-count : 0
 }
 
 
@@ -76,7 +81,7 @@ module "group-5-2" {
     aws = aws.us-west-1
   }
 
-  instance_count = var.mode == "five" ? 1 : 0
+  instance-count = var.mode == "five" ? var.instance-count : 0
 }
 
 module "group-5-3" {
@@ -85,7 +90,7 @@ module "group-5-3" {
     aws = aws.eu-central-1
   }
 
-  instance_count = var.mode == "five" ? 1 : 0
+  instance-count = var.mode == "five" ? var.instance-count : 0
 }
 
 module "group-5-4" {
@@ -94,7 +99,7 @@ module "group-5-4" {
     aws = aws.sa-east-1
   }
 
-  instance_count = var.mode == "five" ? 1 : 0
+  instance-count = var.mode == "five" ? var.instance-count : 0
 }
 
 module "group-5-5" {
@@ -103,7 +108,7 @@ module "group-5-5" {
     aws = aws.af-south-1
   }
 
-  instance_count = var.mode == "five" ? 1 : 0
+  instance-count = var.mode == "five" ? var.instance-count : 0
 }
 
 output "instances" {

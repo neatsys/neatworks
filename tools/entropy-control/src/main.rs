@@ -29,22 +29,22 @@ async fn main() -> anyhow::Result<()> {
     let control_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(1))
         .build()?;
-    // let instances = terraform_instances().await?;
+    let instances = terraform_instances().await?;
     // let instances = vec![instances[0].clone()];
-    let instances = vec![entropy_control::TerraformOutputInstance {
-        public_ip: [127, 0, 0, 1].into(),
-        private_ip: [127, 0, 0, 1].into(),
-        public_dns: "localhost".into(),
-    }];
+    // let instances = vec![entropy_control::TerraformOutputInstance {
+    //     public_ip: [127, 0, 0, 1].into(),
+    //     private_ip: [127, 0, 0, 1].into(),
+    //     public_dns: "localhost".into(),
+    // }];
 
-    let fragment_len = 1 << 20;
+    let fragment_len = 1 << 22;
     let chunk_k = NonZeroUsize::new(32).unwrap();
     let chunk_n = NonZeroUsize::new(80).unwrap();
     let chunk_m = NonZeroUsize::new(88).unwrap();
     let k = NonZeroUsize::new(8).unwrap();
     let n = NonZeroUsize::new(10).unwrap();
-    let num_concurrency = 1;
-    // 1x for warmup, 1x for cooldown, 2x for data collection
+    let num_concurrency = 6;
+    // 1x for warmup, 1x for cooldown, save the middle 2x
     let num_total = (num_concurrency * 4).max(10);
 
     let public_ips = instances
@@ -283,10 +283,11 @@ async fn operation_session(
         }
         .await;
         match result {
-            Err(err) => {
+            Err(err) if err.is_timeout() => {
                 eprintln!("{err}");
                 continue;
             }
+            Err(err) => Err(err)?,
             Ok(result) => {
                 if let Some(result) = result.json::<Option<PutResult>>().await? {
                     break result;
@@ -330,10 +331,11 @@ async fn operation_session(
         }
         .await;
         match result {
-            Err(err) => {
+            Err(err) if err.is_timeout() => {
                 eprintln!("{err}");
                 continue;
             }
+            Err(err) => Err(err)?,
             Ok(result) => {
                 if let Some(result) = result.json::<Option<GetResult>>().await? {
                     break result;
