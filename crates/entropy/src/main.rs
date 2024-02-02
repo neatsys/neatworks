@@ -26,6 +26,7 @@ use augustus::{
 };
 use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, State},
+    http::StatusCode,
     routing::{get, post},
     Json, Router,
 };
@@ -39,7 +40,7 @@ use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{create_dir, remove_dir_all},
-    net::TcpListener,
+    net::TcpSocket,
     signal::ctrl_c,
     sync::{
         mpsc::{unbounded_channel, UnboundedSender},
@@ -164,10 +165,17 @@ struct PeersState {
     // cancel
 }
 
-async fn ok(State(state): State<AppState>) {
+async fn ok(State(state): State<AppState>) -> (StatusCode, &'static str) {
     let mut peers = state.peers.lock().await;
-    while let Ok(Some(result)) = timeout(Duration::ZERO, peers.sessions.join_next()).await {
-        result.unwrap().unwrap()
+    if let Ok(Some(result)) = timeout(Duration::ZERO, peers.sessions.join_next()).await {
+        match result {
+            Err(err) => eprintln!("{err}"),
+            Ok(Err(err)) => eprintln!("{err}"),
+            Ok(Ok(())) => eprintln!("unexpected peer exit"),
+        }
+        (StatusCode::INTERNAL_SERVER_ERROR, "err")
+    } else {
+        (StatusCode::OK, "ok")
     }
 }
 
@@ -227,7 +235,10 @@ async fn start_peer(
     //         .await?
     //         .into(),
     // );
-    let listener = TcpListener::bind(SocketAddr::from(([0; 4], record.addr.port()))).await?;
+    // let listener = TcpListener::bind(SocketAddr::from(([0; 4], record.addr.port()))).await?;
+    let socket = TcpSocket::new_v4()?;
+    socket.bind(SocketAddr::from(([0; 4], record.addr.port())))?;
+    let listener = socket.listen(12000)?;
 
     let ip = record.addr.ip();
     let mut buckets = Buckets::new(record);

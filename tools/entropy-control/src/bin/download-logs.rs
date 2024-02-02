@@ -1,10 +1,11 @@
 use std::time::Duration;
 
 use entropy_control::terraform_instances;
-use tokio::{process::Command, task::JoinSet, time::sleep};
+use tokio::{fs::create_dir_all, process::Command, task::JoinSet, time::sleep};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    create_dir_all("entropy.errors").await?;
     println!("Spawning host sessions");
     let mut sessions = JoinSet::new();
     for instance in terraform_instances().await? {
@@ -28,7 +29,7 @@ async fn join_sessions(sessions: &mut JoinSet<anyhow::Result<()>>) -> anyhow::Re
 async fn host_session(ssh_host: String) -> anyhow::Result<()> {
     let status = Command::new("rsync")
         .arg(format!("{ssh_host}:entropy.errors"))
-        .arg(format!("entropy.errors-{ssh_host}"))
+        .arg(format!("entropy.errors/{ssh_host}"))
         .status()
         .await?;
     if !status.success() {

@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
     let category = args().nth(1).unwrap_or_default();
 
     let control_client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(1))
+        .timeout(Duration::from_secs(3))
         .build()?;
     let instances = terraform_instances().await?;
     // let instances = vec![instances[0].clone()];
@@ -54,53 +54,53 @@ async fn main() -> anyhow::Result<()> {
         let mut out = out.into_std().await;
         let mut out = |line| writeln!(&mut out, "{line}").unwrap();
 
-        // benchmark(
-        //     control_client.clone(),
-        //     &instances,
-        //     &category,
-        //     1 << 22,
-        //     NonZeroUsize::new(32).unwrap(),
-        //     NonZeroUsize::new(80).unwrap(),
-        //     NonZeroUsize::new(88).unwrap(),
-        //     NonZeroUsize::new(8).unwrap(),
-        //     NonZeroUsize::new(10).unwrap(),
-        //     1,
-        //     &lines,
-        //     &mut out,
-        // )
-        // .await?;
+        benchmark(
+            control_client.clone(),
+            &instances,
+            &category,
+            1 << 22,
+            NonZeroUsize::new(32).unwrap(),
+            NonZeroUsize::new(80).unwrap(),
+            NonZeroUsize::new(88).unwrap(),
+            NonZeroUsize::new(8).unwrap(),
+            NonZeroUsize::new(10).unwrap(),
+            1,
+            &lines,
+            &mut out,
+        )
+        .await?;
 
-        // benchmark(
-        //     control_client.clone(),
-        //     &instances,
-        //     &category,
-        //     1 << 23,
-        //     NonZeroUsize::new(32).unwrap(),
-        //     NonZeroUsize::new(80).unwrap(),
-        //     NonZeroUsize::new(88).unwrap(),
-        //     NonZeroUsize::new(4).unwrap(),
-        //     NonZeroUsize::new(5).unwrap(),
-        //     1,
-        //     &lines,
-        //     &mut out,
-        // )
-        // .await?;
+        benchmark(
+            control_client.clone(),
+            &instances,
+            &category,
+            1 << 23,
+            NonZeroUsize::new(32).unwrap(),
+            NonZeroUsize::new(80).unwrap(),
+            NonZeroUsize::new(88).unwrap(),
+            NonZeroUsize::new(4).unwrap(),
+            NonZeroUsize::new(5).unwrap(),
+            1,
+            &lines,
+            &mut out,
+        )
+        .await?;
 
-        // benchmark(
-        //     control_client.clone(),
-        //     &instances,
-        //     &category,
-        //     1 << 21,
-        //     NonZeroUsize::new(32).unwrap(),
-        //     NonZeroUsize::new(80).unwrap(),
-        //     NonZeroUsize::new(88).unwrap(),
-        //     NonZeroUsize::new(16).unwrap(),
-        //     NonZeroUsize::new(20).unwrap(),
-        //     1,
-        //     &lines,
-        //     &mut out,
-        // )
-        // .await?;
+        benchmark(
+            control_client.clone(),
+            &instances,
+            &category,
+            1 << 21,
+            NonZeroUsize::new(32).unwrap(),
+            NonZeroUsize::new(80).unwrap(),
+            NonZeroUsize::new(88).unwrap(),
+            NonZeroUsize::new(16).unwrap(),
+            NonZeroUsize::new(20).unwrap(),
+            1,
+            &lines,
+            &mut out,
+        )
+        .await?;
 
         if !category.starts_with("ipfs") {
             benchmark(
@@ -135,21 +135,21 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?
         } else {
-            benchmark(
-                control_client.clone(),
-                &instances,
-                &category,
-                1 << 25,
-                NonZeroUsize::new(32).unwrap(),
-                NonZeroUsize::new(80).unwrap(),
-                NonZeroUsize::new(88).unwrap(),
-                NonZeroUsize::new(1).unwrap(),
-                NonZeroUsize::new(1).unwrap(),
-                1,
-                &lines,
-                &mut out,
-            )
-            .await?;
+            // benchmark(
+            //     control_client.clone(),
+            //     &instances,
+            //     &category,
+            //     1 << 25,
+            //     NonZeroUsize::new(32).unwrap(),
+            //     NonZeroUsize::new(80).unwrap(),
+            //     NonZeroUsize::new(88).unwrap(),
+            //     NonZeroUsize::new(1).unwrap(),
+            //     NonZeroUsize::new(1).unwrap(),
+            //     1,
+            //     &lines,
+            //     &mut out,
+            // )
+            // .await?;
         }
     } else {
         todo!()
@@ -168,13 +168,14 @@ async fn benchmark(
     chunk_m: NonZeroUsize,
     k: NonZeroUsize,
     n: NonZeroUsize,
-    num_concurrency: usize,
+    num_operation_per_hour: usize,
     lines: &[String],
     mut out: impl FnMut(String),
 ) -> anyhow::Result<()> {
-    assert_eq!(fragment_len as usize * chunk_k.get() * k.get(), 1 << 30);
+    // assert_eq!(fragment_len as usize * chunk_k.get() * k.get(), 1 << 30);
     let prefix = format!(
-        "NEAT,{},{chunk_k},{chunk_n},{chunk_m},{k},{n},{num_concurrency}",
+        "NEAT,{},{chunk_k},{chunk_n},{chunk_m},{k},{n},{},{num_operation_per_hour}",
+        instances.len() * NUM_PEER_PER_IP,
         if category.starts_with("ipfs") {
             "ipfs"
         } else {
@@ -186,10 +187,10 @@ async fn benchmark(
         .filter(|line| line.starts_with(&prefix))
         .count();
     // 10 operations
-    if num_concurrency == 1 && count >= 20 {
+    if num_operation_per_hour == 1 && count >= 20 {
         return Ok(());
     }
-    if num_concurrency != 1 && count != 0 {
+    if num_operation_per_hour != 1 && count != 0 {
         return Ok(());
     }
 
@@ -213,7 +214,7 @@ async fn benchmark(
             ));
         }
         tokio::select! {
-            () = sleep(Duration::from_secs(3)) => {}
+            () = sleep(Duration::from_secs(10)) => {}
             Some(result) = start_peers_sessions.join_next() => result??
         }
     }
@@ -239,8 +240,9 @@ async fn benchmark(
         .map(|instance| format!("http://{}:3000", instance.public_ip))
         .collect::<Vec<_>>();
 
-    if num_concurrency == 1 {
-        let num_total = 10 - count;
+    if num_operation_per_hour == 1 {
+        let num_total = (20 - count) / 2 + 1;
+        // let num_total = 1;
         close_loop_session(
             control_client.clone(),
             peer_urls.clone(),
@@ -256,12 +258,12 @@ async fn benchmark(
         .await?
     } else {
         // 1x for warmup, 1x for cooldown, save the middle 2x
-        let num_total = (num_concurrency * 4).max(10);
+        let num_total = (num_operation_per_hour * 4).max(10);
 
         let mut close_loop_sessions = JoinSet::new();
         let count = Arc::new(AtomicUsize::new(0));
         let out_lines = Arc::new(Mutex::new(Vec::new()));
-        for _ in 0..num_concurrency {
+        for _ in 0..num_operation_per_hour {
             let out_lines = out_lines.clone();
             close_loop_sessions.spawn(close_loop_session(
                 control_client.clone(),
@@ -272,7 +274,7 @@ async fn benchmark(
                 n,
                 1,
                 count.clone(),
-                num_concurrency..num_total,
+                num_operation_per_hour..num_total,
                 // num_concurrency..0,
                 move |line| out_lines.lock().unwrap().push(line),
             ));

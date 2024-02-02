@@ -90,7 +90,7 @@ impl<A> Default for Bucket<A> {
 }
 
 const BUCKET_SIZE: usize = 20;
-const NUM_CONCURRENCY: usize = 3;
+const NUM_CONCURRENCY: usize = 30;
 
 impl<A> Buckets<A> {
     pub fn new(origin: PeerRecord<A>) -> Self {

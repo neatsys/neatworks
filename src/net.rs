@@ -247,7 +247,10 @@ impl<B: Buf> OnEvent<(SocketAddr, B)> for TcpControl<B> {
                 // let mut stream = TcpStream::connect(dest).await.unwrap();
                 let socket = TcpSocket::new_v4().unwrap();
                 socket.set_reuseaddr(true).unwrap();
-                let mut stream = socket.connect(dest).await.unwrap();
+                let mut stream = match socket.connect(dest).await {
+                    Ok(stream) => stream,
+                    Err(err) => panic!("{dest}: {err}"),
+                };
                 while let Some(buf) = receiver.recv().await {
                     async {
                         stream.write_u64(buf.as_ref().len() as _).await?;

@@ -90,6 +90,8 @@ impl<M, A, B: Eq + Hash> Control<M, A, B> {
 #[derive(Debug)]
 pub struct QueryTimeout(pub Query);
 
+const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
+
 impl<M, A: Addr> OnEvent<(PeerId, M)> for Control<M, A, PeerId> {
     fn on_event(
         &mut self,
@@ -114,7 +116,7 @@ impl<M, A: Addr> OnEvent<(PeerId, M)> for Control<M, A, PeerId> {
                 peer_id,
                 QueryingUnicast {
                     messages: vec![message],
-                    timer: timer.set(Duration::from_secs(10), QueryTimeout(query))?,
+                    timer: timer.set(QUERY_TIMEOUT, QueryTimeout(query))?,
                 },
             );
         }
@@ -154,7 +156,7 @@ impl<M, A> OnEvent<(Multicast<Target>, M)> for Control<M, A, Target> {
             QueryMulticast {
                 count,
                 messages: vec![(count, message)],
-                timer: timer.set(Duration::from_secs(10), QueryTimeout(query))?,
+                timer: timer.set(QUERY_TIMEOUT, QueryTimeout(query))?,
             },
         );
         Ok(())
@@ -231,7 +233,7 @@ impl<M: Clone, A: Addr> OnEvent<QueryResult<A>> for Control<M, A, PeerId> {
                 QueryMulticast {
                     count,
                     messages: multicasts,
-                    timer: timer.set(Duration::from_secs(10), QueryTimeout(query))?,
+                    timer: timer.set(QUERY_TIMEOUT, QueryTimeout(query))?,
                 },
             );
         }
