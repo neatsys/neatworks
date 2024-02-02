@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use entropy_control::{terraform_instances, TerraformOutputInstance};
+use entropy_control::{retain_instances, terraform_instances, TerraformOutputInstance};
 use entropy_control_messages::{
     GetConfig, GetResult, PeerUrl, PutConfig, PutResult, StartPeersConfig,
 };
@@ -150,6 +150,26 @@ async fn main() -> anyhow::Result<()> {
             //     &mut out,
             // )
             // .await?;
+        }
+
+        for num_per_region in [4, 8, 12, 16] {
+            let instances = retain_instances(&instances, num_per_region);
+            assert_eq!(instances.len(), num_per_region * 5);
+            benchmark(
+                control_client.clone(),
+                &instances,
+                &category,
+                1 << 22,
+                NonZeroUsize::new(32).unwrap(),
+                NonZeroUsize::new(80).unwrap(),
+                NonZeroUsize::new(88).unwrap(),
+                NonZeroUsize::new(8).unwrap(),
+                NonZeroUsize::new(10).unwrap(),
+                1,
+                &lines,
+                &mut out,
+            )
+            .await?;
         }
     } else {
         todo!()
