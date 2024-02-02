@@ -28,7 +28,7 @@ async fn join_sessions(sessions: &mut JoinSet<anyhow::Result<()>>) -> anyhow::Re
 async fn host_session(ssh_host: String) -> anyhow::Result<()> {
     let status = Command::new("ssh")
         .arg(&ssh_host)
-        .arg("sudo tc qdisc add dev ens5 root tbf rate 1gbit latency 50ms burst 1540")
+        .arg("sudo tc qdisc add dev ens5 root fq maxrate 100Mbit")
         .status()
         .await?;
     if !status.success() {
@@ -36,7 +36,7 @@ async fn host_session(ssh_host: String) -> anyhow::Result<()> {
     }
     let status = Command::new("ssh")
         .arg(&ssh_host)
-        .arg("sudo tc qdisc add dev lo root tbf rate 1gbit latency 50ms burst 1540")
+        .arg("sudo tc qdisc add dev lo root fq maxrate 100Mbit")
         .status()
         .await?;
     if !status.success() {

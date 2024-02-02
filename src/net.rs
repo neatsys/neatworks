@@ -1,12 +1,23 @@
 pub mod kademlia;
 
-use std::{fmt::Debug, hash::Hash, net::SocketAddr, sync::Arc};
+use std::{
+    collections::HashMap, fmt::Debug, hash::Hash, net::SocketAddr, sync::Arc, time::Duration,
+};
 
 use bincode::Options as _;
 use bytes::Bytes;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::mpsc::{unbounded_channel, UnboundedSender},
+    task::JoinSet,
+};
 
-use crate::event::SendEvent;
+use crate::event::{
+    erased::{OnEvent, Timer},
+    SendEvent,
+};
 
 pub trait Addr:
     Send + Sync + Clone + Eq + Hash + Debug + Serialize + DeserializeOwned + 'static
@@ -92,42 +103,6 @@ pub mod events {
     pub struct Recv<M>(pub M);
 }
 
-#[derive(Debug, Clone)]
-pub struct Udp(pub Arc<tokio::net::UdpSocket>);
-
-impl Udp {
-    pub async fn recv_session(
-        &self,
-        mut on_buf: impl FnMut(&[u8]) -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
-        let mut buf = vec![0; 1 << 16];
-        loop {
-            let (len, _) = self.0.recv_from(&mut buf).await?;
-            on_buf(&buf[..len])?
-        }
-    }
-}
-
-impl<B: Buf> SendMessage<SocketAddr, B> for Udp {
-    fn send(&mut self, dest: SocketAddr, buf: B) -> anyhow::Result<()> {
-        let socket = self.0.clone();
-        // a broken error propagation here. nothing can observe the failure of `send_to`
-        // by definition `SendMessage` is one-way (i.e. no complete notification) unreliable net
-        // interface, so this is fine, just kindly note the fact
-        tokio::spawn(async move { socket.send_to(buf.as_ref(), dest).await.unwrap() });
-        Ok(())
-    }
-}
-
-impl<B: Buf> SendMessage<IterAddr<'_, SocketAddr>, B> for Udp {
-    fn send(&mut self, dest: IterAddr<'_, SocketAddr>, buf: B) -> anyhow::Result<()> {
-        for addr in dest.0 {
-            self.send(addr, buf.clone())?
-        }
-        Ok(())
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SendAddr<T>(pub T);
 
@@ -174,4 +149,156 @@ pub fn deserialize<M: DeserializeOwned>(buf: &[u8]) -> anyhow::Result<M> {
         .allow_trailing_bytes()
         .deserialize(buf)
         .map_err(Into::into)
+}
+
+#[derive(Debug, Clone)]
+pub struct Udp(pub Arc<tokio::net::UdpSocket>);
+
+impl Udp {
+    pub async fn recv_session(
+        &self,
+        mut on_buf: impl FnMut(&[u8]) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let mut buf = vec![0; 1 << 16];
+        loop {
+            let (len, _) = self.0.recv_from(&mut buf).await?;
+            on_buf(&buf[..len])?
+        }
+    }
+}
+
+impl<B: Buf> SendMessage<SocketAddr, B> for Udp {
+    fn send(&mut self, dest: SocketAddr, buf: B) -> anyhow::Result<()> {
+        let socket = self.0.clone();
+        // a broken error propagation here. nothing can observe the failure of `send_to`
+        // by definition `SendMessage` is one-way (i.e. no complete notification) unreliable net
+        // interface, so this is fine, just kindly note the fact
+        tokio::spawn(async move { socket.send_to(buf.as_ref(), dest).await.unwrap() });
+        Ok(())
+    }
+}
+
+impl<B: Buf> SendMessage<IterAddr<'_, SocketAddr>, B> for Udp {
+    fn send(&mut self, dest: IterAddr<'_, SocketAddr>, buf: B) -> anyhow::Result<()> {
+        for addr in dest.0 {
+            self.send(addr, buf.clone())?
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct Tcp<E>(pub E);
+
+impl<E: SendEvent<(A, M)>, A, M> SendMessage<A, M> for Tcp<E> {
+    fn send(&mut self, dest: A, message: M) -> anyhow::Result<()> {
+        self.0.send((dest, message))
+    }
+}
+
+#[derive(Debug)]
+pub struct TcpControl<B> {
+    connections: HashMap<SocketAddr, (UnboundedSender<B>, bool)>,
+}
+
+impl<B> Default for TcpControl<B> {
+    fn default() -> Self {
+        Self {
+            connections: Default::default(),
+        }
+    }
+}
+
+impl<B> TcpControl<B> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl<B: Buf> OnEvent<(SocketAddr, B)> for TcpControl<B> {
+    fn on_event(
+        &mut self,
+        (dest, buf): (SocketAddr, B),
+        timer: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
+        let mut set_timer = false;
+        let (sender, in_use) = self.connections.entry(dest).or_insert_with(|| {
+            let (sender, mut receiver) = unbounded_channel::<B>();
+            tokio::spawn(async move {
+                let mut stream = TcpStream::connect(dest).await.unwrap();
+                while let Some(buf) = receiver.recv().await {
+                    stream.write_u64(buf.as_ref().len() as _).await.unwrap();
+                    stream.write_all(buf.as_ref()).await.unwrap();
+                    stream.flush().await.unwrap()
+                }
+            });
+            set_timer = true;
+            (sender, false)
+        });
+        if set_timer {
+            timer.set(Duration::from_secs(10), IdleConnection(dest))?;
+        }
+        *in_use = true;
+        sender
+            .send(buf)
+            .map_err(|_| anyhow::anyhow!("connection closed"))
+    }
+}
+
+struct IdleConnection(SocketAddr);
+
+impl<B> OnEvent<IdleConnection> for TcpControl<B> {
+    fn on_event(
+        &mut self,
+        IdleConnection(dest): IdleConnection,
+        timer: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
+        let (_, in_use) = self
+            .connections
+            .get_mut(&dest)
+            .ok_or(anyhow::anyhow!("connection missing"))?;
+        if *in_use {
+            *in_use = false;
+            timer.set(Duration::from_secs(10), IdleConnection(dest))?;
+        } else {
+            self.connections.remove(&dest).unwrap();
+        }
+        Ok(())
+    }
+}
+
+pub async fn tcp_listen_session(
+    listener: TcpListener,
+    mut on_buf: impl FnMut(&[u8]) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let mut stream_sessions = JoinSet::<anyhow::Result<_>>::new();
+    let (sender, mut receiver) = unbounded_channel();
+    loop {
+        enum Select {
+            Accept((TcpStream, SocketAddr)),
+            Recv(Vec<u8>),
+            JoinNext(()),
+        }
+        match tokio::select! {
+            accept = listener.accept() => Select::Accept(accept?),
+            recv = receiver.recv() => Select::Recv(recv.unwrap()),
+            Some(result) = stream_sessions.join_next() => Select::JoinNext(result??),
+        } {
+            Select::Accept((mut stream, _)) => {
+                let sender = sender.clone();
+                stream_sessions.spawn(async move {
+                    while let Ok(len) = stream.read_u64().await {
+                        let mut buf = vec![0; len as _];
+                        stream.read_exact(&mut buf).await?;
+                        sender
+                            .send(buf)
+                            .map_err(|_| anyhow::anyhow!("channel closed"))?
+                    }
+                    Ok(())
+                });
+            }
+            Select::Recv(buf) => on_buf(&buf)?,
+            Select::JoinNext(()) => {}
+        }
+    }
 }
