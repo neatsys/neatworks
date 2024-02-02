@@ -116,21 +116,19 @@ pub mod stream {
         future::Future,
         net::{IpAddr, SocketAddr},
         pin::Pin,
-        time::Duration,
     };
 
     use anyhow::Context;
     use serde::{Deserialize, Serialize};
     use tokio::{
-        net::{TcpSocket, TcpStream},
+        net::{TcpListener, TcpSocket, TcpStream},
         sync::mpsc::UnboundedReceiver,
         task::JoinSet,
-        time::sleep,
     };
 
     use crate::{
         event::SendEvent,
-        net::{events::Recv, Addr, SendMessage},
+        net::{events::Recv, SendMessage},
     };
 
     pub struct Transfer<A, M>(pub A, pub M, pub OnTransfer);
@@ -169,70 +167,57 @@ pub mod stream {
         }
     }
 
-    pub async fn session<A: Addr, M: Send + Sync + Clone + 'static>(
+    pub async fn session<A, M: Send + 'static>(
         ip: IpAddr,
         mut events: UnboundedReceiver<Event<A, M>>,
-        net: impl SendMessage<A, Serve<M>> + Send + Clone + 'static,
+        mut net: impl SendMessage<A, Serve<M>>,
         mut upcall: impl SendEvent<RecvBlob<M>>,
     ) -> anyhow::Result<()> {
-        // let mut bind_tasks = JoinSet::<anyhow::Result<_>>::new();
+        let mut bind_tasks = JoinSet::<anyhow::Result<_>>::new();
         let mut send_tasks = JoinSet::<anyhow::Result<_>>::new();
         let mut connect_tasks = JoinSet::<anyhow::Result<_>>::new();
-        // let mut pending_bind = Vec::new();
+        let mut pending_bind = Vec::new();
         loop {
             enum Select<A, M> {
                 Recv(Event<A, M>),
-                // JoinNextBind(TcpListener),
+                JoinNextBind(TcpListener),
                 JoinNextSend(()),
                 JoinNextConnect((M, TcpStream)),
             }
             match tokio::select! {
                 event = events.recv() => Select::Recv(event.ok_or(anyhow::anyhow!("channel closed"))?),
-                // Some(result) = bind_tasks.join_next() => Select::JoinNextBind(result??),
+                Some(result) = bind_tasks.join_next() => Select::JoinNextBind(result??),
                 Some(result) = send_tasks.join_next() => Select::JoinNextSend(result??),
                 Some(result) = connect_tasks.join_next() => Select::JoinNextConnect(result??),
             } {
                 Select::Recv(Event::Transfer(Transfer(dest, message, buf))) => {
+                    pending_bind.push((dest, message, buf));
                     // for working on EC2 instances. TODO configurable
                     // bind_tasks.spawn(async move { Ok(TcpListener::bind((ip, 0)).await?) });
-                    let mut net = net.clone();
                     static PORT_I: std::sync::atomic::AtomicU16 =
                         std::sync::atomic::AtomicU16::new(0);
-                    send_tasks.spawn(async move {
+                    bind_tasks.spawn(async move {
                         let i = PORT_I.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         let port = 61000 + i % 4000;
                         // Ok(TcpListener::bind(SocketAddr::from(([0; 4], port))).await?)
                         let socket = TcpSocket::new_v4()?;
                         socket.set_reuseaddr(true)?;
                         socket.bind(([0; 4], port).into())?;
-                        let listener = socket.listen(1)?;
-                        let addr = (ip, listener.local_addr()?.port()).into();
-                        let send_session = async {
-                            loop {
-                                net.send(dest.clone(), Serve(message.clone(), addr))?;
-                                sleep(Duration::from_secs(1)).await
-                            }
-                        };
-                        let (stream, _) = tokio::select! {
-                            result = listener.accept() => result?,
-                            result = send_session => return result,
-                        };
+                        Ok(socket.listen(1)?)
+                    });
+                }
+                Select::JoinNextBind(listener) => {
+                    let (dest, message, buf) = pending_bind.pop().unwrap();
+                    // net.send(dest, Serve(message, listener.local_addr()?))?;
+                    net.send(
+                        dest,
+                        Serve(message, (ip, listener.local_addr()?.port()).into()),
+                    )?;
+                    send_tasks.spawn(async move {
+                        let (stream, _) = listener.accept().await?;
                         buf(stream).await
                     });
                 }
-                // Select::JoinNextBind(listener) => {
-                //     let (dest, message, buf) = pending_bind.pop().unwrap();
-                //     // net.send(dest, Serve(message, listener.local_addr()?))?;
-
-                //     net.send(
-                //         dest,
-                //         Serve(message, (ip, listener.local_addr()?.port()).into()),
-                //     )?;
-                //     send_tasks.spawn(async move {
-                //         let (stream, _) = listener.accept().await?;
-                //         buf(stream).await
-                //     });
-                // }
                 Select::JoinNextSend(()) => {}
                 Select::Recv(Event::RecvServe(Recv(Serve(message, blob_addr)))) => {
                     connect_tasks.spawn(async move {
