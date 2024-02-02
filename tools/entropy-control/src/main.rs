@@ -154,6 +154,8 @@ async fn main() -> anyhow::Result<()> {
         }
 
         for num_per_region in [4, 8, 12, 16] {
+            // well, i can just run ipfs according to what specified from command line
+            // but this is safer right?
             if category.starts_with("ipfs")
                 && args().nth(2) != Some((num_per_region * 5 * 100).to_string())
             {
@@ -191,21 +193,23 @@ async fn main() -> anyhow::Result<()> {
         let mut out = out.into_std().await;
         let mut out = |line| writeln!(&mut out, "{line}").unwrap();
 
-        benchmark(
-            control_client.clone(),
-            &instances,
-            &category,
-            1 << 22,
-            NonZeroUsize::new(32).unwrap(),
-            NonZeroUsize::new(80).unwrap(),
-            NonZeroUsize::new(88).unwrap(),
-            NonZeroUsize::new(8).unwrap(),
-            NonZeroUsize::new(10).unwrap(),
-            600,
-            &lines,
-            &mut out,
-        )
-        .await?;
+        for n in [600, 1200] {
+            benchmark(
+                control_client.clone(),
+                &instances,
+                &category,
+                1 << 22,
+                NonZeroUsize::new(32).unwrap(),
+                NonZeroUsize::new(80).unwrap(),
+                NonZeroUsize::new(88).unwrap(),
+                NonZeroUsize::new(8).unwrap(),
+                NonZeroUsize::new(10).unwrap(),
+                n,
+                &lines,
+                &mut out,
+            )
+            .await?
+        }
     }
     Ok(())
 }
@@ -331,7 +335,7 @@ async fn benchmark(
             }
             match tokio::select! {
                 () = &mut interval_sleep => Select::Sleep,
-                result = open_loop_sessions.join_next() => Select::JoinNext(result.unwrap()??),
+                Some(result) = open_loop_sessions.join_next() => Select::JoinNext(result??),
                 recv = out_receiver.recv() => Select::Recv(recv.unwrap()),
             } {
                 Select::Sleep => {
@@ -375,10 +379,16 @@ async fn benchmark(
                         ));
                     }
                 }
-                Select::JoinNext(()) => warmup_finish = true,
+                Select::JoinNext(()) => {
+                    if !warmup_finish {
+                        println!("Warmup finish");
+                        warmup_finish = true
+                    }
+                }
                 Select::Recv(line) => {
                     out_lines.push(format!("{prefix},{line}"));
-                    if count >= 10 {
+                    if count >= 20 {
+                        println!("Cooldown start");
                         break;
                     }
                 }

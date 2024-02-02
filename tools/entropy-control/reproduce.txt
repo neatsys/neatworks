@@ -1,0 +1,37 @@
+TODO a more comprehensive version of this note
+
+terraform -chdir=tools/entropy-control/terraform apply -var mode=five -var instance-count=20
+(do it twice. do every `terraform apply` twice)
+cargo run -p entropy-control --bin prepare-ec2
+cargo run -p entropy-control --bin reload -- sync
+
+cargo run -p entropy-control -- latency
+cargo run -p entropy-control --bin start-ipfs-daemons
+cargo run -p entropy-control -- ipfs-latency
+cargo run -p entropy-control --bin stop-ipfs-daemons
+cargo run -p entropy-control --bin start-ipfs-daemons 2000
+cargo run -p entropy-control -- ipfs-latency 2000
+cargo run -p entropy-control --bin stop-ipfs-daemons
+cargo run -p entropy-control --bin start-ipfs-daemons 4000
+cargo run -p entropy-control -- ipfs-latency 4000
+cargo run -p entropy-control --bin stop-ipfs-daemons
+cargo run -p entropy-control --bin start-ipfs-daemons 6000
+cargo run -p entropy-control -- ipfs-latency 6000
+cargo run -p entropy-control --bin stop-ipfs-daemons
+cargo run -p entropy-control --bin start-ipfs-daemons 8000
+cargo run -p entropy-control -- ipfs-latency 8000
+cargo run -p entropy-control --bin stop-ipfs-daemons
+
+terraform -chdir=tools/entropy-control/terraform apply -var mode=one -var instance-count=100
+cargo run -p entropy-control --bin prepare-ec2
+
+cargo run -p entropy-control --bin start-ipfs-daemons
+cargo run -p entropy-control --bin ipfs-lost 1 | tee -a entropy-ipfs-lost.txt
+cargo run -p entropy-control --bin ipfs-lost 2 | tee -a entropy-ipfs-lost.txt
+cargo run -p entropy-control --bin ipfs-lost 3 | tee -a entropy-ipfs-lost.txt
+cargo run -p entropy-control --bin stop-ipfs-daemons
+
+cargo run -p entropy-control --bin reload -- sync
+cargo run -p entropy-control
+cargo run -p entropy-control --bin start-ipfs-daemons
+cargo run -p entropy-control -- ipfs

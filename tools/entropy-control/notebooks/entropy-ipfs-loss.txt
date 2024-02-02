@@ -1,0 +1,174 @@
+Spawning resume sessions
+Spawning put sessions
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 978
+NEAT,1,0,978
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 875
+NEAT,1,0.1,875
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 780
+NEAT,1,0.2,780
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 698
+NEAT,1,0.3,698
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 619
+NEAT,1,0.4,619
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 506
+NEAT,1,0.5,506
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 401
+NEAT,1,0.6,401
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 308
+NEAT,1,0.7,308
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 208
+NEAT,1,0.8,208
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 108
+NEAT,1,0.9,108
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 17
+NEAT,1,0.99,17
+Spawning resume sessions
+Spawning resume sessions
+Spawning put sessions
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 997
+NEAT,2,0,997
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 993
+NEAT,2,0.1,993
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 962
+NEAT,2,0.2,962
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 917
+NEAT,2,0.3,917
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 848
+NEAT,2,0.4,848
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 755
+NEAT,2,0.5,755
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 644
+NEAT,2,0.6,644
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 503
+NEAT,2,0.7,503
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 347
+NEAT,2,0.8,347
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 155
+NEAT,2,0.9,155
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 17
+NEAT,2,0.99,17
+Spawning resume sessions
+Spawning resume sessions
+Spawning put sessions
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 988
+NEAT,3,0,988
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 991
+NEAT,3,0.1,991
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 972
+NEAT,3,0.2,972
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 962
+NEAT,3,0.3,962
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 924
+NEAT,3,0.4,924
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 864
+NEAT,3,0.5,864
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 774
+NEAT,3,0.6,774
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 661
+NEAT,3,0.7,661
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 478
+NEAT,3,0.8,478
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 247
+NEAT,3,0.9,247
+Spwaning shutdown sessions
+Waiting for faulty peers down
+Spawning get sessions
+Alive 22
+NEAT,3,0.99,22
+Spawning resume sessions

@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{env::args, time::Duration};
 
 use entropy_control::{terraform_instances, TerraformOutputInstance};
 use rand::{seq::SliceRandom, thread_rng, Rng, RngCore};
@@ -8,6 +8,10 @@ use tokio::{process::Command, task::JoinSet, time::sleep};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    let replication_factor = args()
+        .nth(1)
+        .ok_or(anyhow::anyhow!("not specify replication factor"))?
+        .parse()?;
     let op_client = reqwest::Client::new();
 
     let instances = terraform_instances().await?;
@@ -31,11 +35,11 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Spawning put sessions");
     let mut sessions = JoinSet::new();
-    for _ in 0..100 {
+    for _ in 0..1000 {
         sessions.spawn(put_session(
             op_client.clone(),
             peers
-                .choose_multiple(&mut thread_rng(), 1)
+                .choose_multiple(&mut thread_rng(), replication_factor)
                 .map(peer_url)
                 .collect(),
         ));
@@ -57,10 +61,6 @@ async fn main() -> anyhow::Result<()> {
             sessions.spawn(shutdown_session(op_client.clone(), peer_url(&peer)));
             faulty_peers.push(peer)
         }
-        // println!(
-        //     "Spawning shutdown sessions on {} faulty peers",
-        //     faulty_peers.len()
-        // );
         while let Some(result) = sessions.join_next().await {
             result??
         }
@@ -87,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         println!("Alive {alive_count}");
+        println!("NEAT,{replication_factor},{faulty_rate},{alive_count}")
     }
     println!("Spawning resume sessions");
     let mut sessions = JoinSet::new();
@@ -169,7 +170,7 @@ async fn get_session(
     let result = op_client
         .post(format!("{peer_url}/api/v0/cat"))
         .query(&Query { arg: hash.clone() })
-        .timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(10))
         .send()
         .await;
     match result {
