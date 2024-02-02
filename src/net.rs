@@ -4,6 +4,7 @@ use std::{
     collections::HashMap, fmt::Debug, hash::Hash, net::SocketAddr, sync::Arc, time::Duration,
 };
 
+use anyhow::Context;
 use bincode::Options as _;
 use bytes::Bytes;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -248,9 +249,15 @@ impl<B: Buf> OnEvent<(SocketAddr, B)> for TcpControl<B> {
                 socket.set_reuseaddr(true).unwrap();
                 let mut stream = socket.connect(dest).await.unwrap();
                 while let Some(buf) = receiver.recv().await {
-                    stream.write_u64(buf.as_ref().len() as _).await.unwrap();
-                    stream.write_all(buf.as_ref()).await.unwrap();
-                    stream.flush().await.unwrap()
+                    async {
+                        stream.write_u64(buf.as_ref().len() as _).await?;
+                        stream.write_all(buf.as_ref()).await?;
+                        stream.flush().await?;
+                        Result::<_, anyhow::Error>::Ok(())
+                    }
+                    .await
+                    .context(dest)
+                    .unwrap()
                 }
             });
             set_timer = true;

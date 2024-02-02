@@ -161,5 +161,31 @@ async fn main() -> anyhow::Result<()> {
         }
         return Ok(());
     }
+    if command.as_deref() == Some("resume-peers") {
+        for i in 0..100 {
+            if !Command::new("tmux")
+                .arg("has")
+                .arg("-t")
+                .arg(format!("ipfs-{i}"))
+                .stderr(Stdio::null())
+                .status()
+                .await?
+                .success()
+            {
+                let status = Command::new("tmux")
+                    .arg("new")
+                    .arg("-d")
+                    .arg("-s")
+                    .arg(format!("ipfs-{i}"))
+                    .arg(format!("IPFS_PATH=/tmp/ipfs-{i} ./kubo/ipfs daemon"))
+                    .status()
+                    .await?;
+                if !status.success() {
+                    anyhow::bail!("Command `ipfs daemon` exit with {status}")
+                }
+            }
+        }
+        return Ok(());
+    }
     Err(anyhow::anyhow!("unexpected command {command:?}"))
 }

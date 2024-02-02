@@ -125,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
 
 async fn benchmark_ipfs() -> anyhow::Result<()> {
     let control_client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(1))
         .build()?;
     let instances = terraform_instances().await?;
     // let instances = vec![instances[0].clone()];
@@ -139,7 +139,7 @@ async fn benchmark_ipfs() -> anyhow::Result<()> {
     let chunk_k = NonZeroUsize::new(32).unwrap();
     let k = NonZeroUsize::new(8).unwrap();
     let n = NonZeroUsize::new(10).unwrap();
-    let num_concurrency = 1;
+    let num_concurrency = 6;
     let num_total = (num_concurrency * 4).max(10);
 
     let peer_urls = instances
