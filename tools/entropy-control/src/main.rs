@@ -54,53 +54,53 @@ async fn main() -> anyhow::Result<()> {
         let mut out = out.into_std().await;
         let mut out = |line| writeln!(&mut out, "{line}").unwrap();
 
-        benchmark(
-            control_client.clone(),
-            &instances,
-            &category,
-            1 << 22,
-            NonZeroUsize::new(32).unwrap(),
-            NonZeroUsize::new(80).unwrap(),
-            NonZeroUsize::new(88).unwrap(),
-            NonZeroUsize::new(8).unwrap(),
-            NonZeroUsize::new(10).unwrap(),
-            1,
-            &lines,
-            &mut out,
-        )
-        .await?;
+        // benchmark(
+        //     control_client.clone(),
+        //     &instances,
+        //     &category,
+        //     1 << 22,
+        //     NonZeroUsize::new(32).unwrap(),
+        //     NonZeroUsize::new(80).unwrap(),
+        //     NonZeroUsize::new(88).unwrap(),
+        //     NonZeroUsize::new(8).unwrap(),
+        //     NonZeroUsize::new(10).unwrap(),
+        //     1,
+        //     &lines,
+        //     &mut out,
+        // )
+        // .await?;
 
-        benchmark(
-            control_client.clone(),
-            &instances,
-            &category,
-            1 << 23,
-            NonZeroUsize::new(32).unwrap(),
-            NonZeroUsize::new(80).unwrap(),
-            NonZeroUsize::new(88).unwrap(),
-            NonZeroUsize::new(4).unwrap(),
-            NonZeroUsize::new(5).unwrap(),
-            1,
-            &lines,
-            &mut out,
-        )
-        .await?;
+        // benchmark(
+        //     control_client.clone(),
+        //     &instances,
+        //     &category,
+        //     1 << 23,
+        //     NonZeroUsize::new(32).unwrap(),
+        //     NonZeroUsize::new(80).unwrap(),
+        //     NonZeroUsize::new(88).unwrap(),
+        //     NonZeroUsize::new(4).unwrap(),
+        //     NonZeroUsize::new(5).unwrap(),
+        //     1,
+        //     &lines,
+        //     &mut out,
+        // )
+        // .await?;
 
-        benchmark(
-            control_client.clone(),
-            &instances,
-            &category,
-            1 << 21,
-            NonZeroUsize::new(32).unwrap(),
-            NonZeroUsize::new(80).unwrap(),
-            NonZeroUsize::new(88).unwrap(),
-            NonZeroUsize::new(16).unwrap(),
-            NonZeroUsize::new(20).unwrap(),
-            1,
-            &lines,
-            &mut out,
-        )
-        .await?;
+        // benchmark(
+        //     control_client.clone(),
+        //     &instances,
+        //     &category,
+        //     1 << 21,
+        //     NonZeroUsize::new(32).unwrap(),
+        //     NonZeroUsize::new(80).unwrap(),
+        //     NonZeroUsize::new(88).unwrap(),
+        //     NonZeroUsize::new(16).unwrap(),
+        //     NonZeroUsize::new(20).unwrap(),
+        //     1,
+        //     &lines,
+        //     &mut out,
+        // )
+        // .await?;
 
         if !category.starts_with("ipfs") {
             benchmark(
@@ -134,6 +134,22 @@ async fn main() -> anyhow::Result<()> {
                 &mut out,
             )
             .await?
+        } else {
+            benchmark(
+                control_client.clone(),
+                &instances,
+                &category,
+                1 << 25,
+                NonZeroUsize::new(32).unwrap(),
+                NonZeroUsize::new(80).unwrap(),
+                NonZeroUsize::new(88).unwrap(),
+                NonZeroUsize::new(1).unwrap(),
+                NonZeroUsize::new(1).unwrap(),
+                1,
+                &lines,
+                &mut out,
+            )
+            .await?;
         }
     } else {
         todo!()
@@ -156,6 +172,7 @@ async fn benchmark(
     lines: &[String],
     mut out: impl FnMut(String),
 ) -> anyhow::Result<()> {
+    assert_eq!(fragment_len as usize * chunk_k.get() * k.get(), 1 << 30);
     let prefix = format!(
         "NEAT,{},{chunk_k},{chunk_n},{chunk_m},{k},{n},{num_concurrency}",
         if category.starts_with("ipfs") {

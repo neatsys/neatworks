@@ -368,6 +368,15 @@ async fn benchmark_put(State(state): State<AppState>, Json(config): Json<PutConf
         thread_rng().fill_bytes(&mut buf);
         let digest = buf.sha256();
         let start = Instant::now();
+        if config.k.get() == 1 {
+            let chunk = put_impl(state.op_client.clone(), config.peer_urls[0].clone(), buf).await?;
+            return Ok(PutResult {
+                digest,
+                chunks: vec![(0, chunk)],
+                latency: start.elapsed(),
+            });
+        }
+
         let encoder = Arc::new(Encoder::new(buf, config.chunk_len)?);
         let mut encode_sessions = JoinSet::<anyhow::Result<_>>::new();
         // let mut chunk_indexes = HashSet::<u32>::new();
@@ -393,51 +402,7 @@ async fn benchmark_put(State(state): State<AppState>, Json(config): Json<PutConf
                 //         writeln!(&mut stdout)?
                 //     }
                 // }
-                let mut put_sessions = JoinSet::<anyhow::Result<_>>::new();
-                for (i, peer_url) in peer_url_group.into_iter().enumerate() {
-                    let op_client = op_client.clone();
-                    let buf = buf.clone();
-                    put_sessions.spawn(async move {
-                        let form = Form::new().part("", Part::bytes(buf));
-                        match peer_url {
-                            PeerUrl::Ipfs(peer_url) => {
-                                #[allow(non_snake_case)]
-                                #[derive(Deserialize)]
-                                struct Response {
-                                    Hash: String,
-                                }
-                                let response = op_client
-                                    .post(format!("{peer_url}/api/v0/add"))
-                                    .multipart(form)
-                                    .send()
-                                    .await?
-                                    .error_for_status()?
-                                    .json::<Response>()
-                                    .await?;
-                                Ok(response.Hash)
-                            }
-                            PeerUrl::Entropy(url, peer_index) => {
-                                assert_eq!(i, 0);
-                                let response = op_client
-                                    .post(format!("{url}/put-chunk/{peer_index}"))
-                                    .multipart(form)
-                                    .send()
-                                    .await?
-                                    .error_for_status()?;
-                                Ok(String::from_utf8(response.bytes().await?.to_vec())?)
-                            }
-                        }
-                    });
-                }
-                let chunk = put_sessions
-                    .join_next()
-                    .await
-                    .ok_or(anyhow::anyhow!("no peer url for the chunk"))???;
-                while let Some(also_chunk) = put_sessions.join_next().await {
-                    if also_chunk?? != chunk {
-                        anyhow::bail!("inconsistent chunk among peers")
-                    }
-                }
+                let chunk = put_impl(op_client, peer_url_group, buf).await?;
                 Ok((index, chunk))
             });
         }
@@ -454,6 +419,59 @@ async fn benchmark_put(State(state): State<AppState>, Json(config): Json<PutConf
     let put_id = state.benchmark_op_id.fetch_add(1, SeqCst);
     state.benchmark_puts.lock().await.insert(put_id, session);
     Json(put_id)
+}
+
+async fn put_impl(
+    op_client: reqwest::Client,
+    peer_url_group: Vec<PeerUrl>,
+    buf: Vec<u8>,
+) -> anyhow::Result<String> {
+    let mut put_sessions = JoinSet::<anyhow::Result<_>>::new();
+    for (i, peer_url) in peer_url_group.into_iter().enumerate() {
+        let op_client = op_client.clone();
+        let buf = buf.clone();
+        put_sessions.spawn(async move {
+            let form = Form::new().part("", Part::bytes(buf));
+            match peer_url {
+                PeerUrl::Ipfs(peer_url) => {
+                    #[allow(non_snake_case)]
+                    #[derive(Deserialize)]
+                    struct Response {
+                        Hash: String,
+                    }
+                    let response = op_client
+                        .post(format!("{peer_url}/api/v0/add"))
+                        .multipart(form)
+                        .send()
+                        .await?
+                        .error_for_status()?
+                        .json::<Response>()
+                        .await?;
+                    Ok(response.Hash)
+                }
+                PeerUrl::Entropy(url, peer_index) => {
+                    assert_eq!(i, 0);
+                    let response = op_client
+                        .post(format!("{url}/put-chunk/{peer_index}"))
+                        .multipart(form)
+                        .send()
+                        .await?
+                        .error_for_status()?;
+                    Ok(String::from_utf8(response.bytes().await?.to_vec())?)
+                }
+            }
+        });
+    }
+    let chunk = put_sessions
+        .join_next()
+        .await
+        .ok_or(anyhow::anyhow!("no peer url for the chunk"))???;
+    while let Some(also_chunk) = put_sessions.join_next().await {
+        if also_chunk?? != chunk {
+            anyhow::bail!("inconsistent chunk among peers")
+        }
+    }
+    Ok(chunk)
 }
 
 async fn poll_benchmark_put(
@@ -504,6 +522,16 @@ async fn benchmark_get(State(state): State<AppState>, Json(config): Json<GetConf
                 Ok((index, buf))
             });
         }
+        if config.k.get() == 1 {
+            let (index, buf) = get_sessions.join_next().await.unwrap()??;
+            assert_eq!(index, 0);
+            let latency = start.elapsed();
+            return Ok(GetResult {
+                digest: buf.sha256(),
+                latency,
+            });
+        }
+
         let mut decoder = Decoder::new(
             config.chunk_len as u64 * config.k.get() as u64,
             config.chunk_len,
