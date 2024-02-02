@@ -195,13 +195,14 @@ async fn benchmark(
     // assert_eq!(fragment_len as usize * chunk_k.get() * k.get(), 1 << 30);
     let prefix = format!(
         "NEAT,{},{chunk_k},{chunk_n},{chunk_m},{k},{n},{},{num_operation_per_hour}",
-        instances.len() * NUM_PEER_PER_IP,
         if category.starts_with("ipfs") {
             "ipfs"
         } else {
             "entropy"
-        }
+        },
+        instances.len() * NUM_PEER_PER_IP,
     );
+    println!("{prefix}");
     let count = lines
         .iter()
         .filter(|line| line.starts_with(&prefix))
