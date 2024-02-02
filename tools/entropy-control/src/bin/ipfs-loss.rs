@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut honest_peers = peers.clone();
     let mut faulty_peers = Vec::new();
-    for faulty_rate in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.99] {
+    for faulty_rate in [0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.99] {
         println!("Spwaning shutdown sessions");
         let faulty_len = faulty_rate * peers.len() as f32;
         let mut sessions = JoinSet::new();
