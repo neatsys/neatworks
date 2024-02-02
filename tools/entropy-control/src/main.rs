@@ -155,7 +155,7 @@ async fn main() -> anyhow::Result<()> {
 
         for num_per_region in [4, 8, 12, 16] {
             if category.starts_with("ipfs")
-                && args().nth(2) != Some((num_per_region * 5).to_string())
+                && args().nth(2) != Some((num_per_region * 5 * 100).to_string())
             {
                 continue;
             }

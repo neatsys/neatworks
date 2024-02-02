@@ -10,8 +10,8 @@ async fn main() -> anyhow::Result<()> {
     let mut instances = terraform_instances().await?;
     if let Some(num_peer) = args().nth(1) {
         let num_peer = num_peer.parse::<usize>()?;
-        instances = retain_instances(&instances, num_peer / 5);
-        assert_eq!(instances.len(), num_peer)
+        instances = retain_instances(&instances, num_peer / 100 / 5);
+        assert_eq!(instances.len() * 100, num_peer)
     }
     // println!("{instances:?}");
     // return Ok(());
