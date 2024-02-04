@@ -34,13 +34,13 @@ async fn host_session(ssh_host: String) -> anyhow::Result<()> {
     if !status.success() {
         anyhow::bail!("Command `tc` exit with {status}")
     }
-    let status = Command::new("ssh")
-        .arg(&ssh_host)
-        .arg("sudo tc qdisc del dev lo root")
-        .status()
-        .await?;
-    if !status.success() {
-        anyhow::bail!("Command `tc` exit with {status}")
-    }
+    // let status = Command::new("ssh")
+    //     .arg(&ssh_host)
+    //     .arg("sudo tc qdisc del dev lo root")
+    //     .status()
+    //     .await?;
+    // if !status.success() {
+    //     anyhow::bail!("Command `tc` exit with {status}")
+    // }
     Ok(())
 }

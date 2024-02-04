@@ -240,36 +240,40 @@ impl<B: Buf> OnEvent<(SocketAddr, B)> for TcpControl<B> {
         if buf.as_ref().len() >= MAX_TCP_BUF_LEN {
             anyhow::bail!("TCP buf too large: {}", buf.as_ref().len())
         }
-        let mut set_timer = false;
-        let (sender, in_use) = self.connections.entry(dest).or_insert_with(|| {
-            let (sender, mut receiver) = unbounded_channel::<B>();
-            tokio::spawn(async move {
-                // let mut stream = TcpStream::connect(dest).await.unwrap();
-                let socket = TcpSocket::new_v4().unwrap();
-                socket.set_reuseaddr(true).unwrap();
-                let mut stream = match socket.connect(dest).await {
-                    Ok(stream) => stream,
-                    Err(err) => panic!("{dest}: {err}"),
-                };
-                while let Some(buf) = receiver.recv().await {
-                    async {
-                        stream.write_u64(buf.as_ref().len() as _).await?;
-                        stream.write_all(buf.as_ref()).await?;
-                        stream.flush().await?;
-                        Result::<_, anyhow::Error>::Ok(())
-                    }
-                    .await
-                    .context(dest)
-                    .unwrap()
+
+        let buf = if let Some((sender, in_use)) = self.connections.get_mut(&dest) {
+            *in_use = true;
+            match UnboundedSender::send(sender, buf) {
+                Ok(()) => return Ok(()),
+                Err(err) => err.0,
+            }
+        } else {
+            buf
+        };
+
+        let (sender, mut receiver) = unbounded_channel::<B>();
+        tokio::spawn(async move {
+            // let mut stream = TcpStream::connect(dest).await.unwrap();
+            let socket = TcpSocket::new_v4().unwrap();
+            // socket.set_reuseaddr(true).unwrap();
+            let mut stream = match socket.connect(dest).await {
+                Ok(stream) => stream,
+                Err(err) => panic!("{dest}: {err}"),
+            };
+            while let Some(buf) = receiver.recv().await {
+                async {
+                    stream.write_u64(buf.as_ref().len() as _).await?;
+                    stream.write_all(buf.as_ref()).await?;
+                    stream.flush().await?;
+                    Result::<_, anyhow::Error>::Ok(())
                 }
-            });
-            set_timer = true;
-            (sender, false)
+                .await
+                .context(dest)
+                .unwrap()
+            }
         });
-        if set_timer {
-            timer.set(Duration::from_secs(10), IdleConnection(dest))?;
-        }
-        *in_use = true;
+        self.connections.insert(dest, (sender.clone(), false));
+        timer.set(Duration::from_secs(10), IdleConnection(dest))?;
         sender
             .send(buf)
             .map_err(|_| anyhow::anyhow!("connection closed"))

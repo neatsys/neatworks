@@ -1,5 +1,8 @@
 TODO a more comprehensive version of this note
 
+sudo apt install cmake llvm-dev libclang-dev clang
+# install terraform and setup aws
+
 terraform -chdir=tools/entropy-control/terraform apply -var mode=five -var instance-count=20
 (do it twice. do every `terraform apply` twice)
 cargo run -p entropy-control --bin prepare-ec2
@@ -32,6 +35,13 @@ cargo run -p entropy-control --bin ipfs-lost 3 | tee -a entropy-ipfs-lost.txt
 cargo run -p entropy-control --bin stop-ipfs-daemons
 
 cargo run -p entropy-control --bin reload -- sync
+cargo run -p entropy-control --bin set-rate
 cargo run -p entropy-control
 cargo run -p entropy-control --bin start-ipfs-daemons
 cargo run -p entropy-control -- ipfs
+
+terraform -chdir=tools/entropy-control/terraform destroy -var mode=one -var instance-count=100
+
+pip3 install seaborn
+# apt install fonts-linuxlibertain
+(play with tools/entropy-control/notebooks/deploy.ipynb)

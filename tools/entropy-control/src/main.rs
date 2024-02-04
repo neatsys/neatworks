@@ -193,7 +193,8 @@ async fn main() -> anyhow::Result<()> {
         let mut out = out.into_std().await;
         let mut out = |line| writeln!(&mut out, "{line}").unwrap();
 
-        for n in [600, 1200] {
+        // for n in (1..10).map(|i| i * 600).chain((1..10).map(|i| i * 6000)) {
+        for n in [10, 20, 40, 100, 200] {
             benchmark(
                 control_client.clone(),
                 &instances,
@@ -208,7 +209,8 @@ async fn main() -> anyhow::Result<()> {
                 &lines,
                 &mut out,
             )
-            .await?
+            .await?;
+            // sleep(Duration::from_secs(10)).await
         }
     }
     Ok(())
@@ -225,7 +227,7 @@ async fn benchmark(
     chunk_m: NonZeroUsize,
     k: NonZeroUsize,
     n: NonZeroUsize,
-    num_operation_per_hour: usize,
+    num_concurrency: usize,
     lines: &[String],
     mut out: impl FnMut(String),
 ) -> anyhow::Result<()> {
@@ -234,7 +236,7 @@ async fn benchmark(
     let replication_factor = if category.starts_with("ipfs") { 3 } else { 1 };
 
     let prefix = format!(
-        "NEAT,{},{chunk_k},{chunk_n},{chunk_m},{k},{n},{},{num_operation_per_hour}",
+        "NEAT,{},{chunk_k},{chunk_n},{chunk_m},{k},{n},{},{num_concurrency}",
         if category.starts_with("ipfs") {
             "ipfs"
         } else {
@@ -245,13 +247,13 @@ async fn benchmark(
     println!("{prefix}");
     let count = lines
         .iter()
-        .filter(|line| line.starts_with(&prefix))
+        .filter(|line| line.starts_with(&(prefix.clone() + ",")))
         .count();
     // 10 operations
-    if num_operation_per_hour == 1 && count >= 20 {
+    if num_concurrency == 1 && count >= 20 {
         return Ok(());
     }
-    if num_operation_per_hour != 1 && count != 0 {
+    if num_concurrency != 1 && count != 0 {
         return Ok(());
     }
 
@@ -275,7 +277,7 @@ async fn benchmark(
             ));
         }
         tokio::select! {
-            () = sleep(Duration::from_secs(10)) => {}
+            () = sleep(Duration::from_secs(5)) => {}
             Some(result) = start_peers_sessions.join_next() => result??
         }
     }
@@ -301,7 +303,7 @@ async fn benchmark(
         .map(|instance| format!("http://{}:3000", instance.public_ip))
         .collect::<Vec<_>>();
 
-    if num_operation_per_hour == 1 {
+    if num_concurrency == 1 {
         let num_total = (20 - count) / 2 + 1;
         // let num_total = 1;
         close_loop_session(
@@ -318,20 +320,23 @@ async fn benchmark(
         )
         .await?
     } else {
-        let interval = Duration::from_secs(3600) / num_operation_per_hour as u32;
+        // let interval = Duration::from_secs(3600) / num_operation_per_hour as u32;
+        let interval = Duration::from_secs(3600) / 18000;
+        println!("Open loop interval {interval:?}");
         let interval_sleep = sleep(Duration::ZERO);
         tokio::pin!(interval_sleep);
 
         let mut open_loop_sessions = JoinSet::<anyhow::Result<_>>::new();
         let mut warmup_finish = false;
         let mut count = 0;
+        let mut stop_count = 0;
         let (out_sender, mut out_receiver) = unbounded_channel();
         let mut out_lines = Vec::new();
         loop {
             enum Select {
                 Sleep,
                 JoinNext(()),
-                Recv(String),
+                Recv((u32, String)),
             }
             match tokio::select! {
                 () = &mut interval_sleep => Select::Sleep,
@@ -340,6 +345,9 @@ async fn benchmark(
             } {
                 Select::Sleep => {
                     interval_sleep.as_mut().reset(Instant::now() + interval);
+                    if open_loop_sessions.len() >= num_concurrency {
+                        continue;
+                    }
 
                     let put_url = instance_urls
                         .choose(&mut thread_rng())
@@ -349,7 +357,7 @@ async fn benchmark(
                         .ok_or(anyhow::anyhow!("no instance available"))?;
                     println!("Put {put_url} Get {get_url}");
 
-                    if warmup_finish {
+                    if warmup_finish && stop_count == 0 {
                         count += 1;
                         let out_sender = out_sender.clone();
                         open_loop_sessions.spawn(operation_session(
@@ -362,7 +370,9 @@ async fn benchmark(
                             n,
                             replication_factor,
                             move |line| {
-                                let _ = out_sender.send(line);
+                                // if the operation starts before last minute operation but finishes
+                                // after it, the result will be rejected
+                                let _ = out_sender.send((count, line));
                             },
                         ));
                     } else {
@@ -385,16 +395,27 @@ async fn benchmark(
                         warmup_finish = true
                     }
                 }
-                Select::Recv(line) => {
+                Select::Recv((i, line)) => {
                     out_lines.push(format!("{prefix},{line}"));
-                    if count >= 20 {
-                        println!("Cooldown start");
-                        break;
+                    // this is awful, but i don't want to think anymore
+                    if line.contains("get") {
+                        if stop_count == 0 && count >= 10 {
+                            println!("Last minute operation");
+                            stop_count = count
+                        } else if i == stop_count {
+                            println!("Cooldown");
+                            break;
+                        }
                     }
                 }
             }
         }
         out_receiver.close();
+        while let Some((_, line)) = out_receiver.recv().await {
+            out_lines.push(format!("{prefix},{line}"))
+        }
+        out(out_lines.join("\n"));
+
         let session = async {
             while let Some(result) = open_loop_sessions.join_next().await {
                 result??
@@ -405,11 +426,7 @@ async fn benchmark(
             result = session => result?,
             Some(result) = start_peers_sessions.join_next() => result??,
         }
-        assert!(open_loop_sessions.is_empty());
-        while let Some(line) = out_receiver.recv().await {
-            out_lines.push(format!("{prefix},{line}"))
-        }
-        out(out_lines.join("\n"))
+        assert!(open_loop_sessions.is_empty())
     }
 
     if !category.starts_with("ipfs") {
