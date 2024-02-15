@@ -8,7 +8,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    event::{OnEvent, SendEvent, Timer},
+    event::{erased::{OnEvent, Timer}, SendEvent},
     net::{Addr, SendMessage, SendMessageToEach, SendMessageToEachExt as _},
 };
 
@@ -69,35 +69,34 @@ impl<E> Concurrent<E> {
     }
 }
 
-pub type ConcurrentEvent = (u32, Vec<u8>);
+#[derive(Debug, Clone)]
+pub struct Invoke(pub Vec<u8>);
+
+pub type InvokeOk = (u32, Vec<u8>);
 
 impl<E> Concurrent<E>
 where
-    E: SendEvent<Vec<u8>>,
+    E: SendEvent<Invoke>,
 {
     pub fn launch(&mut self) -> anyhow::Result<()> {
         for (client_id, sender) in &mut self.client_senders {
-            sender.send(Vec::new())?; // TODO
+            sender.send(Invoke(Vec::new()))?; // TODO
             self.invoke_instants.insert(*client_id, Instant::now());
         }
         Ok(())
     }
 }
 
-impl<E> OnEvent<ConcurrentEvent> for Concurrent<E>
+impl<E> OnEvent<InvokeOk> for Concurrent<E>
 where
-    E: SendEvent<Vec<u8>>,
+    E: SendEvent<Invoke>,
 {
-    fn on_event(
-        &mut self,
-        event: ConcurrentEvent,
-        _: &mut dyn Timer<ConcurrentEvent>,
-    ) -> anyhow::Result<()> {
+    fn on_event(&mut self, event: InvokeOk, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
         let (client_id, _result) = event;
         let Some(sender) = self.client_senders.get_mut(&client_id) else {
             anyhow::bail!("unknown client id {client_id}")
         };
-        sender.send(Vec::new())?; // TODO
+        sender.send(Invoke(Vec::new()))?; // TODO
         let replaced_instant = self
             .invoke_instants
             .insert(client_id, Instant::now())

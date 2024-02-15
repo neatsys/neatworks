@@ -4,11 +4,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     app::App,
-    crypto::{Crypto, DigestHash as _, Verifiable},
-    event::{OnEvent, SendEvent, Timer, TimerId},
-    net::{deserialize, Addr, MessageNet, SendMessage},
-    replication::{AllReplica, Request},
-    worker::Worker,
+    crypto::{
+        events::{Signed, Verified},
+        Crypto, DigestHash as _, Verifiable,
+    },
+    event::{
+        erased::{OnEvent, Timer},
+        SendEvent, TimerId,
+    },
+    net::{deserialize, events::Recv, Addr, MessageNet, SendMessage},
+    replication::{AllReplica, Invoke, InvokeOk, Request},
+    worker::erased::Worker,
 };
 
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]
@@ -64,18 +70,7 @@ impl<
 {
 }
 
-#[derive(Debug, Clone, derive_more::From)]
-pub enum ClientEvent {
-    Invoke(Vec<u8>),
-    Ingress(Reply),
-    ResendTimeout,
-}
-
-pub trait ClientUpcall: SendEvent<(u32, Vec<u8>)> {}
-impl<T: SendEvent<(u32, Vec<u8>)>> ClientUpcall for T {}
-
-#[derive(Debug)]
-pub struct Client<N, U, A> {
+pub struct Client<A> {
     id: u32,
     addr: A,
     seq: u32,
@@ -84,8 +79,8 @@ pub struct Client<N, U, A> {
     num_replica: usize,
     num_faulty: usize,
 
-    net: N,
-    upcall: U,
+    net: Box<dyn ToReplicaNet<A> + Send + Sync>,
+    upcall: Box<dyn SendEvent<InvokeOk> + Send + Sync>,
 }
 
 #[derive(Debug)]
@@ -95,13 +90,34 @@ struct ClientInvoke {
     replies: HashMap<u8, Reply>,
 }
 
-impl<N, U, A> Client<N, U, A> {
-    pub fn new(id: u32, addr: A, net: N, upcall: U, num_replica: usize, num_faulty: usize) -> Self {
+impl<A: Addr> Debug for Client<A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("id", &self.id)
+            .field("addr", &self.addr)
+            .field("seq", &self.seq)
+            .field("invoke", &self.invoke)
+            .field("view_num", &self.view_num)
+            .field("num_replica", &self.num_replica)
+            .field("num_faulty", &self.num_faulty)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<A> Client<A> {
+    pub fn new(
+        id: u32,
+        addr: A,
+        net: impl ToReplicaNet<A> + Send + Sync + 'static,
+        upcall: impl SendEvent<InvokeOk> + Send + Sync + 'static,
+        num_replica: usize,
+        num_faulty: usize,
+    ) -> Self {
         Self {
             id,
             addr,
-            net,
-            upcall,
+            net: Box::new(net),
+            upcall: Box::new(upcall),
             num_replica,
             num_faulty,
             seq: 0,
@@ -111,44 +127,38 @@ impl<N, U, A> Client<N, U, A> {
     }
 }
 
-impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> OnEvent<ClientEvent> for Client<N, U, A> {
-    fn on_event(
-        &mut self,
-        event: ClientEvent,
-        timer: &mut dyn Timer<ClientEvent>,
-    ) -> anyhow::Result<()> {
-        match event {
-            ClientEvent::Invoke(op) => self.on_invoke(op, timer),
-            ClientEvent::ResendTimeout => self.on_resend_timeout(),
-            ClientEvent::Ingress(reply) => self.on_ingress(reply, timer),
-        }
-    }
-}
-
-impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
-    fn on_invoke(&mut self, op: Vec<u8>, timer: &mut dyn Timer<ClientEvent>) -> anyhow::Result<()> {
+impl<A: Addr> OnEvent<Invoke> for Client<A> {
+    fn on_event(&mut self, Invoke(op): Invoke, timer: &mut impl Timer<Self>) -> anyhow::Result<()> {
         if self.invoke.is_some() {
             anyhow::bail!("concurrent invocation")
         }
         self.seq += 1;
         let invoke = ClientInvoke {
             op,
-            resend_timer: timer.set(Duration::from_millis(1000), ClientEvent::ResendTimeout)?,
+            resend_timer: timer.set(Duration::from_millis(1000), Resend)?,
             replies: Default::default(),
         };
         self.invoke = Some(invoke);
         self.do_send((self.view_num as usize % self.num_replica) as u8)
     }
+}
 
-    fn on_resend_timeout(&mut self) -> anyhow::Result<()> {
+#[derive(Debug)]
+struct Resend;
+
+impl<A: Addr> OnEvent<Resend> for Client<A> {
+    fn on_event(&mut self, Resend: Resend, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
+        // TODO reset timer
         println!("Resend timeout on seq {}", self.seq);
         self.do_send(AllReplica)
     }
+}
 
-    fn on_ingress(
+impl<A> OnEvent<Recv<Reply>> for Client<A> {
+    fn on_event(
         &mut self,
-        reply: Reply,
-        timer: &mut dyn Timer<ClientEvent>,
+        Recv(reply): Recv<Reply>,
+        timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if reply.seq != self.seq {
             return Ok(());
@@ -172,10 +182,12 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
             Ok(())
         }
     }
+}
 
+impl<A: Addr> Client<A> {
     fn do_send<B>(&mut self, dest: B) -> anyhow::Result<()>
     where
-        N: SendMessage<B, Request<A>>,
+        dyn ToReplicaNet<A>: SendMessage<B, Request<A>>,
     {
         let request = Request {
             client_id: self.id,
@@ -183,30 +195,37 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
             seq: self.seq,
             op: self.invoke.as_ref().unwrap().op.clone(),
         };
-        self.net.send(dest, request)
+        (&mut *self.net as &mut dyn ToReplicaNet<A>).send(dest, request)
     }
 }
 
-#[derive(Debug)]
-pub enum ReplicaEvent<A> {
-    IngressRequest(Request<A>),
-    SignedPrePrepare(Verifiable<PrePrepare>, Vec<Request<A>>),
-    IngressPrePrepare(Verifiable<PrePrepare>, Vec<Request<A>>),
-    VerifiedPrePrepare(Verifiable<PrePrepare>, Vec<Request<A>>),
-    SignedPrepare(Verifiable<Prepare>),
-    IngressPrepare(Verifiable<Prepare>),
-    VerifiedPrepare(Verifiable<Prepare>),
-    SignedCommit(Verifiable<Commit>),
-    IngressCommit(Verifiable<Commit>),
-    VerifiedCommit(Verifiable<Commit>),
+pub trait SendCryptoEvent<A>:
+    SendEvent<(Signed<PrePrepare>, Vec<Request<A>>)>
+    + SendEvent<(Verified<PrePrepare>, Vec<Request<A>>)>
+    + SendEvent<Signed<Prepare>>
+    + SendEvent<Verified<Prepare>>
+    + SendEvent<Signed<Commit>>
+    + SendEvent<Verified<Commit>>
+{
+}
+impl<
+        T: SendEvent<(Signed<PrePrepare>, Vec<Request<A>>)>
+            + SendEvent<(Verified<PrePrepare>, Vec<Request<A>>)>
+            + SendEvent<Signed<Prepare>>
+            + SendEvent<Verified<Prepare>>
+            + SendEvent<Signed<Commit>>
+            + SendEvent<Verified<Commit>>,
+        A,
+    > SendCryptoEvent<A> for T
+{
 }
 
-pub struct Replica<S, N, M, A> {
+pub struct Replica<S, A> {
     id: u8,
     num_replica: usize,
     num_faulty: usize,
 
-    on_request: HashMap<u32, OnRequest<A, M>>,
+    on_request: HashMap<u32, OnRequest<A>>,
     requests: Vec<Request<A>>,
     view_num: u32,
     op_num: u32,
@@ -219,12 +238,13 @@ pub struct Replica<S, N, M, A> {
     on_verified_prepare_tasks: HashMap<u32, Vec<OnVerified<Self>>>,
     on_verified_commit_tasks: HashMap<u32, Vec<OnVerified<Self>>>,
 
-    net: N,
-    client_net: M,
-    crypto_worker: Worker<Crypto<u8>, ReplicaEvent<A>>,
+    net: Box<dyn ToReplicaNet<A> + Send + Sync>,
+    client_net: Box<dyn ToClientNet<A> + Send + Sync>,
+    crypto_worker: Worker<Crypto<u8>, dyn SendCryptoEvent<A> + Send + Sync>,
 }
 
-type OnRequest<A, N> = Box<dyn Fn(&Request<A>, &mut N) -> anyhow::Result<bool> + Send + Sync>;
+type OnRequest<A> =
+    Box<dyn Fn(&Request<A>, &mut dyn ToClientNet<A>) -> anyhow::Result<bool> + Send + Sync>;
 type OnVerified<S> = Box<dyn FnOnce(&mut S) -> anyhow::Result<()> + Send + Sync>;
 
 #[derive(Debug)]
@@ -248,27 +268,27 @@ impl<A> Default for LogEntry<A> {
     }
 }
 
-impl<S, N, M, A> Debug for Replica<S, N, M, A> {
+impl<S, A> Debug for Replica<S, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Replica").finish_non_exhaustive()
     }
 }
 
-impl<S, N, M, A> Replica<S, N, M, A> {
+impl<S, A> Replica<S, A> {
     pub fn new(
         id: u8,
         app: S,
-        net: N,
-        client_net: M,
-        crypto_worker: Worker<Crypto<u8>, ReplicaEvent<A>>,
+        net: impl ToReplicaNet<A> + Send + Sync + 'static,
+        client_net: impl ToClientNet<A> + Send + Sync + 'static,
+        crypto_worker: Worker<Crypto<u8>, dyn SendCryptoEvent<A> + Send + Sync>,
         num_replica: usize,
         num_faulty: usize,
     ) -> Self {
         Self {
             id,
             app,
-            net,
-            client_net,
+            net: Box::new(net),
+            client_net: Box::new(client_net),
             crypto_worker,
             num_replica,
             num_faulty,
@@ -286,48 +306,22 @@ impl<S, N, M, A> Replica<S, N, M, A> {
     }
 }
 
-impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static, A: Addr>
-    OnEvent<ReplicaEvent<A>> for Replica<S, N, M, A>
-{
-    fn on_event(
-        &mut self,
-        event: ReplicaEvent<A>,
-        _timer: &mut dyn Timer<ReplicaEvent<A>>,
-    ) -> anyhow::Result<()> {
-        // println!("{event:?}");
-        match event {
-            ReplicaEvent::IngressRequest(request) => self.on_ingress_request(request),
-            ReplicaEvent::SignedPrePrepare(pre_prepare, requests) => {
-                self.on_signed_pre_prepare(pre_prepare, requests)
-            }
-            ReplicaEvent::IngressPrePrepare(pre_prepare, requests) => {
-                self.on_ingress_pre_prepare(pre_prepare, requests)
-            }
-            ReplicaEvent::VerifiedPrePrepare(pre_prepare, requests) => {
-                self.on_verified_pre_prepare(pre_prepare, requests)
-            }
-            ReplicaEvent::SignedPrepare(prepare) => self.on_signed_prepare(prepare),
-            ReplicaEvent::IngressPrepare(prepare) => self.on_ingress_prepare(prepare),
-            ReplicaEvent::VerifiedPrepare(prepare) => self.on_verified_prepare(prepare),
-            ReplicaEvent::SignedCommit(commit) => self.on_signed_commit(commit),
-            ReplicaEvent::IngressCommit(commit) => self.on_ingress_commit(commit),
-            ReplicaEvent::VerifiedCommit(commit) => self.on_verified_commit(commit),
-        }
-    }
-}
-
-impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static, A: Addr>
-    Replica<S, N, M, A>
-{
+impl<S, A> Replica<S, A> {
     fn is_primary(&self) -> bool {
         (self.id as usize % self.num_replica) == self.view_num as usize
     }
 
     const NUM_CONCURRENT_PRE_PREPARE: u32 = 1;
+}
 
-    fn on_ingress_request(&mut self, request: Request<A>) -> anyhow::Result<()> {
+impl<S, A: Addr> OnEvent<Recv<Request<A>>> for Replica<S, A> {
+    fn on_event(
+        &mut self,
+        Recv(request): Recv<Request<A>>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
         if let Some(on_request) = self.on_request.get(&request.client_id) {
-            if on_request(&request, &mut self.client_net)? {
+            if on_request(&request, &mut *self.client_net)? {
                 return Ok(());
             }
         }
@@ -344,7 +338,9 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
             Ok(())
         }
     }
+}
 
+impl<S, A: Addr> Replica<S, A> {
     fn close_batch(&mut self) -> anyhow::Result<()> {
         assert!(self.is_primary());
         assert!(!self.requests.is_empty());
@@ -361,17 +357,16 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
                 op_num,
                 digest: requests.sha256(),
             };
-            sender.send(ReplicaEvent::SignedPrePrepare(
-                crypto.sign(pre_prepare),
-                requests,
-            ))
+            sender.send((Signed(crypto.sign(pre_prepare)), requests))
         }))
     }
+}
 
-    fn on_signed_pre_prepare(
+impl<S, A: Addr> OnEvent<(Signed<PrePrepare>, Vec<Request<A>>)> for Replica<S, A> {
+    fn on_event(
         &mut self,
-        pre_prepare: Verifiable<PrePrepare>,
-        requests: Vec<Request<A>>,
+        (Signed(pre_prepare), requests): (Signed<PrePrepare>, Vec<Request<A>>),
+        _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if pre_prepare.view_num != self.view_num {
             return Ok(());
@@ -388,11 +383,13 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
         self.log[pre_prepare.op_num as usize].requests = requests.clone();
         self.net.send(AllReplica, (pre_prepare, requests))
     }
+}
 
-    fn on_ingress_pre_prepare(
+impl<S, A: Addr> OnEvent<Recv<(Verifiable<PrePrepare>, Vec<Request<A>>)>> for Replica<S, A> {
+    fn on_event(
         &mut self,
-        pre_prepare: Verifiable<PrePrepare>,
-        requests: Vec<Request<A>>,
+        Recv((pre_prepare, requests)): Recv<(Verifiable<PrePrepare>, Vec<Request<A>>)>,
+        _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if pre_prepare.view_num != self.view_num {
             if pre_prepare.view_num > self.view_num {
@@ -413,17 +410,19 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
             if requests.sha256() == pre_prepare.digest
                 && crypto.verify(&replica_id, &pre_prepare).is_ok()
             {
-                sender.send(ReplicaEvent::VerifiedPrePrepare(pre_prepare, requests))
+                sender.send((Verified(pre_prepare), requests))
             } else {
                 Ok(())
             }
         }))
     }
+}
 
-    fn on_verified_pre_prepare(
+impl<S, A> OnEvent<(Verified<PrePrepare>, Vec<Request<A>>)> for Replica<S, A> {
+    fn on_event(
         &mut self,
-        pre_prepare: Verifiable<PrePrepare>,
-        requests: Vec<Request<A>>,
+        (Verified(pre_prepare), requests): (Verified<PrePrepare>, Vec<Request<A>>),
+        _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if pre_prepare.view_num != self.view_num {
             return Ok(());
@@ -448,7 +447,7 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
             replica_id: self.id,
         };
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
-            sender.send(ReplicaEvent::SignedPrepare(crypto.sign(prepare)))
+            sender.send(Signed(crypto.sign(prepare)))
         }))?;
 
         if let Some(prepare_quorum) = self.prepare_quorums.get_mut(&pre_prepare.op_num) {
@@ -459,8 +458,14 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
         }
         Ok(())
     }
+}
 
-    fn on_signed_prepare(&mut self, prepare: Verifiable<Prepare>) -> anyhow::Result<()> {
+impl<S, A> OnEvent<Signed<Prepare>> for Replica<S, A> {
+    fn on_event(
+        &mut self,
+        Signed(prepare): Signed<Prepare>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
         if prepare.view_num != self.view_num {
             return Ok(());
         }
@@ -468,8 +473,14 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
         self.insert_prepare(prepare)?;
         Ok(())
     }
+}
 
-    fn on_ingress_prepare(&mut self, prepare: Verifiable<Prepare>) -> anyhow::Result<()> {
+impl<S, A> OnEvent<Recv<Verifiable<Prepare>>> for Replica<S, A> {
+    fn on_event(
+        &mut self,
+        Recv(prepare): Recv<Verifiable<Prepare>>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
         let op_num = prepare.op_num;
         let do_verify = move |this: &mut Self| {
             if prepare.view_num != this.view_num {
@@ -490,7 +501,7 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
             }
             this.crypto_worker.submit(Box::new(move |crypto, sender| {
                 if crypto.verify(&prepare.replica_id, &prepare).is_ok() {
-                    sender.send(ReplicaEvent::VerifiedPrepare(prepare))
+                    sender.send(Verified(prepare))
                 } else {
                     Ok(())
                 }
@@ -506,8 +517,14 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
             do_verify(self)
         }
     }
+}
 
-    fn on_verified_prepare(&mut self, prepare: Verifiable<Prepare>) -> anyhow::Result<()> {
+impl<S, A> OnEvent<Verified<Prepare>> for Replica<S, A> {
+    fn on_event(
+        &mut self,
+        Verified(prepare): Verified<Prepare>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
         if prepare.view_num != self.view_num {
             return Ok(());
         }
@@ -523,7 +540,9 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
         }
         Ok(())
     }
+}
 
+impl<S, A> Replica<S, A> {
     fn insert_prepare(&mut self, prepare: Verifiable<Prepare>) -> anyhow::Result<()> {
         let prepare_quorum = self.prepare_quorums.entry(prepare.op_num).or_default();
         prepare_quorum.insert(prepare.replica_id, prepare.clone());
@@ -550,19 +569,31 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
             replica_id: self.id,
         };
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
-            sender.send(ReplicaEvent::SignedCommit(crypto.sign(commit)))
+            sender.send(Signed(crypto.sign(commit)))
         }))
     }
+}
 
-    fn on_signed_commit(&mut self, commit: Verifiable<Commit>) -> anyhow::Result<()> {
+impl<S: App, A: Addr> OnEvent<Signed<Commit>> for Replica<S, A> {
+    fn on_event(
+        &mut self,
+        Signed(commit): Signed<Commit>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
         if commit.view_num != self.view_num {
             return Ok(());
         }
         self.net.send(AllReplica, commit.clone())?;
         self.insert_commit(commit)
     }
+}
 
-    fn on_ingress_commit(&mut self, commit: Verifiable<Commit>) -> anyhow::Result<()> {
+impl<S, A> OnEvent<Recv<Verifiable<Commit>>> for Replica<S, A> {
+    fn on_event(
+        &mut self,
+        Recv(commit): Recv<Verifiable<Commit>>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
         let op_num = commit.op_num;
         let do_verify = move |this: &mut Self| {
             if commit.view_num != this.view_num {
@@ -583,7 +614,7 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
             }
             this.crypto_worker.submit(Box::new(move |crypto, sender| {
                 if crypto.verify(&commit.replica_id, &commit).is_ok() {
-                    sender.send(ReplicaEvent::VerifiedCommit(commit))
+                    sender.send(Verified(commit))
                 } else {
                     Ok(())
                 }
@@ -598,8 +629,14 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
             do_verify(self)
         }
     }
+}
 
-    fn on_verified_commit(&mut self, commit: Verifiable<Commit>) -> anyhow::Result<()> {
+impl<S: App, A: Addr> OnEvent<Verified<Commit>> for Replica<S, A> {
+    fn on_event(
+        &mut self,
+        Verified(commit): Verified<Commit>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
         if commit.view_num != self.view_num {
             return Ok(());
         }
@@ -614,7 +651,9 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
         }
         Ok(())
     }
+}
 
+impl<S: App, A: Addr> Replica<S, A> {
     fn insert_commit(&mut self, commit: Verifiable<Commit>) -> anyhow::Result<()> {
         let commit_quorum = self.commit_quorums.entry(commit.op_num).or_default();
         commit_quorum.insert(commit.replica_id, commit.clone());
@@ -651,7 +690,7 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
                     replica_id: self.id,
                 };
                 let addr = request.client_addr.clone();
-                let on_request = move |request: &Request<A>, net: &mut M| {
+                let on_request = move |request: &Request<A>, net: &mut dyn ToClientNet<A>| {
                     if request.seq < seq {
                         return Ok(true);
                     }
@@ -662,7 +701,7 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
                         Ok(false)
                     }
                 };
-                on_request(request, &mut self.client_net)?;
+                on_request(request, &mut *self.client_net)?;
                 self.on_request
                     .insert(request.client_id, Box::new(on_request));
             }
@@ -679,8 +718,11 @@ impl<S: App + 'static, N: ToReplicaNet<A> + 'static, M: ToClientNet<A> + 'static
 
 pub type ToClientMessageNet<T> = MessageNet<T, Reply>;
 
-pub fn to_client_on_buf(buf: &[u8], sender: &mut impl SendEvent<Reply>) -> anyhow::Result<()> {
-    sender.send(deserialize(buf)?)
+pub fn to_client_on_buf(
+    buf: &[u8],
+    sender: &mut impl SendEvent<Recv<Reply>>,
+) -> anyhow::Result<()> {
+    sender.send(Recv(deserialize(buf)?))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, derive_more::From)]
@@ -693,16 +735,31 @@ pub enum ToReplica<A> {
 
 pub type ToReplicaMessageNet<T, A> = MessageNet<T, ToReplica<A>>;
 
+pub trait SendReplicaRecvEvent<A>:
+    SendEvent<Recv<Request<A>>>
+    + SendEvent<Recv<(Verifiable<PrePrepare>, Vec<Request<A>>)>>
+    + SendEvent<Recv<Verifiable<Prepare>>>
+    + SendEvent<Recv<Verifiable<Commit>>>
+{
+}
+impl<
+        T: SendEvent<Recv<Request<A>>>
+            + SendEvent<Recv<(Verifiable<PrePrepare>, Vec<Request<A>>)>>
+            + SendEvent<Recv<Verifiable<Prepare>>>
+            + SendEvent<Recv<Verifiable<Commit>>>,
+        A,
+    > SendReplicaRecvEvent<A> for T
+{
+}
+
 pub fn to_replica_on_buf<A: Addr>(
     buf: &[u8],
-    sender: &mut impl SendEvent<ReplicaEvent<A>>,
+    sender: &mut impl SendReplicaRecvEvent<A>,
 ) -> anyhow::Result<()> {
     match deserialize(buf)? {
-        ToReplica::Request(message) => sender.send(ReplicaEvent::IngressRequest(message)),
-        ToReplica::PrePrepare(message, requests) => {
-            sender.send(ReplicaEvent::IngressPrePrepare(message, requests))
-        }
-        ToReplica::Prepare(message) => sender.send(ReplicaEvent::IngressPrepare(message)),
-        ToReplica::Commit(message) => sender.send(ReplicaEvent::IngressCommit(message)),
+        ToReplica::Request(message) => sender.send(Recv(message)),
+        ToReplica::PrePrepare(message, requests) => sender.send(Recv((message, requests))),
+        ToReplica::Prepare(message) => sender.send(Recv(message)),
+        ToReplica::Commit(message) => sender.send(Recv(message)),
     }
 }

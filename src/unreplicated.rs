@@ -6,7 +6,7 @@ use crate::{
     app::App,
     event::{OnEvent, SendEvent, Timer, TimerId},
     net::{deserialize, Addr, MessageNet, SendMessage},
-    replication::Request,
+    replication::{Invoke, Request},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +26,12 @@ pub enum ClientEvent {
     Invoke(Vec<u8>),
     Ingress(Reply),
     ResendTimeout,
+}
+
+impl From<Invoke> for ClientEvent {
+    fn from(Invoke(op): Invoke) -> Self {
+        Self::Invoke(op)
+    }
 }
 
 pub trait ClientUpcall: SendEvent<(u32, Vec<u8>)> {}
