@@ -9,6 +9,12 @@ pub trait SendEvent<M> {
     fn send(&mut self, event: M) -> anyhow::Result<()>;
 }
 
+impl<T: ?Sized + SendEvent<M>, M> SendEvent<M> for Box<T> {
+    fn send(&mut self, event: M) -> anyhow::Result<()> {
+        T::send(self, event)
+    }
+}
+
 pub trait OnEvent<M> {
     fn on_event(&mut self, event: M, timer: &mut dyn Timer<M>) -> anyhow::Result<()>;
 }

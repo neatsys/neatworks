@@ -91,15 +91,13 @@ async fn start_client(State(state): State<AppState>, Json(config): Json<ClientCo
             .build()?;
         match config.protocol {
             Protocol::Unreplicated => {
-                // runtime.block_on(client_session(
-                //     config,
-                //     new_state,
-                //     unreplicated::to_client_on_buf,
-                //     benchmark_result,
-                // ))
-                todo!()
+                runtime.block_on(client_session::<unreplicated::erased::Client<_>>(
+                    config,
+                    unreplicated::erased::to_client_on_buf,
+                    benchmark_result,
+                ))
             }
-            Protocol::Pbft => runtime.block_on(client_session(
+            Protocol::Pbft => runtime.block_on(client_session::<pbft::Client<_>>(
                 config,
                 pbft::to_client_on_buf,
                 benchmark_result,
@@ -120,16 +118,22 @@ trait NewClient<S> {
     ) -> S;
 }
 
-// impl NewClient for unreplicated::Client<SocketAddr> {
-//     fn new(
-//         id: u32,
-//         addr: SocketAddr,
-//         net: ReplicaNet<Udp, SocketAddr>,
-//         upcall: impl SendEvent<InvokeOk> + Send + Sync + 'static,
-//     ) -> Self {
-//         Self::new(id, addr, net, upcall)
-//     }
-// }
+impl NewClient<unreplicated::erased::Client<SocketAddr>> for ClientConfig {
+    fn new_client(
+        &self,
+        id: u32,
+        addr: SocketAddr,
+        net: ReplicaNet<Udp, SocketAddr>,
+        upcall: impl SendEvent<InvokeOk> + Send + Sync + 'static,
+    ) -> unreplicated::erased::Client<SocketAddr> {
+        unreplicated::erased::Client::new(
+            id,
+            addr,
+            Box::new(unreplicated::ToReplicaMessageNet::new(net)),
+            Box::new(upcall),
+        )
+    }
+}
 
 impl NewClient<pbft::Client<SocketAddr>> for ClientConfig {
     fn new_client(
@@ -238,7 +242,7 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
                 );
                 runtime.block_on(replica_session(
                     state,
-                    unreplicated::to_replica_on_buf,
+                    unreplicated::erased::to_replica_on_buf,
                     net,
                     |_| pending(),
                     session_cancel,

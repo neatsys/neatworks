@@ -72,6 +72,12 @@ pub trait SendMessage<A, M> {
     fn send(&mut self, dest: A, message: M) -> anyhow::Result<()>;
 }
 
+impl<T: ?Sized + SendMessage<A, M>, A, M> SendMessage<A, M> for Box<T> {
+    fn send(&mut self, dest: A, message: M) -> anyhow::Result<()> {
+        T::send(self, dest, message)
+    }
+}
+
 // i have realized that this will always be used as
 // `IterAddr<&mut dyn Iterator<Item = A>>`, so change the definition to make it
 // more usable
