@@ -483,9 +483,13 @@ impl<K> OnEvent<fs::DownloadOk> for Peer<K> {
         }
         if let Some(state) = self.downloads.get_mut(&chunk) {
             // println!("download {} index {index}", H256(chunk));
-            return state
-                .recover
-                .submit_decode(chunk, index, fragment, None, &self.codec_worker);
+            return state.recover.submit_decode(
+                chunk,
+                index,
+                fragment,
+                None,
+                &mut self.codec_worker,
+            );
         }
         if let Some(state) = self.persists.get_mut(&chunk) {
             let PersistStatus::Recovering(recover) = &mut state.status else {
@@ -500,7 +504,7 @@ impl<K> OnEvent<fs::DownloadOk> for Peer<K> {
                     index,
                     fragment,
                     Some(state.index),
-                    &self.codec_worker,
+                    &mut self.codec_worker,
                 )?
             } // otherwise it's either decoded or pending
             return Ok(());
@@ -516,7 +520,7 @@ impl RecoverState {
         index: u32,
         fragment: Vec<u8>,
         encode_index: Option<u32>,
-        worker: &CodecWorker,
+        worker: &mut CodecWorker,
     ) -> anyhow::Result<()> {
         if let Some(mut decoder) = self.decoder.take() {
             // println!("submit decode {} index {index}", H256(chunk));
@@ -682,13 +686,13 @@ impl<K> OnEvent<Decode> for Peer<K> {
             // println!("decode {}", H256(chunk));
             return state
                 .recover
-                .on_decode(chunk, decoder, None, &self.codec_worker);
+                .on_decode(chunk, decoder, None, &mut self.codec_worker);
         }
         if let Some(state) = self.persists.get_mut(&chunk) {
             let PersistStatus::Recovering(recover) = &mut state.status else {
                 unreachable!()
             };
-            return recover.on_decode(chunk, decoder, Some(state.index), &self.codec_worker);
+            return recover.on_decode(chunk, decoder, Some(state.index), &mut self.codec_worker);
         }
         Ok(())
     }
@@ -700,7 +704,7 @@ impl RecoverState {
         chunk: Chunk,
         decoder: Decoder,
         encode_index: Option<u32>,
-        worker: &CodecWorker,
+        worker: &mut CodecWorker,
     ) -> anyhow::Result<()> {
         let replaced = self.decoder.replace(decoder);
         assert!(replaced.is_none());

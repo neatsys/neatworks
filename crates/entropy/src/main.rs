@@ -22,7 +22,7 @@ use augustus::{
         kademlia::{Control, PeerNet},
         tcp_listen_session, Tcp, TcpControl,
     },
-    worker::erased::spawn_backend,
+    worker::erased::Worker,
 };
 use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, State},
@@ -255,8 +255,6 @@ async fn start_peer(
     let mut kademlia_control_session = Session::new();
     let (mut blob_sender, blob_receiver) = unbounded_channel();
     let (fs_sender, fs_receiver) = unbounded_channel();
-    let (crypto_worker, mut crypto_session) = spawn_backend(crypto.clone());
-    let (codec_worker, mut codec_session) = spawn_backend(());
     let mut tcp_control_session = Session::new();
 
     let mut kademlia_peer = kademlia::Peer::new(
@@ -264,7 +262,7 @@ async fn start_peer(
         // MessageNet::new(socket_net.clone()),
         MessageNet::new(Tcp(tcp_control_session.sender())),
         kademlia_control_session.sender(),
-        crypto_worker,
+        Worker::new_inline(crypto.clone(), Box::new(kademlia_session.sender())),
     );
     let mut kademlia_control = Control::new(
         // socket_net.clone(),
@@ -281,7 +279,7 @@ async fn start_peer(
         MessageNet::<_, SocketAddr>::new(PeerNet(kademlia_control_session.sender())),
         blob_sender.clone(),
         upcall_sender,
-        codec_worker,
+        Worker::new_inline((), Box::new(peer_session.sender())),
         fs_sender,
     );
     let mut tcp_control = TcpControl::new();
@@ -299,7 +297,6 @@ async fn start_peer(
             )
         }
     });
-    let crypto_session = crypto_session.run(kademlia_session.sender(), |sender| sender);
     let kademlia_session = kademlia_session.run(&mut kademlia_peer);
     let blob_session = blob::stream::session(
         ip,
@@ -309,7 +306,6 @@ async fn start_peer(
     );
     let kademlia_control_session = kademlia_control_session.run(&mut kademlia_control);
     let fs_session = entropy::fs::session(path, fs_receiver, peer_session.sender());
-    let codec_session = codec_session.run(peer_session.sender(), |sender| sender);
     let peer_session = peer_session.run(&mut peer);
     let tcp_control_session = tcp_control_session.run(&mut tcp_control);
 
@@ -319,8 +315,6 @@ async fn start_peer(
         result = kademlia_control_session => result?,
         result = blob_session => result?,
         result = fs_session => result?,
-        result = crypto_session => result?,
-        result = codec_session => result?,
         result = peer_session => result?,
         result = tcp_control_session => result?,
     }

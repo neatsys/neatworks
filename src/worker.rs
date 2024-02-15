@@ -134,18 +134,33 @@ pub mod erased {
         }
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug)]
     pub enum Worker<S, E: ?Sized> {
+        Inline(InlineWorker<S, E>),
         Spawn(SpawnWorker<S, E>),
         Null, // for testing
     }
 
     impl<S, E: ?Sized> Worker<S, E> {
-        pub fn submit(&self, work: Work<S, E>) -> anyhow::Result<()> {
+        pub fn new_inline(state: S, sender: Box<E>) -> Self {
+            Self::Inline(InlineWorker(state, sender))
+        }
+
+        pub fn submit(&mut self, work: Work<S, E>) -> anyhow::Result<()> {
             match self {
+                Self::Inline(worker) => worker.submit(work),
                 Self::Spawn(worker) => worker.submit(work),
                 Self::Null => Ok(()),
             }
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct InlineWorker<S, E: ?Sized>(S, Box<E>);
+
+    impl<S, E: ?Sized> InlineWorker<S, E> {
+        fn submit(&mut self, work: Work<S, E>) -> anyhow::Result<()> {
+            work(&self.0, &mut self.1)
         }
     }
 

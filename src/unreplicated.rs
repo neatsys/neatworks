@@ -137,9 +137,11 @@ pub struct Replica<S, N, A> {
 
 type OnRequest<A, N> = Box<dyn Fn(&Request<A>, &mut N) -> anyhow::Result<bool> + Send + Sync>;
 
-impl<S, N, A> Debug for Replica<S, N, A> {
+impl<S: Debug, N, A> Debug for Replica<S, N, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Replica").finish_non_exhaustive()
+        f.debug_struct("Replica")
+            .field("app", &self.app)
+            .finish_non_exhaustive()
     }
 }
 
