@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     app::App,
-    event::{OnEvent, SendEvent, Timer, TimerId},
+    event::{erased, OnEvent, SendEvent, Timer, TimerId},
     net::{deserialize, Addr, MessageNet, SendMessage},
     replication::{Invoke, Request},
 };
@@ -158,6 +158,16 @@ impl<S: App, N: ToClientNet<A>, A: Addr> OnEvent<ReplicaEvent<A>> for Replica<S,
         &mut self,
         event: ReplicaEvent<A>,
         _: &mut dyn Timer<ReplicaEvent<A>>,
+    ) -> anyhow::Result<()> {
+        self.on_ingress(event)
+    }
+}
+
+impl<S: App, N: ToClientNet<A>, A: Addr> erased::OnEvent<ReplicaEvent<A>> for Replica<S, N, A> {
+    fn on_event(
+        &mut self,
+        event: ReplicaEvent<A>,
+        _: &mut impl erased::Timer<Self>,
     ) -> anyhow::Result<()> {
         self.on_ingress(event)
     }

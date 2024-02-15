@@ -110,9 +110,10 @@ pub mod erased {
     }
 
     impl<S: Clone + Send + Sync + 'static, E: ?Sized + 'static> SpawnExecutor<S, E> {
-        pub async fn run(
+        pub async fn run<F: Clone + Send + 'static>(
             &mut self,
-            sender: impl Clone + Send + AsMut<E> + 'static,
+            sender: F,
+            as_sender: impl FnMut(&mut F) -> &mut E + Clone + Send + 'static,
         ) -> anyhow::Result<()> {
             loop {
                 enum Select<S, E: ?Sized> {
@@ -125,8 +126,9 @@ pub mod erased {
                 } {
                     let state = self.state.clone();
                     let mut sender = sender.clone();
+                    let mut as_sender = as_sender.clone();
                     self.handles
-                        .spawn(async move { work(&state, sender.as_mut()) });
+                        .spawn(async move { work(&state, as_sender(&mut sender)) });
                 }
             }
         }

@@ -1,4 +1,5 @@
 use std::{
+    future::{pending, Future},
     iter::repeat_with,
     net::SocketAddr,
     sync::{Arc, Mutex},
@@ -9,14 +10,14 @@ use augustus::{
     app::Null,
     crypto::Crypto,
     event::{
-        erased::{OnEvent, Session, SessionSender},
+        erased::{OnEvent, Sender, Session},
         SendEvent,
     },
     net::Udp,
     pbft,
     replication::{Concurrent, Invoke, InvokeOk, ReplicaNet},
     unreplicated,
-    worker::erased::{spawn_backend, SpawnExecutor},
+    worker::erased::spawn_backend,
 };
 use axum::{
     extract::State,
@@ -149,9 +150,9 @@ impl NewClient<pbft::Client<SocketAddr>> for ClientConfig {
     }
 }
 
-async fn client_session<S: OnEvent<Invoke> + Send + 'static>(
+async fn client_session<S: OnEvent<Invoke> + Send + Sync + 'static>(
     config: ClientConfig,
-    on_buf: impl Fn(&[u8], &mut SessionSender<S>) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
+    on_buf: impl Fn(&[u8], &mut Sender<S>) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
     benchmark_result: Arc<Mutex<Option<BenchmarkResult>>>,
 ) -> anyhow::Result<()>
 where
@@ -235,17 +236,16 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
                     Null,
                     unreplicated::ToClientMessageNet::new(net.clone()),
                 );
-                let (_crypto_worker, crypto_executor) = spawn_backend(crypto);
                 runtime.block_on(replica_session(
                     state,
                     unreplicated::to_replica_on_buf,
                     net,
-                    crypto_executor,
+                    |_| pending(),
                     session_cancel,
                 ))
             }
             Protocol::Pbft => {
-                let (crypto_worker, crypto_executor) = spawn_backend(crypto);
+                let (crypto_worker, mut crypto_executor) = spawn_backend(crypto);
                 let state = pbft::Replica::<_, SocketAddr>::new(
                     config.replica_id,
                     Null,
@@ -263,7 +263,7 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
                     state,
                     pbft::to_replica_on_buf,
                     net,
-                    crypto_executor,
+                    move |sender| async move { crypto_executor.run(sender, |sender| sender).await },
                     session_cancel,
                 ))
             }
@@ -273,11 +273,14 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
     assert!(replaced.is_none())
 }
 
-async fn replica_session<S, C>(
+async fn replica_session<
+    S: Send + 'static,
+    F: Future<Output = anyhow::Result<()>> + Send + 'static,
+>(
     mut state: S,
-    on_buf: impl Fn(&[u8], &mut SessionSender<S>) -> anyhow::Result<()> + Send + Sync + 'static,
+    on_buf: impl Fn(&[u8], &mut Sender<S>) -> anyhow::Result<()> + Send + Sync + 'static,
     net: Udp,
-    mut crypto_executor: SpawnExecutor<Crypto<u8>, C>,
+    crypto_session: impl FnOnce(Sender<S>) -> F,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let mut session = Session::new();
@@ -287,7 +290,7 @@ async fn replica_session<S, C>(
     });
     let mut crypto_session = spawn({
         let sender = session.sender();
-        async move { crypto_executor.run(sender).await }
+        crypto_session(sender)
     });
     let mut state_session = spawn(async move { session.run(&mut state).await });
     'select: {

@@ -126,17 +126,6 @@ impl<
 {
 }
 
-#[derive(Debug, Clone)]
-pub struct SendCodec<E>(pub E);
-
-impl<'a, E: SendCodecEvent + Send + Sync + 'a> AsMut<dyn SendCodecEvent + Send + Sync + 'a>
-    for SendCodec<E>
-{
-    fn as_mut(&mut self) -> &mut (dyn SendCodecEvent + Send + Sync + 'a) {
-        &mut self.0
-    }
-}
-
 pub trait SendFsEvent:
     SendEvent<fs::Store> + SendEvent<fs::Load> + SendEvent<fs::Download>
 {

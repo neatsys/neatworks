@@ -236,6 +236,32 @@ pub mod erased {
         fn on_event(&mut self, event: M, timer: &mut impl Timer<Self>) -> anyhow::Result<()>;
     }
 
+    #[derive(Debug)]
+    pub struct Erasure<E, S, T>(E, std::marker::PhantomData<(S, T)>);
+
+    impl<E, S, T> From<E> for Erasure<E, S, T> {
+        fn from(value: E) -> Self {
+            Self(value, Default::default())
+        }
+    }
+
+    impl<E: Clone, S, T> Clone for Erasure<E, S, T> {
+        fn clone(&self) -> Self {
+            Self::from(self.0.clone())
+        }
+    }
+
+    type Event<S, T> = Box<dyn FnOnce(&mut S, &mut T) -> anyhow::Result<()> + Send + Sync>;
+
+    impl<E: SendEvent<Event<S, T>>, S: OnEvent<M>, T: Timer<S>, M: Send + Sync + 'static>
+        SendEvent<M> for Erasure<E, S, T>
+    {
+        fn send(&mut self, event: M) -> anyhow::Result<()> {
+            let event = move |state: &mut S, timer: &mut T| state.on_event(event, timer);
+            self.0.send(Box::new(event))
+        }
+    }
+
     impl<S: SendEvent<M>, M> OnEvent<M> for S {
         fn on_event(&mut self, event: M, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
             self.send(event)
@@ -251,17 +277,15 @@ pub mod erased {
     }
 
     // TODO convert to enum when there's second implementation
-    pub type Sender<S> = SessionSender<S>;
+    pub type Sender<S> = Erasure<SessionSender<S>, S, Session<S>>;
 
     #[derive(Debug)]
     pub struct SessionSender<S>(UnboundedSender<SessionEvent<S>>);
 
     enum SessionEvent<S: ?Sized> {
-        Timer(TimerId, Event<S>),
-        Other(Event<S>),
+        Timer(TimerId, Event<S, Session<S>>),
+        Other(Event<S, Session<S>>),
     }
-
-    type Event<S> = Box<dyn FnOnce(&mut S, &mut Session<S>) -> anyhow::Result<()> + Send + Sync>;
 
     impl<S> Clone for SessionSender<S> {
         fn clone(&self) -> Self {
@@ -269,11 +293,10 @@ pub mod erased {
         }
     }
 
-    impl<S: OnEvent<M> + 'static, M: Send + Sync + 'static> SendEvent<M> for SessionSender<S> {
-        fn send(&mut self, event: M) -> anyhow::Result<()> {
-            let event = move |state: &mut S, timer: &mut _| state.on_event(event, timer);
+    impl<S> SendEvent<Event<S, Session<S>>> for SessionSender<S> {
+        fn send(&mut self, event: Event<S, Session<S>>) -> anyhow::Result<()> {
             self.0
-                .send(SessionEvent::Other(Box::new(event) as Event<_>))
+                .send(SessionEvent::Other(event))
                 .map_err(|_| anyhow::anyhow!("channel closed"))
         }
     }
@@ -305,8 +328,8 @@ pub mod erased {
     }
 
     impl<S> Session<S> {
-        pub fn sender(&self) -> SessionSender<S> {
-            SessionSender(self.sender.clone())
+        pub fn sender(&self) -> Sender<S> {
+            Erasure::from(SessionSender(self.sender.clone()))
         }
 
         pub async fn run(&mut self, state: &mut S) -> anyhow::Result<()> {

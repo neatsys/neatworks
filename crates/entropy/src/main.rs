@@ -299,7 +299,7 @@ async fn start_peer(
             )
         }
     });
-    let crypto_session = crypto_session.run(kademlia::SendCrypto(kademlia_session.sender()));
+    let crypto_session = crypto_session.run(kademlia_session.sender(), |sender| sender);
     let kademlia_session = kademlia_session.run(&mut kademlia_peer);
     let blob_session = blob::stream::session(
         ip,
@@ -309,7 +309,7 @@ async fn start_peer(
     );
     let kademlia_control_session = kademlia_control_session.run(&mut kademlia_control);
     let fs_session = entropy::fs::session(path, fs_receiver, peer_session.sender());
-    let codec_session = codec_session.run(entropy::SendCodec(peer_session.sender()));
+    let codec_session = codec_session.run(peer_session.sender(), |sender| sender);
     let peer_session = peer_session.run(&mut peer);
     let tcp_control_session = tcp_control_session.run(&mut tcp_control);
 

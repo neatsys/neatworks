@@ -273,17 +273,6 @@ impl<
 {
 }
 
-#[derive(Debug, Clone)]
-pub struct SendCrypto<E>(pub E);
-
-impl<'a, E: SendCryptoEvent<A> + Send + Sync + 'a, A>
-    AsMut<dyn SendCryptoEvent<A> + Send + Sync + 'a> for SendCrypto<E>
-{
-    fn as_mut(&mut self) -> &mut (dyn SendCryptoEvent<A> + Send + Sync + 'a) {
-        &mut self.0
-    }
-}
-
 pub struct Peer<A> {
     record: PeerRecord<A>,
 
