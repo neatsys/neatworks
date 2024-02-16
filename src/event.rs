@@ -3,6 +3,7 @@ use std::{collections::HashMap, fmt::Debug, time::Duration};
 use tokio::{
     sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
     task::{AbortHandle, JoinError, JoinSet},
+    time::interval,
 };
 
 pub trait SendEvent<M> {
@@ -66,14 +67,22 @@ impl<N: Into<M>, M> SendEvent<N> for UnboundedSender<M> {
 pub type TimerId = u32;
 
 pub trait Timer<M> {
-    fn set_internal(&mut self, duration: Duration, event: M) -> anyhow::Result<TimerId>;
+    fn set_internal(
+        &mut self,
+        duration: Duration,
+        event: Box<dyn FnMut() -> M + Send>,
+    ) -> anyhow::Result<TimerId>;
 
     fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()>;
 }
 
 impl<M> dyn Timer<M> + '_ {
-    pub fn set(&mut self, duration: Duration, event: impl Into<M>) -> anyhow::Result<u32> {
-        self.set_internal(duration, event.into())
+    pub fn set<N: Into<M>>(
+        &mut self,
+        duration: Duration,
+        mut event: impl FnMut() -> N + Send + 'static,
+    ) -> anyhow::Result<u32> {
+        self.set_internal(duration, Box::new(move || event().into()))
     }
 }
 
@@ -169,7 +178,7 @@ impl<M> Session<M> {
             };
             let event = match event {
                 SessionEvent::Timer(timer_id, event) => {
-                    if self.timer_handles.remove(&timer_id).is_some() {
+                    if self.timer_handles.contains_key(&timer_id) {
                         event
                     } else {
                         // unset/timeout contention, force to skip timer as long as it has been
@@ -202,13 +211,20 @@ impl<M> Session<M> {
 }
 
 impl<M: Send + 'static> Timer<M> for Session<M> {
-    fn set_internal(&mut self, duration: Duration, event: M) -> anyhow::Result<TimerId> {
+    fn set_internal(
+        &mut self,
+        period: Duration,
+        mut event: Box<dyn FnMut() -> M + Send>,
+    ) -> anyhow::Result<TimerId> {
         self.timer_id += 1;
         let timer_id = self.timer_id;
         let mut sender = self.sender.clone();
         let handle = self.timer_sessions.spawn(async move {
-            tokio::time::sleep(duration).await;
-            SendEvent::send(&mut sender, SessionEvent::Timer(timer_id, event))
+            let mut interval = interval(period);
+            loop {
+                interval.tick().await;
+                SendEvent::send(&mut sender, SessionEvent::Timer(timer_id, event()))?
+            }
         });
         self.timer_handles.insert(timer_id, handle);
         Ok(timer_id)
@@ -230,12 +246,13 @@ pub mod erased {
     use tokio::{
         sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
         task::{AbortHandle, JoinError, JoinSet},
+        time::interval,
     };
 
     use super::{SendEvent, TimerId};
 
     pub trait Timer<S: ?Sized> {
-        fn set<M: Send + Sync + 'static>(
+        fn set<M: Clone + Send + Sync + 'static>(
             &mut self,
             duration: Duration,
             event: M,
@@ -367,7 +384,7 @@ pub mod erased {
                 };
                 let event = match event {
                     SessionEvent::Timer(timer_id, event) => {
-                        if self.timer_handles.remove(&timer_id).is_some() {
+                        if self.timer_handles.contains_key(&timer_id) {
                             event
                         } else {
                             continue;
@@ -381,9 +398,9 @@ pub mod erased {
     }
 
     impl<S: ?Sized + 'static> Timer<S> for Session<S> {
-        fn set<M: Send + Sync + 'static>(
+        fn set<M: Clone + Send + Sync + 'static>(
             &mut self,
-            duration: Duration,
+            period: Duration,
             event: M,
         ) -> anyhow::Result<TimerId>
         where
@@ -393,9 +410,13 @@ pub mod erased {
             let timer_id = self.timer_id;
             let mut sender = self.sender.clone();
             let handle = self.timer_sessions.spawn(async move {
-                tokio::time::sleep(duration).await;
-                let event = move |state: &mut S, timer: &mut _| state.on_event(event, timer);
-                SendEvent::send(&mut sender, SessionEvent::Timer(timer_id, Box::new(event)))
+                let mut interval = interval(period);
+                loop {
+                    interval.tick().await;
+                    let event = event.clone();
+                    let event = move |state: &mut S, timer: &mut _| state.on_event(event, timer);
+                    SendEvent::send(&mut sender, SessionEvent::Timer(timer_id, Box::new(event)))?
+                }
             });
             self.timer_handles.insert(timer_id, handle);
             Ok(timer_id)

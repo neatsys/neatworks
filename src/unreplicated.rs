@@ -89,7 +89,7 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
         self.seq += 1;
         let invoke = ClientInvoke {
             op,
-            resend_timer: timer.set(Duration::from_millis(1000), ClientEvent::ResendTimeout)?,
+            resend_timer: timer.set(Duration::from_millis(1000), || ClientEvent::ResendTimeout)?,
         };
         self.invoke = Some(invoke);
         self.do_send()
@@ -251,11 +251,12 @@ pub mod erased {
         }
     }
 
+    #[derive(Debug, Clone)]
     struct Resend;
 
     impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> OnEvent<Resend> for super::Client<N, U, A> {
         fn on_event(&mut self, Resend: Resend, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
-            // TODO logging, reset timer
+            // TODO logging
             self.do_send()
         }
     }

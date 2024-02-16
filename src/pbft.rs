@@ -143,12 +143,11 @@ impl<A: Addr> OnEvent<Invoke> for Client<A> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Resend;
 
 impl<A: Addr> OnEvent<Resend> for Client<A> {
     fn on_event(&mut self, Resend: Resend, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
-        // TODO reset timer
         println!("Resend timeout on seq {}", self.seq);
         self.do_send(AllReplica)
     }

@@ -1,7 +1,8 @@
 pub mod kademlia;
 
 use std::{
-    collections::HashMap, fmt::Debug, hash::Hash, net::SocketAddr, sync::Arc, time::Duration,
+    collections::HashMap, fmt::Debug, hash::Hash, mem::replace, net::SocketAddr, sync::Arc,
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -17,7 +18,7 @@ use tokio::{
 
 use crate::event::{
     erased::{OnEvent, Timer},
-    SendEvent,
+    SendEvent, TimerId,
 };
 
 pub trait Addr:
@@ -218,7 +219,15 @@ impl<E: SendEvent<(SocketAddr, B)>, B: Buf> SendMessage<IterAddr<'_, SocketAddr>
 
 #[derive(Debug)]
 pub struct TcpControl<B> {
-    connections: HashMap<SocketAddr, (UnboundedSender<B>, bool)>,
+    // TODO replace timeout-based cleanup with LRU + throttle
+    connections: HashMap<SocketAddr, Connection<B>>,
+}
+
+#[derive(Debug)]
+struct Connection<B> {
+    sender: UnboundedSender<B>,
+    in_use: bool,
+    timer: TimerId,
 }
 
 impl<B> Default for TcpControl<B> {
@@ -247,9 +256,9 @@ impl<B: Buf> OnEvent<(SocketAddr, B)> for TcpControl<B> {
             anyhow::bail!("TCP buf too large: {}", buf.as_ref().len())
         }
 
-        let buf = if let Some((sender, in_use)) = self.connections.get_mut(&dest) {
-            *in_use = true;
-            match UnboundedSender::send(sender, buf) {
+        let buf = if let Some(connection) = self.connections.get_mut(&dest) {
+            connection.in_use = true;
+            match UnboundedSender::send(&connection.sender, buf) {
                 Ok(()) => return Ok(()),
                 Err(err) => err.0,
             }
@@ -278,31 +287,37 @@ impl<B: Buf> OnEvent<(SocketAddr, B)> for TcpControl<B> {
                 .unwrap()
             }
         });
-        self.connections.insert(dest, (sender.clone(), false));
-        timer.set(Duration::from_secs(10), IdleConnection(dest))?;
         sender
             .send(buf)
-            .map_err(|_| anyhow::anyhow!("connection closed"))
+            .map_err(|_| anyhow::anyhow!("connection closed"))?;
+        self.connections.insert(
+            dest,
+            Connection {
+                sender,
+                in_use: false,
+                timer: timer.set(Duration::from_secs(10), CheckIdleConnection(dest))?,
+            },
+        );
+        Ok(())
     }
 }
 
-struct IdleConnection(SocketAddr);
+#[derive(Debug, Clone)]
+struct CheckIdleConnection(SocketAddr);
 
-impl<B> OnEvent<IdleConnection> for TcpControl<B> {
+impl<B> OnEvent<CheckIdleConnection> for TcpControl<B> {
     fn on_event(
         &mut self,
-        IdleConnection(dest): IdleConnection,
+        CheckIdleConnection(dest): CheckIdleConnection,
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        let (_, in_use) = self
+        let connection = self
             .connections
             .get_mut(&dest)
             .ok_or(anyhow::anyhow!("connection missing"))?;
-        if *in_use {
-            *in_use = false;
-            timer.set(Duration::from_secs(10), IdleConnection(dest))?;
-        } else {
-            self.connections.remove(&dest).unwrap();
+        if !replace(&mut connection.in_use, false) {
+            let connection = self.connections.remove(&dest).unwrap();
+            timer.unset(connection.timer)?
         }
         Ok(())
     }

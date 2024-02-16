@@ -87,7 +87,7 @@ impl<M, A, B: Eq + Hash> Control<M, A, B> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct QueryTimeout(pub Query);
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
