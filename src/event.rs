@@ -2,7 +2,7 @@ use std::{collections::HashMap, fmt::Debug, time::Duration};
 
 use tokio::{
     sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-    task::JoinHandle,
+    task::{AbortHandle, JoinError, JoinSet},
 };
 
 pub trait SendEvent<M> {
@@ -110,14 +110,15 @@ pub struct Session<M> {
     sender: UnboundedSender<SessionEvent<M>>,
     receiver: UnboundedReceiver<SessionEvent<M>>,
     timer_id: TimerId,
-    timers: HashMap<TimerId, JoinHandle<()>>,
+    timer_sessions: JoinSet<anyhow::Result<()>>,
+    timer_handles: HashMap<TimerId, AbortHandle>,
 }
 
 impl<M> Debug for Session<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Session")
             .field("timer_id", &self.timer_id)
-            .field("timers", &self.timers)
+            .field("timers", &self.timer_handles)
             .finish_non_exhaustive()
     }
 }
@@ -129,7 +130,8 @@ impl<M> Session<M> {
             sender,
             receiver,
             timer_id: 0,
-            timers: Default::default(),
+            timer_sessions: JoinSet::new(),
+            timer_handles: Default::default(),
         }
     }
 }
@@ -150,14 +152,24 @@ impl<M> Session<M> {
         M: Send + 'static,
     {
         loop {
-            let event = match self
-                .receiver
-                .recv()
-                .await
-                .ok_or(anyhow::anyhow!("channel closed"))?
-            {
+            enum Select<M> {
+                JoinNext(Result<anyhow::Result<()>, JoinError>),
+                Recv(Option<SessionEvent<M>>),
+            }
+            let event = match tokio::select! {
+                Some(result) = self.timer_sessions.join_next() => Select::JoinNext(result),
+                recv = self.receiver.recv() => Select::Recv(recv)
+            } {
+                Select::JoinNext(Err(err)) if err.is_cancelled() => continue,
+                Select::JoinNext(result) => {
+                    result??;
+                    continue;
+                }
+                Select::Recv(event) => event.ok_or(anyhow::anyhow!("channel closed"))?,
+            };
+            let event = match event {
                 SessionEvent::Timer(timer_id, event) => {
-                    if self.timers.remove(&timer_id).is_some() {
+                    if self.timer_handles.remove(&timer_id).is_some() {
                         event
                     } else {
                         // unset/timeout contention, force to skip timer as long as it has been
@@ -193,20 +205,17 @@ impl<M: Send + 'static> Timer<M> for Session<M> {
     fn set_internal(&mut self, duration: Duration, event: M) -> anyhow::Result<TimerId> {
         self.timer_id += 1;
         let timer_id = self.timer_id;
-        let sender = self.sender.clone();
-        // broken error propagation in detached task
-        // the error probably only happens when session exits, which (currently) only happens when
-        // some (more essential) error happens
-        let timer = tokio::spawn(async move {
+        let mut sender = self.sender.clone();
+        let handle = self.timer_sessions.spawn(async move {
             tokio::time::sleep(duration).await;
-            sender.send(SessionEvent::Timer(timer_id, event)).unwrap();
+            SendEvent::send(&mut sender, SessionEvent::Timer(timer_id, event))
         });
-        self.timers.insert(timer_id, timer);
+        self.timer_handles.insert(timer_id, handle);
         Ok(timer_id)
     }
 
     fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()> {
-        self.timers
+        self.timer_handles
             .remove(&timer_id)
             .ok_or(anyhow::anyhow!("timer not exists"))?
             .abort();
@@ -220,8 +229,7 @@ pub mod erased {
 
     use tokio::{
         sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-        task::JoinHandle,
-        time::sleep,
+        task::{AbortHandle, JoinError, JoinSet},
     };
 
     use super::{SendEvent, TimerId};
@@ -312,7 +320,8 @@ pub mod erased {
         sender: UnboundedSender<SessionEvent<S>>,
         receiver: UnboundedReceiver<SessionEvent<S>>,
         timer_id: TimerId,
-        timers: HashMap<TimerId, JoinHandle<()>>,
+        timer_sessions: JoinSet<anyhow::Result<()>>,
+        timer_handles: HashMap<TimerId, AbortHandle>,
     }
 
     impl<S> Session<S> {
@@ -322,7 +331,8 @@ pub mod erased {
                 sender,
                 receiver,
                 timer_id: 0,
-                timers: Default::default(),
+                timer_sessions: JoinSet::new(),
+                timer_handles: Default::default(),
             }
         }
     }
@@ -340,14 +350,24 @@ pub mod erased {
 
         pub async fn run(&mut self, state: &mut S) -> anyhow::Result<()> {
             loop {
-                let event = match self
-                    .receiver
-                    .recv()
-                    .await
-                    .ok_or(anyhow::anyhow!("channel closed"))?
-                {
+                enum Select<M> {
+                    JoinNext(Result<anyhow::Result<()>, JoinError>),
+                    Recv(Option<SessionEvent<M>>),
+                }
+                let event = match tokio::select! {
+                    Some(result) = self.timer_sessions.join_next() => Select::JoinNext(result),
+                    recv = self.receiver.recv() => Select::Recv(recv)
+                } {
+                    Select::JoinNext(Err(err)) if err.is_cancelled() => continue,
+                    Select::JoinNext(result) => {
+                        result??;
+                        continue;
+                    }
+                    Select::Recv(event) => event.ok_or(anyhow::anyhow!("channel closed"))?,
+                };
+                let event = match event {
                     SessionEvent::Timer(timer_id, event) => {
-                        if self.timers.remove(&timer_id).is_some() {
+                        if self.timer_handles.remove(&timer_id).is_some() {
                             event
                         } else {
                             continue;
@@ -371,15 +391,13 @@ pub mod erased {
         {
             self.timer_id += 1;
             let timer_id = self.timer_id;
-            let sender = self.sender.clone();
-            let timer = tokio::spawn(async move {
-                sleep(duration).await;
+            let mut sender = self.sender.clone();
+            let handle = self.timer_sessions.spawn(async move {
+                tokio::time::sleep(duration).await;
                 let event = move |state: &mut S, timer: &mut _| state.on_event(event, timer);
-                sender
-                    .send(SessionEvent::Timer(timer_id, Box::new(event)))
-                    .unwrap();
+                SendEvent::send(&mut sender, SessionEvent::Timer(timer_id, Box::new(event)))
             });
-            self.timers.insert(timer_id, timer);
+            self.timer_handles.insert(timer_id, handle);
             Ok(timer_id)
         }
 
@@ -390,7 +408,7 @@ pub mod erased {
 
     impl<S: ?Sized> Session<S> {
         fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()> {
-            self.timers
+            self.timer_handles
                 .remove(&timer_id)
                 .ok_or(anyhow::anyhow!("timer not exists"))?
                 .abort();
@@ -398,11 +416,12 @@ pub mod erased {
         }
     }
 
-    impl<S: ?Sized> Drop for Session<S> {
-        fn drop(&mut self) {
-            while let Some(timer_id) = self.timers.keys().next() {
-                self.unset(*timer_id).unwrap()
-            }
-        }
-    }
+    // JoinSet should automatically abort remaining task on drop
+    // impl<S: ?Sized> Drop for Session<S> {
+    //     fn drop(&mut self) {
+    //         while let Some(timer_id) = self.timers.keys().next() {
+    //             self.unset(*timer_id).unwrap()
+    //         }
+    //     }
+    // }
 }
