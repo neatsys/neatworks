@@ -71,7 +71,7 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> OnEvent<ClientEvent> for Clie
     fn on_event(
         &mut self,
         event: ClientEvent,
-        timer: &mut dyn Timer<ClientEvent>,
+        timer: &mut impl Timer<ClientEvent>,
     ) -> anyhow::Result<()> {
         match event {
             ClientEvent::Invoke(op) => self.on_invoke(op, timer),
@@ -82,7 +82,11 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> OnEvent<ClientEvent> for Clie
 }
 
 impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
-    fn on_invoke(&mut self, op: Vec<u8>, timer: &mut dyn Timer<ClientEvent>) -> anyhow::Result<()> {
+    fn on_invoke(
+        &mut self,
+        op: Vec<u8>,
+        timer: &mut impl Timer<ClientEvent>,
+    ) -> anyhow::Result<()> {
         if self.invoke.is_some() {
             anyhow::bail!("concurrent invocation")
         }
@@ -159,7 +163,7 @@ impl<S: App, N: ToClientNet<A>, A: Addr> OnEvent<ReplicaEvent<A>> for Replica<S,
     fn on_event(
         &mut self,
         event: ReplicaEvent<A>,
-        _: &mut dyn Timer<ReplicaEvent<A>>,
+        _: &mut impl Timer<ReplicaEvent<A>>,
     ) -> anyhow::Result<()> {
         self.on_ingress(event)
     }

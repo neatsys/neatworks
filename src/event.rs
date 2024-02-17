@@ -17,7 +17,7 @@ impl<T: ?Sized + SendEvent<M>, M> SendEvent<M> for Box<T> {
 }
 
 pub trait OnEvent<M> {
-    fn on_event(&mut self, event: M, timer: &mut dyn Timer<M>) -> anyhow::Result<()>;
+    fn on_event(&mut self, event: M, timer: &mut impl Timer<M>) -> anyhow::Result<()>;
 }
 
 // SendEvent -> OnEvent
@@ -27,27 +27,12 @@ pub trait OnEvent<M> {
 // should always prefer to implement OnEvent for event consumers even if they
 // don't make use of timers
 impl<T: SendEvent<M>, M> OnEvent<M> for T {
-    fn on_event(&mut self, event: M, _: &mut dyn Timer<M>) -> anyhow::Result<()> {
+    fn on_event(&mut self, event: M, _: &mut impl Timer<M>) -> anyhow::Result<()> {
         self.send(event)
     }
 }
 
-// OnEvent -> SendEvent
-pub struct Inline<'a, S, M>(pub &'a mut S, pub &'a mut dyn Timer<M>);
-
-impl<S: Debug, M> Debug for Inline<'_, S, M> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Inline")
-            .field("state", &self.0)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<S: OnEvent<M>, N: Into<M>, M> SendEvent<N> for Inline<'_, S, M> {
-    fn send(&mut self, event: N) -> anyhow::Result<()> {
-        self.0.on_event(event.into(), self.1)
-    }
-}
+// OnEvent -> SendEvent cannot be trivially converted because a timer service is involved
 
 #[derive(Debug)]
 pub struct Void; // for testing
@@ -67,11 +52,22 @@ impl<N: Into<M>, M> SendEvent<N> for UnboundedSender<M> {
 pub type TimerId = u32;
 
 pub trait Timer<M> {
-    fn set_internal(
+    fn set_dyn(
         &mut self,
         duration: Duration,
         event: Box<dyn FnMut() -> M + Send>,
     ) -> anyhow::Result<TimerId>;
+
+    fn set(
+        &mut self,
+        duration: Duration,
+        event: impl FnMut() -> M + Send + 'static,
+    ) -> anyhow::Result<TimerId>
+    where
+        Self: Sized,
+    {
+        self.set_dyn(duration, Box::new(event))
+    }
 
     fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()>;
 }
@@ -82,7 +78,7 @@ impl<M> dyn Timer<M> + '_ {
         duration: Duration,
         mut event: impl FnMut() -> N + Send + 'static,
     ) -> anyhow::Result<u32> {
-        self.set_internal(duration, Box::new(move || event().into()))
+        self.set_dyn(duration, Box::new(move || event().into()))
     }
 }
 
@@ -211,7 +207,7 @@ impl<M> Session<M> {
 }
 
 impl<M: Send + 'static> Timer<M> for Session<M> {
-    fn set_internal(
+    fn set_dyn(
         &mut self,
         period: Duration,
         mut event: Box<dyn FnMut() -> M + Send>,
