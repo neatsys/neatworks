@@ -1,97 +1,15 @@
-use std::fmt::Debug;
-
-use tokio::{
-    runtime::{self, RuntimeFlavor},
-    sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-    task::JoinSet,
-};
-
 use crate::event::SendEvent;
 
-// any explicit support for async work i.e. Pin<Box<dyn Future<...> + ...>>?
-// currently it probably can be supported with erased Work i.e.
-// Work<tokio's Runtime, tokio's Sender>, move async block into closure, spawn
-// a task with the runtime that captures it and a cloned sender, await it, then
-// pass reply message(s) through the sender
-// there's no way to propagate errors from detacked tasks though
-// anyway, `Worker` is for parallelism. if the work is async for concurrency,
-// directly working with `impl OnEvent`s is more reasonable
-pub type Work<S, M> =
-    Box<dyn FnOnce(&S, &mut dyn SendEvent<M>) -> anyhow::Result<()> + Send + Sync>;
+// TODO find a use case for non-erased (type-preseved?) variant
+// or just remove it at all. anyway no performance gain here
+pub type Work<S, M> = erased::Work<S, dyn SendEvent<M>>;
+pub type Worker<S, M> = erased::Worker<S, dyn SendEvent<M>>;
 
-#[derive(Debug)]
-pub struct SpawnExecutor<S, M> {
-    state: S,
-    receiver: UnboundedReceiver<Work<S, M>>,
-    handles: JoinSet<anyhow::Result<()>>,
-}
-
-impl<S, M> SpawnExecutor<S, M> {
-    pub async fn run(
-        &mut self,
-        sender: impl SendEvent<M> + Clone + Send + 'static,
-    ) -> anyhow::Result<()>
-    where
-        S: Clone + Send + Sync + 'static,
-        M: 'static,
-    {
-        // println!("executor run");
-        if runtime::Handle::current().runtime_flavor() != RuntimeFlavor::MultiThread {
-            eprintln!("SpawnExecutor should be better run in multithread runtime")
-        }
-        loop {
-            enum Select<S, E> {
-                Recv(Work<S, E>),
-                JoinNext(()),
-            }
-            if let Select::Recv(work) = tokio::select! {
-                Some(result) = self.handles.join_next() => Select::JoinNext(result??),
-                work = self.receiver.recv() => Select::Recv(work.ok_or(anyhow::anyhow!("channel closed"))?),
-            } {
-                // println!("work");
-                let state = self.state.clone();
-                let mut sender = sender.clone();
-                self.handles.spawn(async move { work(&state, &mut sender) });
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum Worker<S, M> {
-    Spawn(SpawnWorker<S, M>),
-    Null, // for testing
-}
-
-impl<S, M> Worker<S, M> {
-    pub fn submit(&self, work: Work<S, M>) -> anyhow::Result<()> {
-        match self {
-            Self::Spawn(worker) => worker.submit(work),
-            Self::Null => Ok(()),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct SpawnWorker<S, M>(UnboundedSender<Work<S, M>>);
-
-impl<S, M> SpawnWorker<S, M> {
-    fn submit(&self, work: Work<S, M>) -> anyhow::Result<()> {
-        self.0
-            .send(work)
-            .map_err(|_| anyhow::anyhow!("receiver closed"))
-    }
-}
+pub type SpawnExecutor<S, M> = erased::SpawnExecutor<S, dyn SendEvent<M>>;
+pub type SpawnWorker<S, M> = erased::SpawnWorker<S, dyn SendEvent<M>>;
 
 pub fn spawn_backend<S, M>(state: S) -> (Worker<S, M>, SpawnExecutor<S, M>) {
-    let (sender, receiver) = unbounded_channel();
-    let worker = SpawnWorker(sender);
-    let executor = SpawnExecutor {
-        receiver,
-        state,
-        handles: Default::default(),
-    };
-    (Worker::Spawn(worker), executor)
+    erased::spawn_backend(state)
 }
 
 pub mod erased {
@@ -100,6 +18,20 @@ pub mod erased {
         task::JoinSet,
     };
 
+    // any explicit support for async work i.e. Pin<Box<dyn Future<...> + ...>>?
+    // not tried, but probably can be done with e.g.
+    // * use tokio runtime as context state
+    // * use dyn SendEvent<_> + Send + 'static as sender, and instantiate with tokio sender
+    // * submit work that spawn into runtime and capture the sender
+    // it's not the recommended way though, since detached task does not propagate errors (at least
+    // not in the most nature way), and any desire of concurrency should be encoded into
+    // `impl OnEvent` directly
+
+    // `E` is probably `dyn ...`, as in non-erased variant above and in the example
+    // i have been thinking for a better interface for a while, however no clue, and also the
+    // current design seems usable enough
+    // it leaves few hacky feel though, especially the `SpawnExecutor::run` signature
+    // so keep working on this if possible
     pub type Work<S, E> = Box<dyn FnOnce(&S, &mut E) -> anyhow::Result<()> + Send + Sync>;
 
     #[derive(Debug)]
@@ -113,6 +45,16 @@ pub mod erased {
         pub async fn run<F: Clone + Send + 'static>(
             &mut self,
             sender: F,
+            // this probably has a form of `|sender| sender`, for unsized coercion that turns `F`
+            // into `E` which is probably `dyn ...` as mentioned above
+            // i have been looking for a way to better hiding this conversion, i.e.
+            // trait AsDyn<T which is a trait> {
+            //   fn as_dyn(value: impl T) -> &mut dyn T;
+            // }
+            // this rank 2 polymorphism probably will never make it into Rust
+            // in the end, this `|sender| sender` thing has been by far the solution with minimal
+            // footprint
+            // sign
             as_sender: impl FnMut(&mut F) -> &mut E + Clone + Send + 'static,
         ) -> anyhow::Result<()> {
             loop {
