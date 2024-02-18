@@ -39,7 +39,13 @@ impl<M> SendEvent<M> for Void {
     }
 }
 
-pub type TimerId = u32;
+// pub type TimerId = u32;
+// intentionally switch to a non-Clone (nor even Copy) newtype to mitigate use
+// after free, that is, calling `unset` consume the TimerId so the timer cannot
+// be referred anymore
+// this does not solve leak though
+#[derive(Debug, Hash, PartialEq, Eq)]
+pub struct TimerId(u32);
 
 pub trait Timer<M> {
     fn set_dyn(
@@ -67,7 +73,7 @@ impl<M> dyn Timer<M> + '_ {
         &mut self,
         duration: Duration,
         mut event: impl FnMut() -> N + Send + 'static,
-    ) -> anyhow::Result<u32> {
+    ) -> anyhow::Result<TimerId> {
         self.set_dyn(duration, Box::new(move || event().into()))
     }
 }

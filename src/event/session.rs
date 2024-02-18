@@ -10,7 +10,7 @@ use super::{OnEvent, SendEvent, Sender, Timer, TimerId};
 
 #[derive(Debug)]
 enum SessionEvent<M> {
-    Timer(TimerId, M),
+    Timer(u32, M),
     Other(M),
 }
 
@@ -46,9 +46,9 @@ impl<M: Into<N>, N> SendEvent<M> for SessionSender<N> {
 pub struct Session<M> {
     sender: UnboundedSender<SessionEvent<M>>,
     receiver: UnboundedReceiver<SessionEvent<M>>,
-    timer_id: TimerId,
+    timer_id: u32,
     timer_sessions: JoinSet<anyhow::Result<()>>,
-    timer_handles: HashMap<TimerId, AbortHandle>,
+    timer_handles: HashMap<u32, AbortHandle>,
 }
 
 impl<M> Debug for Session<M> {
@@ -166,10 +166,10 @@ impl<M: Send + 'static> Timer<M> for Session<M> {
             }
         });
         self.timer_handles.insert(timer_id, handle);
-        Ok(timer_id)
+        Ok(TimerId(timer_id))
     }
 
-    fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()> {
+    fn unset(&mut self, TimerId(timer_id): TimerId) -> anyhow::Result<()> {
         self.timer_handles
             .remove(&timer_id)
             .ok_or(anyhow::anyhow!("timer not exists"))?
