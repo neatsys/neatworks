@@ -8,8 +8,8 @@ async fn main() -> anyhow::Result<()> {
     let control_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(1))
         .build()?;
-    // benchmark_session(control_client, Protocol::Unreplicated).await
-    benchmark_session(control_client, Protocol::Pbft).await
+    benchmark_session(control_client, Protocol::Unreplicated).await
+    // benchmark_session(control_client, Protocol::Pbft).await
 }
 
 async fn watchdog_session(control_client: reqwest::Client, url: String) -> anyhow::Result<()> {

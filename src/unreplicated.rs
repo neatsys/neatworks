@@ -74,9 +74,11 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> OnEvent<ClientEvent> for Clie
         timer: &mut impl Timer<ClientEvent>,
     ) -> anyhow::Result<()> {
         match event {
-            ClientEvent::Invoke(op) => self.on_invoke(op, timer),
+            ClientEvent::Invoke(op) => self.on_invoke(op, |period| {
+                timer.set(period, || ClientEvent::ResendTimeout)
+            }),
             ClientEvent::ResendTimeout => self.on_resend_timeout(),
-            ClientEvent::Ingress(reply) => self.on_ingress(reply, timer),
+            ClientEvent::Ingress(reply) => self.on_ingress(reply, |timer_id| timer.unset(timer_id)),
         }
     }
 }
@@ -85,7 +87,7 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
     fn on_invoke(
         &mut self,
         op: Vec<u8>,
-        timer: &mut impl Timer<ClientEvent>,
+        mut set_resend_timer: impl FnMut(Duration) -> anyhow::Result<TimerId>,
     ) -> anyhow::Result<()> {
         if self.invoke.is_some() {
             anyhow::bail!("concurrent invocation")
@@ -93,7 +95,7 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
         self.seq += 1;
         let invoke = ClientInvoke {
             op,
-            resend_timer: timer.set(Duration::from_millis(1000), || ClientEvent::ResendTimeout)?,
+            resend_timer: set_resend_timer(Duration::from_millis(1000))?,
         };
         self.invoke = Some(invoke);
         self.do_send()
@@ -107,7 +109,7 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
     fn on_ingress(
         &mut self,
         reply: Reply,
-        timer: &mut dyn Timer<ClientEvent>,
+        mut unset_timer: impl FnMut(TimerId) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         if reply.seq != self.seq {
             return Ok(());
@@ -115,7 +117,7 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
         let Some(invoke) = self.invoke.take() else {
             return Ok(());
         };
-        timer.unset(invoke.resend_timer)?;
+        unset_timer(invoke.resend_timer)?;
         self.upcall.send((self.id, reply.result))
     }
 
@@ -130,20 +132,23 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
     }
 }
 
-pub type ReplicaEvent<A> = Request<A>;
-
-pub struct Replica<S, N, A> {
-    on_request: HashMap<u32, OnRequest<A, N>>,
-    app: S,
-
-    net: N,
+#[derive(Debug)]
+pub enum ReplicaEvent<A> {
+    Ingress(Request<A>),
+    Dummy, //
 }
 
-type OnRequest<A, N> = Box<dyn Fn(&Request<A>, &mut N) -> anyhow::Result<bool> + Send + Sync>;
+pub struct Replica<S, N, A> {
+    replies: HashMap<u32, Reply>,
+    _addr_marker: std::marker::PhantomData<A>,
+    app: S,
+    net: N,
+}
 
 impl<S: Debug, N, A> Debug for Replica<S, N, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Replica")
+            .field("replies", &self.replies)
             .field("app", &self.app)
             .finish_non_exhaustive()
     }
@@ -154,46 +159,40 @@ impl<S, N, A> Replica<S, N, A> {
         Self {
             app,
             net,
-            on_request: Default::default(),
+            _addr_marker: Default::default(),
+            replies: Default::default(),
         }
     }
 }
 
-impl<S: App, N: ToClientNet<A>, A: Addr> OnEvent<ReplicaEvent<A>> for Replica<S, N, A> {
+impl<S: App, N: ToClientNet<A>, A> OnEvent<ReplicaEvent<A>> for Replica<S, N, A> {
     fn on_event(
         &mut self,
         event: ReplicaEvent<A>,
         _: &mut impl Timer<ReplicaEvent<A>>,
     ) -> anyhow::Result<()> {
-        self.on_ingress(event)
+        match event {
+            ReplicaEvent::Ingress(request) => self.on_ingress(request),
+            ReplicaEvent::Dummy => unreachable!(),
+        }
     }
 }
 
-impl<S: App, N: ToClientNet<A>, A: Addr> Replica<S, N, A> {
+impl<S: App, N: ToClientNet<A>, A> Replica<S, N, A> {
     fn on_ingress(&mut self, request: Request<A>) -> anyhow::Result<()> {
-        if let Some(on_request) = self.on_request.get(&request.client_id) {
-            if on_request(&request, &mut self.net)? {
-                return Ok(());
+        match self.replies.get(&request.client_id) {
+            Some(reply) if reply.seq > request.seq => return Ok(()),
+            Some(reply) if reply.seq == request.seq => {
+                return self.net.send(request.client_addr, reply.clone())
             }
+            _ => {}
         }
-        let result = self.app.execute(&request.op)?;
-        let seq = request.seq;
-        let reply = Reply { seq, result };
-        let on_request = move |request: &Request<A>, net: &mut N| {
-            if request.seq < seq {
-                return Ok(true);
-            }
-            if request.seq == seq {
-                net.send(request.client_addr.clone(), reply.clone())?;
-                Ok(true)
-            } else {
-                Ok(false)
-            }
+        let reply = Reply {
+            seq: request.seq,
+            result: self.app.execute(&request.op)?,
         };
-        on_request(&request, &mut self.net)?;
-        self.on_request
-            .insert(request.client_id, Box::new(on_request));
-        Ok(())
+        self.replies.insert(request.client_id, reply.clone());
+        self.net.send(request.client_addr, reply)
     }
 }
 
@@ -207,13 +206,13 @@ pub type ToReplicaMessageNet<T, A> = MessageNet<T, Request<A>>;
 
 pub fn to_replica_on_buf(
     buf: &[u8],
-    sender: &mut impl SendEvent<Request<SocketAddr>>,
+    sender: &mut impl SendEvent<ReplicaEvent<SocketAddr>>,
 ) -> anyhow::Result<()> {
-    sender.send(deserialize(buf)?)
+    sender.send(ReplicaEvent::Ingress(deserialize(buf)?))
 }
 
 pub mod erased {
-    use std::{net::SocketAddr, time::Duration};
+    use std::net::SocketAddr;
 
     use crate::{
         app::App,
@@ -225,7 +224,7 @@ pub mod erased {
         replication::{Invoke, Request},
     };
 
-    use super::{ClientInvoke, ClientUpcall, Replica, Reply, ToClientNet, ToReplicaNet};
+    use super::{ClientUpcall, Replica, Reply, ToClientNet, ToReplicaNet};
 
     pub type Client<A> = super::Client<
         Box<dyn ToReplicaNet<A> + Send + Sync>,
@@ -233,25 +232,13 @@ pub mod erased {
         A,
     >;
 
-    // try reduce duplicated code as for replica
-    // unlikely to be done due to incompatible timer
-
     impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> OnEvent<Invoke> for super::Client<N, U, A> {
         fn on_event(
             &mut self,
             Invoke(op): Invoke,
             timer: &mut impl Timer<Self>,
         ) -> anyhow::Result<()> {
-            if self.invoke.is_some() {
-                anyhow::bail!("concurrent invocation")
-            }
-            self.seq += 1;
-            let invoke = ClientInvoke {
-                op,
-                resend_timer: timer.set(Duration::from_millis(1000), Resend)?,
-            };
-            self.invoke = Some(invoke);
-            self.do_send()
+            self.on_invoke(op, |period| timer.set(period, Resend))
         }
     }
 
@@ -271,18 +258,11 @@ pub mod erased {
             Recv(reply): Recv<Reply>,
             timer: &mut impl Timer<Self>,
         ) -> anyhow::Result<()> {
-            if reply.seq != self.seq {
-                return Ok(());
-            }
-            let Some(invoke) = self.invoke.take() else {
-                return Ok(());
-            };
-            timer.unset(invoke.resend_timer)?;
-            self.upcall.send((self.id, reply.result))
+            self.on_ingress(reply, |timer_id| timer.unset(timer_id))
         }
     }
 
-    impl<S: App, N: ToClientNet<A>, A: Addr> OnEvent<Recv<Request<A>>> for Replica<S, N, A> {
+    impl<S: App, N: ToClientNet<A>, A> OnEvent<Recv<Request<A>>> for Replica<S, N, A> {
         fn on_event(
             &mut self,
             Recv(request): Recv<Request<A>>,
