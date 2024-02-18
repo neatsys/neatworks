@@ -76,14 +76,23 @@ pub use session::Session;
 pub type Sender<M> = session::SessionSender<M>;
 
 // alternative design: type-erasure event
+// the goal here is to only wrap other code in this module, so e.g. erased session is inside this
+// instead of in event::session:erased
 pub mod erased {
     use std::{fmt::Debug, time::Duration};
 
     use super::{SendEvent, TimerId};
 
+    // the "universal event type" that every event can turn into
+    // this is slightly weaker than it suppose to be which is
+    //   for<T: Timer<S>> FnOnce(&mut S, &mut T) -> ...
+    // this cannot be easily done, since we need the FnOnce to be object safe
+    // so instead the restriction is propagated backward from receiver side to sender side, i.e.
+    // the timer type `T` is fixed at the time when the universal event get sent
+    // this is controled by the `T` parameter on `Erasure` below
     pub type Event<S, T> = Box<dyn FnOnce(&mut S, &mut T) -> anyhow::Result<()> + Send + Sync>;
 
-    pub trait Timer<S: ?Sized> {
+    pub trait Timer<S> {
         fn set<M: Clone + Send + Sync + 'static>(
             &mut self,
             period: Duration,
@@ -95,8 +104,14 @@ pub mod erased {
         fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()>;
     }
 
+    // a impl<T: super::Timer<Event<S, T>>, S> Timer<S> for T may be desired
+    // but currently it's not used, the session does another wrapping before working
+    // guess that will be case for every future event scheduler, hope not too ugly boilerplates
+
     pub trait OnEvent<M> {
-        fn on_event(&mut self, event: M, timer: &mut impl Timer<Self>) -> anyhow::Result<()>;
+        fn on_event(&mut self, event: M, timer: &mut impl Timer<Self>) -> anyhow::Result<()>
+        where
+            Self: Sized;
     }
 
     impl<S: SendEvent<M>, M> OnEvent<M> for S {
@@ -129,6 +144,11 @@ pub mod erased {
         }
     }
 
+    // TODO convert to enum when there's second implementation
+    pub type Sender<S> = SessionSender<S>;
+
+    // Session-specific code onward
+    // a must-have newtype to allow us talk about Self type in super::Session's event position
     #[derive(derive_more::From)]
     pub struct SessionEvent<S>(Event<S, super::Session<Self>>);
 
@@ -138,7 +158,11 @@ pub mod erased {
         }
     }
 
-    impl<S: 'static> Timer<S> for super::Session<SessionEvent<S>> {
+    // this implementation for super::Session<SessionEvent<S>> has been generalized into a blanket
+    // impl on T, but yet to be generalized over SessionEvent<S> (into
+    // `F where Event<S, T>: Into<F>`)
+    // that would require a newtype to tag the impl, and i don't bother
+    impl<T: super::Timer<SessionEvent<S>>, S: 'static> Timer<S> for T {
         fn set<M: Clone + Send + Sync + 'static>(
             &mut self,
             period: Duration,
@@ -161,9 +185,6 @@ pub mod erased {
 
     pub type Session<S> = super::Session<SessionEvent<S>>;
     pub type SessionSender<S> = Erasure<super::Sender<SessionEvent<S>>, S, Session<S>>;
-
-    // TODO convert to enum when there's second implementation
-    pub type Sender<S> = SessionSender<S>;
 
     impl<S> Session<S> {
         pub fn erased_sender(&self) -> Sender<S> {

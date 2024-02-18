@@ -7,7 +7,7 @@ rust-version = "1.75.0"
 [workspace]
 members = [
     ".",
-    # "crates/entropy",
+    "crates/entropy",
     "tools/replication-control",
     "tools/replication-control-messages",
     "tools/entropy-control",
