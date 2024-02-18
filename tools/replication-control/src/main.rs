@@ -30,7 +30,7 @@ async fn result_session(
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
         if let Some(result) = control_client
-            .get(format!("{url}/benchmark-result"))
+            .post(format!("{url}/take-benchmark-result"))
             .send()
             .await?
             .error_for_status()?

@@ -148,8 +148,9 @@ struct Resend;
 
 impl<A: Addr> OnEvent<Resend> for Client<A> {
     fn on_event(&mut self, Resend: Resend, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
-        println!("Resend timeout on seq {}", self.seq);
-        self.do_send(AllReplica)
+        // println!("Resend timeout on seq {}", self.seq);
+        // self.do_send(AllReplica)
+        Ok(())
     }
 }
 
@@ -194,6 +195,7 @@ impl<A: Addr> Client<A> {
             seq: self.seq,
             op: self.invoke.as_ref().unwrap().op.clone(),
         };
+        // either this or add `Send + Sync` in trait bound above. i choose this
         (&mut *self.net as &mut dyn ToReplicaNet<A>).send(dest, request)
     }
 }
@@ -224,7 +226,7 @@ pub struct Replica<S, A> {
     num_replica: usize,
     num_faulty: usize,
 
-    on_request: HashMap<u32, OnRequest<A>>,
+    replies: HashMap<u32, (u32, Option<Reply>)>,
     requests: Vec<Request<A>>,
     view_num: u32,
     op_num: u32,
@@ -234,17 +236,13 @@ pub struct Replica<S, A> {
     commit_num: u32,
     app: S,
     // op number -> task
-    on_verified_prepare_tasks: HashMap<u32, Vec<OnVerified<Self>>>,
-    on_verified_commit_tasks: HashMap<u32, Vec<OnVerified<Self>>>,
+    pending_prepares: HashMap<u32, Vec<Verifiable<Prepare>>>,
+    pending_commits: HashMap<u32, Vec<Verifiable<Commit>>>,
 
     net: Box<dyn ToReplicaNet<A> + Send + Sync>,
     client_net: Box<dyn ToClientNet<A> + Send + Sync>,
     crypto_worker: Worker<Crypto<u8>, dyn SendCryptoEvent<A> + Send + Sync>,
 }
-
-type OnRequest<A> =
-    Box<dyn Fn(&Request<A>, &mut dyn ToClientNet<A>) -> anyhow::Result<bool> + Send + Sync>;
-type OnVerified<S> = Box<dyn FnOnce(&mut S) -> anyhow::Result<()> + Send + Sync>;
 
 #[derive(Debug)]
 struct LogEntry<A> {
@@ -291,7 +289,7 @@ impl<S, A> Replica<S, A> {
             crypto_worker,
             num_replica,
             num_faulty,
-            on_request: Default::default(),
+            replies: Default::default(),
             requests: Default::default(),
             view_num: 0,
             op_num: 0,
@@ -299,8 +297,8 @@ impl<S, A> Replica<S, A> {
             prepare_quorums: Default::default(),
             commit_quorums: Default::default(),
             commit_num: 0,
-            on_verified_prepare_tasks: Default::default(),
-            on_verified_commit_tasks: Default::default(),
+            pending_prepares: Default::default(),
+            pending_commits: Default::default(),
         }
     }
 }
@@ -319,17 +317,20 @@ impl<S, A: Addr> OnEvent<Recv<Request<A>>> for Replica<S, A> {
         Recv(request): Recv<Request<A>>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        if let Some(on_request) = self.on_request.get(&request.client_id) {
-            if on_request(&request, &mut *self.client_net)? {
+        match self.replies.get(&request.client_id) {
+            Some((seq, _)) if *seq > request.seq => return Ok(()),
+            Some((seq, reply)) if *seq == request.seq => {
+                if let Some(reply) = reply {
+                    self.client_net.send(request.client_addr, reply.clone())?
+                }
                 return Ok(());
             }
+            _ => {}
         }
         if !self.is_primary() {
             todo!("forward request")
         }
-        // ignore resend of ongoing consensus
-        self.on_request
-            .insert(request.client_id, Box::new(|_, _| Ok(true)));
+        self.replies.insert(request.client_id, (request.seq, None));
         self.requests.push(request);
         if self.op_num < self.commit_num + Self::NUM_CONCURRENT_PRE_PREPARE {
             self.close_batch()
@@ -469,7 +470,9 @@ impl<S, A> OnEvent<Signed<Prepare>> for Replica<S, A> {
             return Ok(());
         }
         self.net.send(AllReplica, prepare.clone())?;
-        self.insert_prepare(prepare)?;
+        if self.log[prepare.op_num as usize].prepares.is_empty() {
+            self.insert_prepare(prepare)?
+        }
         Ok(())
     }
 }
@@ -480,41 +483,45 @@ impl<S, A> OnEvent<Recv<Verifiable<Prepare>>> for Replica<S, A> {
         Recv(prepare): Recv<Verifiable<Prepare>>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        let op_num = prepare.op_num;
-        let do_verify = move |this: &mut Self| {
-            if prepare.view_num != this.view_num {
-                if prepare.view_num > this.view_num {
-                    todo!("state transfer to enter view")
-                }
-                return Ok(());
-            }
-            if let Some(entry) = this.log.get(prepare.op_num as usize) {
-                if !entry.prepares.is_empty() {
-                    return Ok(());
-                }
-                if let Some(pre_prepare) = &entry.pre_prepare {
-                    if prepare.digest != pre_prepare.digest {
-                        return Ok(());
-                    }
-                }
-            }
-            this.crypto_worker.submit(Box::new(move |crypto, sender| {
-                if crypto.verify(&prepare.replica_id, &prepare).is_ok() {
-                    sender.send(Verified(prepare))
-                } else {
-                    Ok(())
-                }
-            }))
-        };
-        if let Some(on_verified) = self.on_verified_prepare_tasks.get_mut(&op_num) {
-            on_verified.push(Box::new(do_verify));
-            Ok(())
-        } else {
-            // insert the dummy entry to indicate there's ongoing task
-            self.on_verified_prepare_tasks
-                .insert(op_num, Default::default());
-            do_verify(self)
+        if let Some(pending_prepares) = self.pending_prepares.get_mut(&prepare.op_num) {
+            pending_prepares.push(prepare);
+            return Ok(());
         }
+        let op_num = prepare.op_num;
+        if self.submit_prepare(prepare)? {
+            // insert the dummy entry to indicate there's ongoing task
+            self.pending_prepares.insert(op_num, Default::default());
+        }
+        Ok(())
+    }
+}
+
+impl<S, A> Replica<S, A> {
+    fn submit_prepare(&mut self, prepare: Verifiable<Prepare>) -> anyhow::Result<bool> {
+        if prepare.view_num != self.view_num {
+            if prepare.view_num > self.view_num {
+                todo!("state transfer to enter view")
+            }
+            return Ok(false);
+        }
+        if let Some(entry) = self.log.get(prepare.op_num as usize) {
+            if !entry.prepares.is_empty() {
+                return Ok(false);
+            }
+            if let Some(pre_prepare) = &entry.pre_prepare {
+                if prepare.digest != pre_prepare.digest {
+                    return Ok(false);
+                }
+            }
+        }
+        self.crypto_worker.submit(Box::new(move |crypto, sender| {
+            if crypto.verify(&prepare.replica_id, &prepare).is_ok() {
+                sender.send(Verified(prepare))
+            } else {
+                Ok(())
+            }
+        }))?;
+        Ok(true)
     }
 }
 
@@ -529,12 +536,17 @@ impl<S, A> OnEvent<Verified<Prepare>> for Replica<S, A> {
         }
         let op_num = prepare.op_num;
         self.insert_prepare(prepare)?;
-        if let Some(on_verified) = self.on_verified_prepare_tasks.get_mut(&op_num) {
-            if let Some(on_verified) = on_verified.pop() {
-                on_verified(self)?;
-            } else {
+        loop {
+            let Some(pending_prepares) = self.pending_prepares.get_mut(&op_num) else {
+                break;
+            };
+            let Some(prepare) = pending_prepares.pop() else {
                 // there's no pending task, remove the task list to indicate
-                self.on_verified_prepare_tasks.remove(&op_num);
+                self.pending_prepares.remove(&op_num);
+                break;
+            };
+            if self.submit_prepare(prepare)? {
+                break;
             }
         }
         Ok(())
@@ -545,13 +557,20 @@ impl<S, A> Replica<S, A> {
     fn insert_prepare(&mut self, prepare: Verifiable<Prepare>) -> anyhow::Result<()> {
         let prepare_quorum = self.prepare_quorums.entry(prepare.op_num).or_default();
         prepare_quorum.insert(prepare.replica_id, prepare.clone());
-        let Some(entry) = self.log.get_mut(prepare.op_num as usize) else {
-            // cannot match digest for now, postpone entering "prepared" until receiving pre-prepare
-            return Ok(());
-        };
+        // println!(
+        //     "{} PrePrepare {} Prepare {}",
+        //     prepare.op_num,
+        //     self.log.get(prepare.op_num as usize).is_some(),
+        //     prepare_quorum.len()
+        // );
         if prepare_quorum.len() + 1 < self.num_replica - self.num_faulty {
             return Ok(());
         }
+        let Some(entry) = self.log.get_mut(prepare.op_num as usize) else {
+            // haven't matched digest for now, postpone entering "prepared" until receiving
+            // pre-prepare
+            return Ok(());
+        };
         assert!(entry.prepares.is_empty());
         entry.prepares = self
             .prepare_quorums
@@ -559,7 +578,6 @@ impl<S, A> Replica<S, A> {
             .unwrap()
             .into_iter()
             .collect();
-        self.on_verified_prepare_tasks.remove(&prepare.op_num);
 
         let commit = Commit {
             view_num: self.view_num,
@@ -583,7 +601,10 @@ impl<S: App, A: Addr> OnEvent<Signed<Commit>> for Replica<S, A> {
             return Ok(());
         }
         self.net.send(AllReplica, commit.clone())?;
-        self.insert_commit(commit)
+        if self.log[commit.op_num as usize].commits.is_empty() {
+            self.insert_commit(commit)?
+        }
+        Ok(())
     }
 }
 
@@ -593,40 +614,45 @@ impl<S, A> OnEvent<Recv<Verifiable<Commit>>> for Replica<S, A> {
         Recv(commit): Recv<Verifiable<Commit>>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        let op_num = commit.op_num;
-        let do_verify = move |this: &mut Self| {
-            if commit.view_num != this.view_num {
-                if commit.view_num > this.view_num {
-                    todo!("state transfer to enter view")
-                }
-                return Ok(());
-            }
-            if let Some(entry) = this.log.get(commit.op_num as usize) {
-                if !entry.commits.is_empty() {
-                    return Ok(());
-                }
-                if let Some(pre_prepare) = &entry.pre_prepare {
-                    if commit.digest != pre_prepare.digest {
-                        return Ok(());
-                    }
-                }
-            }
-            this.crypto_worker.submit(Box::new(move |crypto, sender| {
-                if crypto.verify(&commit.replica_id, &commit).is_ok() {
-                    sender.send(Verified(commit))
-                } else {
-                    Ok(())
-                }
-            }))
-        };
-        if let Some(on_verified) = self.on_verified_commit_tasks.get_mut(&op_num) {
-            on_verified.push(Box::new(do_verify));
-            Ok(())
-        } else {
-            self.on_verified_commit_tasks
-                .insert(op_num, Default::default());
-            do_verify(self)
+        if let Some(pending_commits) = self.pending_commits.get_mut(&commit.op_num) {
+            pending_commits.push(commit);
+            return Ok(());
         }
+        let op_num = commit.op_num;
+        if self.submit_commit(commit)? {
+            // insert the dummy entry to indicate there's ongoing task
+            self.pending_commits.insert(op_num, Default::default());
+        }
+        Ok(())
+    }
+}
+
+impl<S, A> Replica<S, A> {
+    fn submit_commit(&mut self, commit: Verifiable<Commit>) -> anyhow::Result<bool> {
+        if commit.view_num != self.view_num {
+            if commit.view_num > self.view_num {
+                todo!("state transfer to enter view")
+            }
+            return Ok(false);
+        }
+        if let Some(entry) = self.log.get(commit.op_num as usize) {
+            if !entry.commits.is_empty() {
+                return Ok(false);
+            }
+            if let Some(pre_prepare) = &entry.pre_prepare {
+                if commit.digest != pre_prepare.digest {
+                    return Ok(false);
+                }
+            }
+        }
+        self.crypto_worker.submit(Box::new(move |crypto, sender| {
+            if crypto.verify(&commit.replica_id, &commit).is_ok() {
+                sender.send(Verified(commit))
+            } else {
+                Ok(())
+            }
+        }))?;
+        Ok(true)
     }
 }
 
@@ -641,11 +667,17 @@ impl<S: App, A: Addr> OnEvent<Verified<Commit>> for Replica<S, A> {
         }
         let op_num = commit.op_num;
         self.insert_commit(commit)?;
-        if let Some(on_verified) = self.on_verified_commit_tasks.get_mut(&op_num) {
-            if let Some(on_verified) = on_verified.pop() {
-                on_verified(self)?;
-            } else {
-                self.on_verified_commit_tasks.remove(&op_num);
+        loop {
+            let Some(pending_commits) = self.pending_commits.get_mut(&op_num) else {
+                break;
+            };
+            let Some(commit) = pending_commits.pop() else {
+                // there's no pending task, remove the task list to indicate
+                self.pending_commits.remove(&op_num);
+                break;
+            };
+            if self.submit_commit(commit)? {
+                break;
             }
         }
         Ok(())
@@ -656,29 +688,35 @@ impl<S: App, A: Addr> Replica<S, A> {
     fn insert_commit(&mut self, commit: Verifiable<Commit>) -> anyhow::Result<()> {
         let commit_quorum = self.commit_quorums.entry(commit.op_num).or_default();
         commit_quorum.insert(commit.replica_id, commit.clone());
+        // println!(
+        //     "{} PrePrepare {} Commit {}",
+        //     commit.op_num,
+        //     self.log.get(commit.op_num as usize).is_some(),
+        //     commit_quorum.len()
+        // );
         if commit_quorum.len() < self.num_replica - self.num_faulty {
             return Ok(());
         }
         let Some(entry) = self.log.get_mut(commit.op_num as usize) else {
             return Ok(());
         };
+        assert!(entry.commits.is_empty());
         if entry.prepares.is_empty() {
             return Ok(());
         }
-        assert!(entry.commits.is_empty());
         entry.commits = self
             .commit_quorums
             .remove(&commit.op_num)
             .unwrap()
             .into_iter()
             .collect();
-        self.on_verified_commit_tasks.remove(&commit.op_num);
 
         while let Some(entry) = self.log.get(self.commit_num as usize + 1) {
             if entry.commits.is_empty() {
                 break;
             }
             self.commit_num += 1;
+            // println!("Commit {}", self.commit_num);
             for request in &entry.requests {
                 let result = self.app.execute(&request.op)?;
                 let seq = request.seq;
@@ -688,21 +726,17 @@ impl<S: App, A: Addr> Replica<S, A> {
                     view_num: self.view_num,
                     replica_id: self.id,
                 };
-                let addr = request.client_addr.clone();
-                let on_request = move |request: &Request<A>, net: &mut dyn ToClientNet<A>| {
-                    if request.seq < seq {
-                        return Ok(true);
-                    }
-                    if request.seq == seq {
-                        net.send(addr.clone(), reply.clone())?;
-                        Ok(true)
-                    } else {
-                        Ok(false)
-                    }
-                };
-                on_request(request, &mut *self.client_net)?;
-                self.on_request
-                    .insert(request.client_id, Box::new(on_request));
+
+                if self
+                    .replies
+                    .get(&request.client_id)
+                    .map(|(seq, _)| *seq <= request.seq)
+                    .unwrap_or(true)
+                {
+                    self.replies
+                        .insert(request.client_id, (request.seq, Some(reply.clone())));
+                }
+                self.client_net.send(request.client_addr.clone(), reply)?
             }
         }
         while self.is_primary()

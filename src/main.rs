@@ -38,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/ok", get(ok))
         .route("/start-client", post(start_client))
-        .route("/benchmark-result", get(benchmark_result))
+        .route("/take-benchmark-result", post(take_benchmark_result))
         .route("/start-replica", post(start_replica))
         .route("/stop-replica", post(stop_replica))
         .with_state(AppState {
@@ -211,8 +211,8 @@ where
     Ok(())
 }
 
-async fn benchmark_result(State(state): State<AppState>) -> Json<Option<BenchmarkResult>> {
-    state.benchmark_result.lock().unwrap().clone().into()
+async fn take_benchmark_result(State(state): State<AppState>) -> Json<Option<BenchmarkResult>> {
+    Json(state.benchmark_result.lock().unwrap().take())
 }
 
 async fn start_replica(State(state): State<AppState>, Json(config): Json<ReplicaConfig>) {
