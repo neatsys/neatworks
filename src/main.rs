@@ -178,14 +178,14 @@ where
             client_id,
             addr,
             ReplicaNet::new(net.clone(), config.replica_addrs.clone(), None),
-            concurrent_session.sender(),
+            concurrent_session.erased_sender(),
         );
         let mut session = Session::new();
-        concurrent.insert_client_sender(client_id, session.sender())?;
-        let mut sender = session.sender();
+        concurrent.insert_client_sender(client_id, session.erased_sender())?;
+        let mut sender = session.erased_sender();
         let on_buf = on_buf.clone();
         sessions.spawn(async move { net.recv_session(|buf| on_buf(buf, &mut sender)).await });
-        sessions.spawn(async move { session.run(&mut state).await });
+        sessions.spawn(async move { session.erased_run(&mut state).await });
     }
     concurrent.launch()?;
     // TODO escape with an error indicating the root problem instead of a disconnected channel error
@@ -193,7 +193,7 @@ where
     // is it (easily) possible?
     'select: {
         tokio::select! {
-            result = concurrent_session.run(&mut concurrent) => result?,
+            result = concurrent_session.erased_run(&mut concurrent) => result?,
             result = sessions.join_next() => result.unwrap()??,
             () = tokio::time::sleep(Duration::from_secs(1)) => break 'select,
             // () = cancel.cancelled() => break 'select,
@@ -289,14 +289,14 @@ async fn replica_session<
 ) -> anyhow::Result<()> {
     let mut session = Session::new();
     let mut recv_session = spawn({
-        let mut sender = session.sender();
+        let mut sender = session.erased_sender();
         async move { net.recv_session(|buf| on_buf(buf, &mut sender)).await }
     });
     let mut crypto_session = spawn({
-        let sender = session.sender();
+        let sender = session.erased_sender();
         crypto_session(sender)
     });
-    let mut state_session = spawn(async move { session.run(&mut state).await });
+    let mut state_session = spawn(async move { session.erased_run(&mut state).await });
     'select: {
         tokio::select! {
             result = &mut recv_session => result??,

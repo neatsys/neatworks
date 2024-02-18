@@ -31,6 +31,12 @@ impl<M> PartialEq for SessionSender<M> {
 
 impl<M> Eq for SessionSender<M> {}
 
+impl<N: Into<M>, M> SendEvent<N> for UnboundedSender<M> {
+    fn send(&mut self, event: N) -> anyhow::Result<()> {
+        UnboundedSender::send(self, event.into()).map_err(|_| anyhow::anyhow!("channel closed"))
+    }
+}
+
 impl<M: Into<N>, N> SendEvent<M> for SessionSender<N> {
     fn send(&mut self, event: M) -> anyhow::Result<()> {
         SendEvent::send(&mut self.0, SessionEvent::Other(event.into()))
@@ -82,6 +88,17 @@ impl<M> Session<M> {
     where
         M: Send + 'static,
     {
+        self.run_internal(state, OnEvent::on_event).await
+    }
+
+    pub async fn run_internal<S>(
+        &mut self,
+        state: &mut S,
+        mut on_event: impl FnMut(&mut S, M, &mut Self) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()>
+    where
+        M: Send + 'static,
+    {
         loop {
             enum Select<M> {
                 JoinNext(Result<anyhow::Result<()>, JoinError>),
@@ -127,7 +144,7 @@ impl<M> Session<M> {
                 }
                 SessionEvent::Other(event) => event,
             };
-            state.on_event(event, self)?
+            on_event(state, event, self)?
         }
     }
 }

@@ -60,8 +60,8 @@ async fn main() -> anyhow::Result<()> {
         peer = Peer::new(
             buckets,
             MessageNet::new(socket_net.clone()),
-            control_session.sender(),
-            Worker::new_inline(crypto, Box::new(peer_session.sender())),
+            control_session.erased_sender(),
+            Worker::new_inline(crypto, Box::new(peer_session.erased_sender())),
         );
         let cancel = bootstrap_finished.clone();
         peer.bootstrap(Box::new(move || {
@@ -77,13 +77,13 @@ async fn main() -> anyhow::Result<()> {
         peer = Peer::new(
             buckets,
             MessageNet::new(socket_net.clone()),
-            control_session.sender(),
-            Worker::new_inline(seed_crypto, Box::new(peer_session.sender())),
+            control_session.erased_sender(),
+            Worker::new_inline(seed_crypto, Box::new(peer_session.erased_sender())),
         );
         bootstrap_finished.cancel(); // skip bootstrap on seed peer
     }
 
-    let mut peer_net = PeerNet(control_session.sender());
+    let mut peer_net = PeerNet(control_session.erased_sender());
     let hello_session = spawn({
         let mut peer_net = peer_net.clone();
         async move {
@@ -95,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let mut peer_sender = peer_session.sender();
+    let mut peer_sender = peer_session.erased_sender();
     let socket_session = socket_net.recv_session(|buf| {
         let message = bincode::options()
             .allow_trailing_bytes()
@@ -123,10 +123,10 @@ async fn main() -> anyhow::Result<()> {
 
     let mut control = Control::new(
         augustus::net::MessageNet::<_, Message>::new(socket_net.clone()),
-        peer_session.sender(),
+        peer_session.erased_sender(),
     );
-    let peer_session = peer_session.run(&mut peer);
-    let control_session = control_session.run(&mut control);
+    let peer_session = peer_session.erased_run(&mut peer);
+    let control_session = control_session.erased_run(&mut control);
     tokio::select! {
         result = socket_session => result?,
         result = peer_session => result?,

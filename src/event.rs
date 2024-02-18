@@ -2,8 +2,6 @@ pub mod session;
 
 use std::{fmt::Debug, time::Duration};
 
-use tokio::sync::mpsc::UnboundedSender;
-
 pub trait SendEvent<M> {
     fn send(&mut self, event: M) -> anyhow::Result<()>;
 }
@@ -41,30 +39,24 @@ impl<M> SendEvent<M> for Void {
     }
 }
 
-impl<N: Into<M>, M> SendEvent<N> for UnboundedSender<M> {
-    fn send(&mut self, event: N) -> anyhow::Result<()> {
-        UnboundedSender::send(self, event.into()).map_err(|_| anyhow::anyhow!("channel closed"))
-    }
-}
-
 pub type TimerId = u32;
 
 pub trait Timer<M> {
     fn set_dyn(
         &mut self,
-        duration: Duration,
+        period: Duration,
         event: Box<dyn FnMut() -> M + Send>,
     ) -> anyhow::Result<TimerId>;
 
     fn set(
         &mut self,
-        duration: Duration,
+        period: Duration,
         event: impl FnMut() -> M + Send + 'static,
     ) -> anyhow::Result<TimerId>
     where
         Self: Sized,
     {
-        self.set_dyn(duration, Box::new(event))
+        self.set_dyn(period, Box::new(event))
     }
 
     fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()>;
@@ -85,20 +77,16 @@ pub type Sender<M> = session::SessionSender<M>;
 
 // alternative design: type-erasure event
 pub mod erased {
-    use std::{collections::HashMap, time::Duration};
-
-    use tokio::{
-        sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-        task::{AbortHandle, JoinError, JoinSet},
-        time::interval,
-    };
+    use std::{fmt::Debug, time::Duration};
 
     use super::{SendEvent, TimerId};
+
+    pub type Event<S, T> = Box<dyn FnOnce(&mut S, &mut T) -> anyhow::Result<()> + Send + Sync>;
 
     pub trait Timer<S: ?Sized> {
         fn set<M: Clone + Send + Sync + 'static>(
             &mut self,
-            duration: Duration,
+            period: Duration,
             event: M,
         ) -> anyhow::Result<TimerId>
         where
@@ -109,6 +97,12 @@ pub mod erased {
 
     pub trait OnEvent<M> {
         fn on_event(&mut self, event: M, timer: &mut impl Timer<Self>) -> anyhow::Result<()>;
+    }
+
+    impl<S: SendEvent<M>, M> OnEvent<M> for S {
+        fn on_event(&mut self, event: M, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
+            self.send(event)
+        }
     }
 
     #[derive(Debug)]
@@ -126,8 +120,6 @@ pub mod erased {
         }
     }
 
-    type Event<S, T> = Box<dyn FnOnce(&mut S, &mut T) -> anyhow::Result<()> + Send + Sync>;
-
     impl<E: SendEvent<Event<S, T>>, S: OnEvent<M>, T: Timer<S>, M: Send + Sync + 'static>
         SendEvent<M> for Erasure<E, S, T>
     {
@@ -137,111 +129,16 @@ pub mod erased {
         }
     }
 
-    impl<S: SendEvent<M>, M> OnEvent<M> for S {
-        fn on_event(&mut self, event: M, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
-            self.send(event)
+    #[derive(derive_more::From)]
+    pub struct SessionEvent<S>(Event<S, super::Session<Self>>);
+
+    impl<S> Debug for SessionEvent<S> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("SessionEvent").finish_non_exhaustive()
         }
     }
 
-    pub struct Inline<'a, S: ?Sized, T: ?Sized>(pub &'a mut S, pub &'a mut T);
-
-    impl<S: OnEvent<M>, M, T: Timer<S>> SendEvent<M> for Inline<'_, S, T> {
-        fn send(&mut self, event: M) -> anyhow::Result<()> {
-            self.0.on_event(event, self.1)
-        }
-    }
-
-    // TODO convert to enum when there's second implementation
-    pub type Sender<S> = Erasure<SessionSender<S>, S, Session<S>>;
-
-    #[derive(Debug)]
-    pub struct SessionSender<S>(UnboundedSender<SessionEvent<S>>);
-
-    enum SessionEvent<S: ?Sized> {
-        Timer(TimerId, Event<S, Session<S>>),
-        Other(Event<S, Session<S>>),
-    }
-
-    impl<S> Clone for SessionSender<S> {
-        fn clone(&self) -> Self {
-            Self(self.0.clone())
-        }
-    }
-
-    impl<S> SendEvent<Event<S, Session<S>>> for SessionSender<S> {
-        fn send(&mut self, event: Event<S, Session<S>>) -> anyhow::Result<()> {
-            self.0
-                .send(SessionEvent::Other(event))
-                .map_err(|_| anyhow::anyhow!("channel closed"))
-        }
-    }
-
-    #[derive(Debug)]
-    pub struct Session<S: ?Sized> {
-        sender: UnboundedSender<SessionEvent<S>>,
-        receiver: UnboundedReceiver<SessionEvent<S>>,
-        timer_id: TimerId,
-        timer_sessions: JoinSet<anyhow::Result<()>>,
-        timer_handles: HashMap<TimerId, AbortHandle>,
-    }
-
-    impl<S> Session<S> {
-        pub fn new() -> Self {
-            let (sender, receiver) = unbounded_channel();
-            Self {
-                sender,
-                receiver,
-                timer_id: 0,
-                timer_sessions: JoinSet::new(),
-                timer_handles: Default::default(),
-            }
-        }
-    }
-
-    impl<S> Default for Session<S> {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    impl<S> Session<S> {
-        pub fn sender(&self) -> Sender<S> {
-            Erasure::from(SessionSender(self.sender.clone()))
-        }
-
-        pub async fn run(&mut self, state: &mut S) -> anyhow::Result<()> {
-            loop {
-                enum Select<M> {
-                    JoinNext(Result<anyhow::Result<()>, JoinError>),
-                    Recv(Option<SessionEvent<M>>),
-                }
-                let event = match tokio::select! {
-                    Some(result) = self.timer_sessions.join_next() => Select::JoinNext(result),
-                    recv = self.receiver.recv() => Select::Recv(recv)
-                } {
-                    Select::JoinNext(Err(err)) if err.is_cancelled() => continue,
-                    Select::JoinNext(result) => {
-                        result??;
-                        continue;
-                    }
-                    Select::Recv(event) => event.ok_or(anyhow::anyhow!("channel closed"))?,
-                };
-                let event = match event {
-                    SessionEvent::Timer(timer_id, event) => {
-                        if self.timer_handles.contains_key(&timer_id) {
-                            event
-                        } else {
-                            continue;
-                        }
-                    }
-                    SessionEvent::Other(event) => event,
-                };
-                event(state, self)?
-            }
-        }
-    }
-
-    impl<S: ?Sized + 'static> Timer<S> for Session<S> {
+    impl<S: 'static> Timer<S> for super::Session<SessionEvent<S>> {
         fn set<M: Clone + Send + Sync + 'static>(
             &mut self,
             period: Duration,
@@ -250,43 +147,36 @@ pub mod erased {
         where
             S: OnEvent<M>,
         {
-            self.timer_id += 1;
-            let timer_id = self.timer_id;
-            let mut sender = self.sender.clone();
-            let handle = self.timer_sessions.spawn(async move {
-                let mut interval = interval(period);
-                loop {
-                    interval.tick().await;
-                    let event = event.clone();
-                    let event = move |state: &mut S, timer: &mut _| state.on_event(event, timer);
-                    SendEvent::send(&mut sender, SessionEvent::Timer(timer_id, Box::new(event)))?
-                }
-            });
-            self.timer_handles.insert(timer_id, handle);
-            Ok(timer_id)
+            super::Timer::set(self, period, move || {
+                let event = event.clone();
+                let event = move |state: &mut S, timer: &mut _| state.on_event(event, timer);
+                SessionEvent(Box::new(event))
+            })
         }
 
         fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()> {
-            Session::unset(self, timer_id)
+            super::Timer::unset(self, timer_id)
         }
     }
 
-    impl<S: ?Sized> Session<S> {
-        fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()> {
-            self.timer_handles
-                .remove(&timer_id)
-                .ok_or(anyhow::anyhow!("timer not exists"))?
-                .abort();
-            Ok(())
+    pub type Session<S> = super::Session<SessionEvent<S>>;
+    pub type SessionSender<S> = Erasure<super::Sender<SessionEvent<S>>, S, Session<S>>;
+
+    // TODO convert to enum when there's second implementation
+    pub type Sender<S> = SessionSender<S>;
+
+    impl<S> Session<S> {
+        pub fn erased_sender(&self) -> Sender<S> {
+            Erasure(self.sender(), Default::default())
         }
     }
 
-    // JoinSet should automatically abort remaining task on drop
-    // impl<S: ?Sized> Drop for Session<S> {
-    //     fn drop(&mut self) {
-    //         while let Some(timer_id) = self.timers.keys().next() {
-    //             self.unset(*timer_id).unwrap()
-    //         }
-    //     }
-    // }
+    impl<S: 'static> Session<S> {
+        pub async fn erased_run(&mut self, state: &mut S) -> anyhow::Result<()> {
+            self.run_internal(state, |state, SessionEvent(event), timer| {
+                event(state, timer)
+            })
+            .await
+        }
+    }
 }
