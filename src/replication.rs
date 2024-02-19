@@ -8,7 +8,10 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    event::{erased::{OnEvent, Timer}, SendEvent},
+    event::{
+        erased::{OnEvent, Timer},
+        SendEvent,
+    },
     net::{Addr, SendMessage, SendMessageToEach, SendMessageToEachExt as _},
 };
 
@@ -91,8 +94,11 @@ impl<E> OnEvent<InvokeOk> for Concurrent<E>
 where
     E: SendEvent<Invoke>,
 {
-    fn on_event(&mut self, event: InvokeOk, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
-        let (client_id, _result) = event;
+    fn on_event(
+        &mut self,
+        (client_id, _result): InvokeOk,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
         let Some(sender) = self.client_senders.get_mut(&client_id) else {
             anyhow::bail!("unknown client id {client_id}")
         };

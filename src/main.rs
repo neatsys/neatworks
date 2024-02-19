@@ -143,6 +143,7 @@ async fn client_session<S: OnEvent<Invoke> + Send + Sync + 'static>(
     for client_id in repeat_with(rand::random).take(1) {
         let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
         let addr = socket.local_addr()?;
+        println!("Client {client_id:08x} bind to {addr}");
         let net = Udp(socket.into());
         let mut state = new_client(
             client_id,
@@ -206,9 +207,9 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
         match config.protocol {
             Protocol::Unreplicated => {
                 assert_eq!(config.replica_id, 0);
-                let state = unreplicated::Replica::new(
+                let state = unreplicated::erased::Replica::new(
                     Null,
-                    unreplicated::ToClientMessageNet::new(net.clone()),
+                    Box::new(unreplicated::ToClientMessageNet::new(net.clone())),
                 );
                 runtime.block_on(replica_session(
                     state,

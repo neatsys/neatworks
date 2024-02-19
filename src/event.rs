@@ -22,11 +22,11 @@ pub trait OnEvent<M> {
 // of implementing the two traits
 // should always prefer to implement OnEvent for event consumers even if they
 // don't make use of timers
-impl<T: SendEvent<M>, M> OnEvent<M> for T {
-    fn on_event(&mut self, event: M, _: &mut impl Timer<M>) -> anyhow::Result<()> {
-        self.send(event)
-    }
-}
+// impl<T: SendEvent<M>, M> OnEvent<M> for T {
+//     fn on_event(&mut self, event: M, _: &mut impl Timer<M>) -> anyhow::Result<()> {
+//         self.send(event)
+//     }
+// }
 
 // OnEvent -> SendEvent cannot be trivially converted because a timer service is involved
 
@@ -120,11 +120,11 @@ pub mod erased {
             Self: Sized;
     }
 
-    impl<S: SendEvent<M>, M> OnEvent<M> for S {
-        fn on_event(&mut self, event: M, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
-            self.send(event)
-        }
-    }
+    // impl<S: SendEvent<M>, M> OnEvent<M> for S {
+    //     fn on_event(&mut self, event: M, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
+    //         self.send(event)
+    //     }
+    // }
 
     #[derive(Debug)]
     pub struct Erasure<E, S, T>(E, std::marker::PhantomData<(S, T)>);

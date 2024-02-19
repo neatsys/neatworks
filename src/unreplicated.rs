@@ -224,7 +224,7 @@ pub mod erased {
         replication::{Invoke, Request},
     };
 
-    use super::{ClientUpcall, Replica, Reply, ToClientNet, ToReplicaNet};
+    use super::{ClientUpcall, Reply, ToClientNet, ToReplicaNet};
 
     pub type Client<A> = super::Client<
         Box<dyn ToReplicaNet<A> + Send + Sync>,
@@ -262,7 +262,9 @@ pub mod erased {
         }
     }
 
-    impl<S: App, N: ToClientNet<A>, A> OnEvent<Recv<Request<A>>> for Replica<S, N, A> {
+    pub type Replica<S, A> = super::Replica<S, Box<dyn ToClientNet<A> + Send + Sync>, A>;
+
+    impl<S: App, N: ToClientNet<A>, A> OnEvent<Recv<Request<A>>> for super::Replica<S, N, A> {
         fn on_event(
             &mut self,
             Recv(request): Recv<Request<A>>,
