@@ -23,7 +23,7 @@ pub struct Request<A> {
     pub op: Vec<u8>,
 }
 
-pub struct Concurrent<E> {
+pub struct CloseLoop<E> {
     client_senders: HashMap<u32, E>,
     pub latencies: Vec<Duration>,
     invoke_instants: HashMap<u32, Instant>,
@@ -32,7 +32,7 @@ pub struct Concurrent<E> {
 
 type ConcurrentStop = Box<dyn FnOnce() -> anyhow::Result<()> + Send + Sync>;
 
-impl<E> Debug for Concurrent<E> {
+impl<E> Debug for CloseLoop<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Concurrent")
             .field("<count>", &self.latencies.len())
@@ -40,7 +40,7 @@ impl<E> Debug for Concurrent<E> {
     }
 }
 
-impl<E> Concurrent<E> {
+impl<E> CloseLoop<E> {
     pub fn new() -> Self {
         Self {
             client_senders: Default::default(),
@@ -51,13 +51,13 @@ impl<E> Concurrent<E> {
     }
 }
 
-impl<E> Default for Concurrent<E> {
+impl<E> Default for CloseLoop<E> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<E> Concurrent<E> {
+impl<E> CloseLoop<E> {
     pub fn insert_client_sender(&mut self, client_id: u32, sender: E) -> anyhow::Result<()> {
         let replaced = self.client_senders.insert(client_id, sender);
         if replaced.is_none() {
@@ -77,7 +77,7 @@ pub struct Invoke(pub Vec<u8>);
 
 pub type InvokeOk = (u32, Vec<u8>);
 
-impl<E> Concurrent<E>
+impl<E> CloseLoop<E>
 where
     E: SendEvent<Invoke>,
 {
@@ -90,7 +90,7 @@ where
     }
 }
 
-impl<E> OnEvent<InvokeOk> for Concurrent<E>
+impl<E> OnEvent<InvokeOk> for CloseLoop<E>
 where
     E: SendEvent<Invoke>,
 {

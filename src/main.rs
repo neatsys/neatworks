@@ -12,7 +12,7 @@ use augustus::{
     event::erased::{OnEvent, Sender, Session, SessionSender},
     net::Udp,
     pbft,
-    replication::{Concurrent, Invoke, ReplicaNet},
+    replication::{CloseLoop, Invoke, ReplicaNet},
     unreplicated,
     worker::erased::spawn_backend,
 };
@@ -128,17 +128,17 @@ async fn start_client(State(state): State<AppState>, Json(config): Json<ClientCo
 }
 
 async fn client_session<S: OnEvent<Invoke> + Send + Sync + 'static>(
-    mut new_client: impl FnMut(u32, SocketAddr, Udp, SessionSender<Concurrent<SessionSender<S>>>) -> S,
+    mut new_client: impl FnMut(u32, SocketAddr, Udp, SessionSender<CloseLoop<SessionSender<S>>>) -> S,
     on_buf: impl Fn(&[u8], &mut Sender<S>) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
     benchmark_result: Arc<Mutex<Option<BenchmarkResult>>>,
 ) -> anyhow::Result<()> {
-    let mut concurrent = Concurrent::new();
+    let mut concurrent = CloseLoop::new();
     // let cancel = CancellationToken::new();
     // concurrent.insert_max_count(std::num::NonZeroUsize::new(1).unwrap(), {
     //     let cancel = cancel.clone();
     //     Box::new(move || Ok(cancel.cancel()))
     // });
-    let mut concurrent_session = Session::<Concurrent<_>>::new();
+    let mut concurrent_session = Session::<CloseLoop<_>>::new();
     let mut sessions = JoinSet::new();
     for client_id in repeat_with(rand::random).take(1) {
         let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;

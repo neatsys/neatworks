@@ -6,12 +6,16 @@ use augustus::{
     app::Null,
     event::{erased, Session},
     net::Udp,
-    replication::{Concurrent, ReplicaNet},
+    replication::{CloseLoop, ReplicaNet},
     unreplicated::{
         self, to_client_on_buf, Client, Replica, ToClientMessageNet, ToReplicaMessageNet,
     },
 };
-use tokio::{net::UdpSocket, runtime, signal::ctrl_c, task::JoinSet, time::sleep};
+use tokio::{
+    net::UdpSocket, runtime, signal::ctrl_c, sync::mpsc::unbounded_channel, task::JoinSet,
+    time::sleep,
+};
+use tokio_util::sync::CancellationToken;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
@@ -55,14 +59,18 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let replica_addrs = vec![SocketAddr::new([10, 0, 0, 1].into(), 4000)];
-    let mut concurrent = Concurrent::new();
-    let mut concurrent_session = erased::Session::new();
-    let mut state_sessions = JoinSet::new();
-    let state_runtime = runtime::Builder::new_multi_thread().enable_all().build()?;
-    for id in repeat_with(rand::random).take(1) {
+    let mut sessions = JoinSet::new();
+    let runtime = runtime::Builder::new_multi_thread().enable_all().build()?;
+    let (count_sender, mut count_receiver) = unbounded_channel();
+    let cancel = CancellationToken::new();
+    for id in repeat_with(rand::random).take(40) {
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
         let addr = SocketAddr::new([10, 0, 0, 2].into(), socket.local_addr()?.port());
         let raw_net = Udp(socket.into());
+
+        let mut close_loop = CloseLoop::new();
+        let mut close_loop_session = erased::Session::new();
+
         let mut state = Client::new(
             id,
             addr,
@@ -71,34 +79,52 @@ async fn main() -> anyhow::Result<()> {
                 replica_addrs.clone(),
                 None,
             )),
-            concurrent_session.erased_sender(),
+            close_loop_session.erased_sender(),
         );
         let mut state_session = Session::new();
-        concurrent.insert_client_sender(id, state_session.sender())?;
+        close_loop.insert_client_sender(id, state_session.sender())?;
         let mut state_sender = state_session.sender();
-        state_sessions.spawn_on(
+        sessions.spawn_on(
             async move {
                 raw_net
                     .recv_session(|buf| to_client_on_buf(buf, &mut state_sender))
                     .await
             },
-            state_runtime.handle(),
+            runtime.handle(),
         );
-        state_sessions.spawn_on(
+        sessions.spawn_on(
             async move { state_session.run(&mut state).await },
-            state_runtime.handle(),
+            runtime.handle(),
+        );
+        let cancel = cancel.clone();
+        let count_sender = count_sender.clone();
+        sessions.spawn_on(
+            async move {
+                close_loop.launch()?;
+                tokio::select! {
+                    result = close_loop_session.erased_run(&mut close_loop) => result?,
+                    () = cancel.cancelled() => {}
+                }
+                let _ = count_sender.send(close_loop.latencies.len());
+                Ok(())
+            },
+            runtime.handle(),
         );
     }
-    concurrent.launch()?;
-    let concurrent_session = concurrent_session.erased_run(&mut concurrent);
     'select: {
         tokio::select! {
-            Some(result) = state_sessions.join_next() => result??,
-            result = concurrent_session => result?,
+            Some(result) = sessions.join_next() => result??,
             () = sleep(Duration::from_secs(10)) => break 'select,
         }
+        anyhow::bail!("unexpected shutdown")
     }
-    state_runtime.shutdown_background();
-    // TODO
+    cancel.cancel();
+    drop(count_sender);
+    let mut total_count = 0;
+    while let Some(count) = count_receiver.recv().await {
+        total_count += count
+    }
+    runtime.shutdown_background();
+    println!("{} ops/sec", total_count as f32 / 10.);
     Ok(())
 }
