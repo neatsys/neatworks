@@ -243,7 +243,7 @@ pub mod erased {
     }
 
     #[derive(Debug, Clone)]
-    struct Resend;
+    pub struct Resend;
 
     impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> OnEvent<Resend> for super::Client<N, U, A> {
         fn on_event(&mut self, Resend: Resend, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
@@ -290,20 +290,25 @@ pub mod erased {
 }
 
 pub mod check {
-    use std::collections::{BTreeMap, VecDeque};
+    use std::{
+        any::Any,
+        collections::{BTreeMap, VecDeque},
+        mem::replace,
+        sync::mpsc::{channel, Receiver, Sender},
+    };
 
     use serde::{Deserialize, Serialize};
 
     use crate::{
         app::KVStore,
-        event::SendEvent,
+        event::{erased::OnEvent, SendEvent, TimerId},
         net::SendMessage,
         replication::{check::DryCloseLoop, CloseLoop, Invoke, InvokeOk, ReplicaNet, Request},
     };
 
     use super::{erased, ClientInvoke, Reply};
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
     pub enum Addr {
         Client(usize),
         Replica,
@@ -313,15 +318,31 @@ pub mod check {
         clients: Vec<erased::Client<Addr>>,
         close_loops: Vec<CloseLoop<I>>,
         replica: erased::Replica<KVStore, Addr>,
+
         message_events: Vec<Event>,
-        timer_events: BTreeMap<Addr, VecDeque<Event>>,
+        timer_events: BTreeMap<Addr, VecDeque<(u32, Event)>>,
+        timer_id: u32,
+
+        transient_events: Receiver<Event>,
+        transient_invokes: Vec<Receiver<Invoke>>,
+        transient_upcalls: Vec<Receiver<InvokeOk>>,
     }
 
     #[derive(Clone)]
     pub enum Event {
-        MessageRequest(Addr, Request<Addr>),
-        MessageReply(Addr, Reply),
-        TimerResend(Addr),
+        Message(Addr, MessageEvent),
+        Timer(u32, TimerEvent),
+    }
+
+    #[derive(Clone)]
+    pub enum MessageEvent {
+        Request(Request<Addr>),
+        Reply(Reply),
+    }
+
+    #[derive(Clone)]
+    pub enum TimerEvent {
+        Resend,
     }
 
     #[derive(PartialEq, Eq, Hash)]
@@ -370,58 +391,65 @@ pub mod check {
         }
     }
 
-    pub struct Recorder<M>(Vec<M>);
+    pub struct Transient<M>(Sender<M>);
 
-    impl<M> Recorder<M> {
-        pub fn new() -> Self {
-            Self(Default::default())
-        }
-    }
-
-    impl<M> Default for Recorder<M> {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    impl<N: Into<M>, M> SendEvent<N> for Recorder<M> {
+    impl<N: Into<M>, M> SendEvent<N> for Transient<M> {
         fn send(&mut self, event: N) -> anyhow::Result<()> {
-            self.0.push(event.into());
+            self.0.send(event.into()).unwrap();
             Ok(())
         }
     }
 
-    impl<A, N: Into<M>, M> SendMessage<A, N> for Recorder<(A, M)> {
-        fn send(&mut self, dest: A, message: N) -> anyhow::Result<()> {
-            self.0.push((dest, message.into()));
+    impl SendMessage<Addr, Request<Addr>> for Transient<Event> {
+        fn send(&mut self, dest: Addr, message: Request<Addr>) -> anyhow::Result<()> {
+            self.0
+                .send(Event::Message(dest, MessageEvent::Request(message)))
+                .unwrap();
+            Ok(())
+        }
+    }
+
+    impl SendMessage<Addr, Reply> for Transient<Event> {
+        fn send(&mut self, dest: Addr, message: Reply) -> anyhow::Result<()> {
+            self.0
+                .send(Event::Message(dest, MessageEvent::Reply(message)))
+                .unwrap();
             Ok(())
         }
     }
 
     impl<I> State<I> {
         pub fn new(num_client: usize) -> Self {
-            let clients = (0..num_client)
-                .map(|i| {
-                    erased::Client::new(
-                        1000 + i as u32,
-                        Addr::Client(i),
-                        Box::new(ReplicaNet::new(
-                            Recorder::<(_, Request<_>)>::new(),
-                            vec![Addr::Replica],
-                            None,
-                        )),
-                        Box::new(Recorder::<InvokeOk>::new()),
-                    )
-                })
-                .collect();
+            let (transient_event_sender, transient_event_receiver) = channel();
+            let mut clients = Vec::new();
+            let mut transient_upcalls = Vec::new();
+
+            for i in 0..num_client {
+                let (transient_upcall_sender, transient_upcall_receiver) = channel();
+                let client = erased::Client::new(
+                    1000 + i as u32,
+                    Addr::Client(i),
+                    Box::new(ReplicaNet::new(
+                        Transient(transient_event_sender.clone()),
+                        vec![Addr::Replica],
+                        None,
+                    )),
+                    Box::new(Transient(transient_upcall_sender)),
+                );
+                transient_upcalls.push(transient_upcall_receiver)
+            }
             let replica =
-                erased::Replica::new(KVStore::new(), Box::new(Recorder::<(_, Reply)>::new()));
+                erased::Replica::new(KVStore::new(), Box::new(Transient(transient_event_sender)));
             Self {
                 clients,
                 replica,
+                transient_events: transient_event_receiver,
+                transient_upcalls,
                 close_loops: Default::default(),
                 message_events: Default::default(),
                 timer_events: Default::default(),
+                timer_id: 0,
+                transient_invokes: Default::default(),
             }
         }
 
@@ -429,12 +457,14 @@ pub mod check {
             if self.close_loops.len() == self.clients.len() {
                 anyhow::bail!("more workload than client")
             }
+            let (transient_invoke_sender, transient_invoke_receiver) = channel();
             let mut close_loop = CloseLoop::new(workload);
             close_loop.insert_client(
                 1000 + self.close_loops.len() as u32,
-                Recorder::<Invoke>::new(),
+                Transient(transient_invoke_sender),
             )?;
             self.close_loops.push(close_loop);
+            self.transient_invokes.push(transient_invoke_receiver);
             Ok(())
         }
     }
@@ -445,7 +475,7 @@ pub mod check {
         fn events(&self) -> Vec<Self::Event> {
             let mut events = self.message_events.clone();
             for timer_events in self.timer_events.values() {
-                if let Some(event) = timer_events.front() {
+                if let Some((_, event)) = timer_events.front() {
                     events.push(event.clone())
                 }
             }
@@ -453,43 +483,117 @@ pub mod check {
         }
 
         fn duplicate(&self) -> anyhow::Result<Self> {
-            let clients = self
-                .clients
-                .iter()
-                .map(|client| erased::Client {
+            let (transient_event_sender, transient_event_receiver) = channel();
+            let mut clients = Vec::new();
+            let mut transient_upcalls = Vec::new();
+
+            for client in &self.clients {
+                let (transient_upcall_sender, transient_upcall_receiver) = channel();
+                let client = erased::Client {
                     id: client.id,
                     addr: client.addr,
                     seq: client.seq,
                     invoke: client.invoke.clone(),
                     net: Box::new(ReplicaNet::new(
-                        Recorder::<(_, Request<_>)>::new(),
+                        Transient(transient_event_sender.clone()),
                         vec![Addr::Replica],
                         None,
                     )),
-                    upcall: Box::new(Recorder::<InvokeOk>::new()),
-                })
-                .collect();
-            let close_loops = self
-                .close_loops
-                .iter()
-                .map(|close_loop| close_loop.duplicate(Recorder::<Invoke>::new))
-                .collect::<Result<_, _>>()?;
+                    upcall: Box::new(Transient(transient_upcall_sender)),
+                };
+                clients.push(client);
+                transient_upcalls.push(transient_upcall_receiver)
+            }
+
+            let mut close_loops = Vec::new();
+            let mut transient_invokes = Vec::new();
+            for close_loop in &self.close_loops {
+                let (transient_invoke_sender, transient_invoke_receiver) = channel();
+                let close_loop =
+                    close_loop.duplicate(|| Transient(transient_invoke_sender.clone()))?;
+                close_loops.push(close_loop);
+                transient_invokes.push(transient_invoke_receiver);
+            }
+
             let replica = erased::Replica {
                 replies: self.replica.replies.clone(),
                 app: self.replica.app.clone(),
-                net: Box::new(Recorder::<(_, Reply)>::new()),
+                net: Box::new(Transient(transient_event_sender)),
                 _addr_marker: Default::default(),
             };
+
             Ok(Self {
                 clients,
                 close_loops,
                 replica,
                 message_events: self.message_events.clone(),
                 timer_events: self.timer_events.clone(),
+                timer_id: self.timer_id,
+                transient_events: transient_event_receiver,
+                transient_invokes,
+                transient_upcalls,
             })
         }
 
         fn step(&mut self, event: Self::Event) -> anyhow::Result<()> {
+            todo!()
+        }
+    }
+
+    impl<I: Iterator<Item = Vec<u8>>> State<I> {
+        fn flush(&mut self) -> anyhow::Result<()> {
+            let mut run = true;
+            while replace(&mut run, false) {
+                for event in self.transient_events.try_iter() {
+                    assert!(matches!(event, Event::Message(..)));
+                    self.message_events.push(event)
+                }
+                for (i, transient_invokes) in self.transient_invokes.iter().enumerate() {
+                    for invoke in transient_invokes {
+                        let mut timer = Timer {
+                            timer_events: &mut self.timer_events,
+                            timer_id: &mut self.timer_id,
+                        };
+                        self.clients[i].on_event(invoke, &mut timer)?;
+                        run = true
+                    }
+                }
+                for (i, transient_upcalls) in self.transient_upcalls.iter().enumerate() {
+                    for upcall in transient_upcalls {
+                        let mut timer = Timer {
+                            timer_events: &mut self.timer_events,
+                            timer_id: &mut self.timer_id,
+                        };
+                        // self.close_loops[i].on_event(upcall, &mut timer)?;
+                        run = true
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    struct Timer<'a> {
+        timer_events: &'a mut BTreeMap<Addr, VecDeque<(u32, Event)>>,
+        timer_id: &'a mut u32,
+    }
+
+    impl crate::event::erased::Timer<erased::Client<Addr>> for Timer<'_> {
+        fn set<M: Clone + Send + Sync + 'static>(
+            &mut self,
+            period: std::time::Duration,
+            event: M,
+        ) -> anyhow::Result<TimerId>
+        where
+            erased::Client<Addr>: OnEvent<M>,
+        {
+            if (&event as &dyn Any).is::<erased::Resend>() {
+                return Ok(TimerId(0));
+            }
+            Err(anyhow::anyhow!("expected event type"))
+        }
+
+        fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()> {
             todo!()
         }
     }

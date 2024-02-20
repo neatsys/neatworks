@@ -45,7 +45,7 @@ impl<M> SendEvent<M> for Void {
 // anymore
 // this does not solve leak though so Clone is permitted
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct TimerId(u32);
+pub struct TimerId(pub u32);
 
 pub trait Timer<M> {
     fn set_dyn(
