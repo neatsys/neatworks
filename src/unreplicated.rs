@@ -306,7 +306,9 @@ pub mod check {
             SendEvent, TimerId,
         },
         net::{events::Recv, SendMessage},
-        replication::{check::DryCloseLoop, CloseLoop, Invoke, InvokeOk, ReplicaNet, Request},
+        replication::{
+            check::DryCloseLoop, CloseLoop, Invoke, InvokeOk, ReplicaNet, Request, Workload,
+        },
     };
 
     use super::{erased, ClientInvoke, Reply};
@@ -326,6 +328,7 @@ pub mod check {
         timer_events: BTreeMap<Addr, VecDeque<TimerEvent>>,
         timer_id: u32,
 
+        transient_net: Transient<MessageEvent>,
         transient_message_events: Receiver<MessageEvent>,
         transient_invokes: Vec<Receiver<Invoke>>,
         transient_upcalls: Vec<Receiver<InvokeOk>>,
@@ -409,6 +412,12 @@ pub mod check {
 
     pub struct Transient<M>(Sender<M>);
 
+    impl<M> Clone for Transient<M> {
+        fn clone(&self) -> Self {
+            Self(self.0.clone())
+        }
+    }
+
     impl<N: Into<M>, M> SendEvent<N> for Transient<M> {
         fn send(&mut self, event: N) -> anyhow::Result<()> {
             self.0.send(event.into()).unwrap();
@@ -440,60 +449,59 @@ pub mod check {
         }
     }
 
-    impl<I> State<I> {
-        pub fn new(num_client: usize) -> Self {
-            let (transient_event_sender, transient_event_receiver) = channel();
-            let mut clients = Vec::new();
-            let mut transient_upcalls = Vec::new();
+    impl<I> Default for State<I> {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
 
-            for i in 0..num_client {
-                let (transient_upcall_sender, transient_upcall_receiver) = channel();
-                let client = erased::Client::new(
-                    1000 + i as u32,
-                    Addr::Client(i),
-                    Box::new(ReplicaNet::new(
-                        Transient(transient_event_sender.clone()),
-                        vec![Addr::Replica],
-                        None,
-                    )),
-                    Box::new(Transient(transient_upcall_sender)),
-                );
-                clients.push(client);
-                transient_upcalls.push(transient_upcall_receiver)
-            }
-            let replica =
-                erased::Replica::new(KVStore::new(), Box::new(Transient(transient_event_sender)));
+    impl<I> State<I> {
+        pub fn new() -> Self {
+            let (transient_event_sender, transient_event_receiver) = channel();
+            let transient_net = Transient(transient_event_sender);
+            let replica = erased::Replica::new(KVStore::new(), Box::new(transient_net.clone()));
             Self {
-                clients,
                 replica,
+                transient_net,
                 transient_message_events: transient_event_receiver,
-                transient_upcalls,
+                clients: Default::default(),
                 close_loops: Default::default(),
                 message_events: Default::default(),
                 timer_events: Default::default(),
                 timer_id: 0,
+                transient_upcalls: Default::default(),
                 transient_invokes: Default::default(),
             }
         }
 
-        pub fn push_workload(&mut self, workload: I) -> anyhow::Result<()> {
-            if self.close_loops.len() == self.clients.len() {
-                anyhow::bail!("more workload than client")
-            }
+        pub fn push_client(&mut self, workload: I) -> anyhow::Result<()> {
+            let index = self.clients.len();
+            let id = index as u32 + 1000;
+            let (transient_upcall_sender, transient_upcall_receiver) = channel();
+            let client = erased::Client::new(
+                id,
+                Addr::Client(index),
+                Box::new(ReplicaNet::new(
+                    self.transient_net.clone(),
+                    vec![Addr::Replica],
+                    None,
+                )),
+                Box::new(Transient(transient_upcall_sender)),
+            );
+            self.clients.push(client);
+            self.transient_upcalls.push(transient_upcall_receiver);
+
             let (transient_invoke_sender, transient_invoke_receiver) = channel();
             let mut close_loop = CloseLoop::new(workload);
             close_loop.invocations.get_or_insert_with(Default::default);
-            close_loop.insert_client(
-                1000 + self.close_loops.len() as u32,
-                Transient(transient_invoke_sender),
-            )?;
+            close_loop.insert_client(id, Transient(transient_invoke_sender))?;
             self.close_loops.push(close_loop);
             self.transient_invokes.push(transient_invoke_receiver);
             Ok(())
         }
     }
 
-    impl<I: Clone + Iterator<Item = Vec<u8>>> crate::search::State for State<I> {
+    impl<I: Clone + Iterator<Item = Workload>> crate::search::State for State<I> {
         type Event = Event;
 
         fn events(&self) -> Vec<Self::Event> {
@@ -513,6 +521,7 @@ pub mod check {
 
         fn duplicate(&self) -> anyhow::Result<Self> {
             let (transient_event_sender, transient_event_receiver) = channel();
+            let transient_net = Transient(transient_event_sender);
             let mut clients = Vec::new();
             let mut transient_upcalls = Vec::new();
 
@@ -524,7 +533,7 @@ pub mod check {
                     seq: client.seq,
                     invoke: client.invoke.clone(),
                     net: Box::new(ReplicaNet::new(
-                        Transient(transient_event_sender.clone()),
+                        transient_net.clone(),
                         vec![Addr::Replica],
                         None,
                     )),
@@ -547,7 +556,7 @@ pub mod check {
             let replica = erased::Replica {
                 replies: self.replica.replies.clone(),
                 app: self.replica.app.clone(),
-                net: Box::new(Transient(transient_event_sender)),
+                net: Box::new(transient_net.clone()),
                 _addr_marker: Default::default(),
             };
 
@@ -558,6 +567,7 @@ pub mod check {
                 message_events: self.message_events.clone(),
                 timer_events: self.timer_events.clone(),
                 timer_id: self.timer_id,
+                transient_net,
                 transient_message_events: transient_event_receiver,
                 transient_invokes,
                 transient_upcalls,
@@ -605,7 +615,7 @@ pub mod check {
         }
     }
 
-    impl<I: Iterator<Item = Vec<u8>>> State<I> {
+    impl<I: Iterator<Item = Workload>> State<I> {
         pub fn launch(&mut self) -> anyhow::Result<()> {
             if self.close_loops.len() != self.clients.len() {
                 anyhow::bail!("workload number does not match client number")

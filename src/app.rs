@@ -31,7 +31,7 @@ pub enum KVStoreOp {
     Append(String, String),
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KVStoreResult {
     PutOk,
     GetResult(String),

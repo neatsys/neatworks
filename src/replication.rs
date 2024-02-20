@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    fmt::Debug,
+    fmt::{Debug, Display},
     time::{Duration, Instant},
 };
 
@@ -30,11 +30,11 @@ pub type InvokeOk = (u32, Vec<u8>);
 
 pub struct CloseLoop<I> {
     clients: HashMap<u32, Box<dyn SendEvent<Invoke> + Send + Sync>>,
-    op_iter: I,
+    workload_iter: I,
     pub latencies: Option<Vec<Duration>>,
     invoke_instants: HashMap<u32, Instant>,
     pub invocations: Option<Vec<(Vec<u8>, Vec<u8>)>>,
-    invoke_ops: HashMap<u32, Vec<u8>>,
+    invoke_workloads: HashMap<u32, (Vec<u8>, Option<Vec<u8>>)>,
     pub stop: Option<CloseLoopStop>,
     pub done: bool,
 }
@@ -47,15 +47,17 @@ impl<I> Debug for CloseLoop<I> {
     }
 }
 
+pub type Workload = (Vec<u8>, Option<Vec<u8>>);
+
 impl<I> CloseLoop<I> {
-    pub fn new(op_iter: I) -> Self {
+    pub fn new(workload_iter: I) -> Self {
         Self {
-            op_iter,
+            workload_iter,
             clients: Default::default(),
             latencies: Default::default(),
             invoke_instants: Default::default(),
             invocations: Default::default(),
-            invoke_ops: Default::default(),
+            invoke_workloads: Default::default(),
             stop: None,
             done: false,
         }
@@ -84,7 +86,7 @@ impl<I: Clone> CloseLoop<I> {
             anyhow::bail!("real time close loop is not for model checking")
         }
         Ok(Self {
-            op_iter: self.op_iter.clone(),
+            workload_iter: self.workload_iter.clone(),
             clients: self
                 .clients
                 .keys()
@@ -94,22 +96,23 @@ impl<I: Clone> CloseLoop<I> {
             latencies: None,
             invoke_instants: Default::default(),
             invocations: self.invocations.clone(),
-            invoke_ops: self.invoke_ops.clone(),
+            invoke_workloads: self.invoke_workloads.clone(),
             stop: None,
             done: self.done,
         })
     }
 }
 
-impl<I: Iterator<Item = Vec<u8>>> CloseLoop<I> {
+impl<I: Iterator<Item = Workload>> CloseLoop<I> {
     pub fn launch(&mut self) -> anyhow::Result<()> {
         for (client_id, sender) in &mut self.clients {
-            let op = self
-                .op_iter
+            let (op, expected_result) = self
+                .workload_iter
                 .next()
                 .ok_or(anyhow::anyhow!("not enough op"))?;
             if self.invocations.is_some() {
-                self.invoke_ops.insert(*client_id, op.clone());
+                self.invoke_workloads
+                    .insert(*client_id, (op.clone(), expected_result));
             }
             if self.latencies.is_some() {
                 self.invoke_instants.insert(*client_id, Instant::now());
@@ -120,7 +123,21 @@ impl<I: Iterator<Item = Vec<u8>>> CloseLoop<I> {
     }
 }
 
-impl<I: Iterator<Item = Vec<u8>>> OnEvent<InvokeOk> for CloseLoop<I> {
+#[derive(Debug)]
+pub struct UnexpectedResult {
+    pub expect: Vec<u8>,
+    pub actual: Vec<u8>,
+}
+
+impl Display for UnexpectedResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl std::error::Error for UnexpectedResult {}
+
+impl<I: Iterator<Item = Workload>> OnEvent<InvokeOk> for CloseLoop<I> {
     fn on_event(
         &mut self,
         (client_id, result): InvokeOk,
@@ -138,19 +155,27 @@ impl<I: Iterator<Item = Vec<u8>>> OnEvent<InvokeOk> for CloseLoop<I> {
                 ))?;
             latencies.push(replaced_instant.elapsed())
         }
-        let op = self.op_iter.next();
+        let workload = self.workload_iter.next();
         if let Some(invocations) = &mut self.invocations {
-            let replaced_op = if let Some(op) = &op {
-                self.invoke_ops.insert(client_id, op.clone())
+            let (replaced_op, replaced_expected_result) = if let Some(workload) = &workload {
+                self.invoke_workloads.insert(client_id, workload.clone())
             } else {
-                self.invoke_ops.remove(&client_id)
+                self.invoke_workloads.remove(&client_id)
             }
             .ok_or(anyhow::anyhow!(
-                "missing invocation op of client id {client_id}"
+                "missing invocation record of client id {client_id}"
             ))?;
+            if let Some(expected_result) = replaced_expected_result {
+                if result != expected_result {
+                    Err(UnexpectedResult {
+                        expect: expected_result,
+                        actual: result.clone(),
+                    })?
+                }
+            }
             invocations.push((replaced_op, result))
         }
-        if let Some(op) = op {
+        if let Some((op, _)) = workload {
             sender.send(Invoke(op))
         } else {
             self.done = true;
