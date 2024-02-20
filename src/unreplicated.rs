@@ -9,7 +9,7 @@ use crate::{
     replication::{Invoke, Request},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Reply {
     seq: u32,
     result: Vec<u8>,
@@ -292,7 +292,7 @@ pub mod erased {
 pub mod check {
     use std::{
         any::Any,
-        collections::{BTreeMap, VecDeque},
+        collections::{BTreeMap, BTreeSet, VecDeque},
         mem::replace,
         sync::mpsc::{channel, Receiver, Sender},
     };
@@ -322,29 +322,42 @@ pub mod check {
         pub close_loops: Vec<CloseLoop<I>>,
         pub replica: erased::Replica<KVStore, Addr>,
 
-        message_events: Vec<Event>,
-        timer_events: BTreeMap<Addr, VecDeque<Event>>,
+        message_events: BTreeSet<MessageEvent>,
+        timer_events: BTreeMap<Addr, VecDeque<TimerEvent>>,
         timer_id: u32,
 
-        transient_events: Receiver<Event>,
+        transient_message_events: Receiver<MessageEvent>,
         transient_invokes: Vec<Receiver<Invoke>>,
         transient_upcalls: Vec<Receiver<InvokeOk>>,
     }
 
     #[derive(Debug, Clone)]
     pub enum Event {
-        Message(Addr, MessageEvent),
-        Timer(Addr, u32, TimerEvent),
+        Message(MessageEvent),
+        Timer(TimerEvent),
     }
 
-    #[derive(Debug, Clone)]
-    pub enum MessageEvent {
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct MessageEvent {
+        dest: Addr,
+        message: Message,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    enum Message {
         Request(Request<Addr>),
         Reply(Reply),
     }
 
     #[derive(Debug, Clone)]
-    pub enum TimerEvent {
+    pub struct TimerEvent {
+        dest: Addr,
+        timer_id: u32,
+        timer: Timer,
+    }
+
+    #[derive(Debug, Clone)]
+    pub enum Timer {
         Resend,
     }
 
@@ -403,19 +416,25 @@ pub mod check {
         }
     }
 
-    impl SendMessage<Addr, Request<Addr>> for Transient<Event> {
+    impl SendMessage<Addr, Request<Addr>> for Transient<MessageEvent> {
         fn send(&mut self, dest: Addr, message: Request<Addr>) -> anyhow::Result<()> {
             self.0
-                .send(Event::Message(dest, MessageEvent::Request(message)))
+                .send(MessageEvent {
+                    dest,
+                    message: Message::Request(message),
+                })
                 .unwrap();
             Ok(())
         }
     }
 
-    impl SendMessage<Addr, Reply> for Transient<Event> {
+    impl SendMessage<Addr, Reply> for Transient<MessageEvent> {
         fn send(&mut self, dest: Addr, message: Reply) -> anyhow::Result<()> {
             self.0
-                .send(Event::Message(dest, MessageEvent::Reply(message)))
+                .send(MessageEvent {
+                    dest,
+                    message: Message::Reply(message),
+                })
                 .unwrap();
             Ok(())
         }
@@ -447,7 +466,7 @@ pub mod check {
             Self {
                 clients,
                 replica,
-                transient_events: transient_event_receiver,
+                transient_message_events: transient_event_receiver,
                 transient_upcalls,
                 close_loops: Default::default(),
                 message_events: Default::default(),
@@ -478,10 +497,15 @@ pub mod check {
         type Event = Event;
 
         fn events(&self) -> Vec<Self::Event> {
-            let mut events = self.message_events.clone();
+            let mut events = self
+                .message_events
+                .iter()
+                .cloned()
+                .map(Event::Message)
+                .collect::<Vec<_>>();
             for timer_events in self.timer_events.values() {
                 if let Some(event) = timer_events.front() {
-                    events.push(event.clone())
+                    events.push(Event::Timer(event.clone()))
                 }
             }
             events
@@ -534,7 +558,7 @@ pub mod check {
                 message_events: self.message_events.clone(),
                 timer_events: self.timer_events.clone(),
                 timer_id: self.timer_id,
-                transient_events: transient_event_receiver,
+                transient_message_events: transient_event_receiver,
                 transient_invokes,
                 transient_upcalls,
             })
@@ -542,23 +566,33 @@ pub mod check {
 
         fn step(&mut self, event: Self::Event) -> anyhow::Result<()> {
             match event {
-                Event::Message(Addr::Replica, MessageEvent::Request(message)) => self
+                Event::Message(MessageEvent {
+                    dest: Addr::Replica,
+                    message: Message::Request(message),
+                }) => self
                     .replica
                     .on_event(Recv(message), &mut UnreachableTimer)?,
-                Event::Message(Addr::Client(i), MessageEvent::Reply(message)) => {
-                    let mut timer = Timer {
+                Event::Message(MessageEvent {
+                    dest: Addr::Client(i),
+                    message: Message::Reply(message),
+                }) => {
+                    let mut timer = StateTimer {
                         addr: self.clients[i].addr,
                         timer_events: &mut self.timer_events,
                         timer_id: &mut self.timer_id,
                     };
                     self.clients[i].on_event(Recv(message), &mut timer)?
                 }
-                Event::Timer(Addr::Client(i), _, TimerEvent::Resend) => {
+                Event::Timer(TimerEvent {
+                    dest: Addr::Client(i),
+                    timer_id: _,
+                    timer: Timer::Resend,
+                }) => {
                     self.timer_events
                         .get_mut(&Addr::Client(i))
                         .unwrap()
                         .rotate_left(1);
-                    let mut timer = Timer {
+                    let mut timer = StateTimer {
                         addr: self.clients[i].addr,
                         timer_events: &mut self.timer_events,
                         timer_id: &mut self.timer_id,
@@ -585,13 +619,12 @@ pub mod check {
         fn flush(&mut self) -> anyhow::Result<()> {
             let mut run = true;
             while replace(&mut run, false) {
-                for event in self.transient_events.try_iter() {
-                    assert!(matches!(event, Event::Message(..)));
-                    self.message_events.push(event)
+                for event in self.transient_message_events.try_iter() {
+                    self.message_events.insert(event);
                 }
                 for (i, transient_invokes) in self.transient_invokes.iter().enumerate() {
-                    for invoke in transient_invokes {
-                        let mut timer = Timer {
+                    for invoke in transient_invokes.try_iter() {
+                        let mut timer = StateTimer {
                             addr: self.clients[i].addr,
                             timer_events: &mut self.timer_events,
                             timer_id: &mut self.timer_id,
@@ -601,7 +634,7 @@ pub mod check {
                     }
                 }
                 for (i, transient_upcalls) in self.transient_upcalls.iter().enumerate() {
-                    for upcall in transient_upcalls {
+                    for upcall in transient_upcalls.try_iter() {
                         self.close_loops[i].on_event(upcall, &mut UnreachableTimer)?;
                         run = true
                     }
@@ -611,13 +644,13 @@ pub mod check {
         }
     }
 
-    struct Timer<'a> {
+    struct StateTimer<'a> {
         addr: Addr,
-        timer_events: &'a mut BTreeMap<Addr, VecDeque<Event>>,
+        timer_events: &'a mut BTreeMap<Addr, VecDeque<TimerEvent>>,
         timer_id: &'a mut u32,
     }
 
-    impl crate::event::erased::Timer<erased::Client<Addr>> for Timer<'_> {
+    impl crate::event::erased::Timer<erased::Client<Addr>> for StateTimer<'_> {
         fn set<M: Clone + Send + Sync + 'static>(
             &mut self,
             _period: std::time::Duration,
@@ -634,7 +667,11 @@ pub mod check {
                 self.timer_events
                     .entry(self.addr)
                     .or_default()
-                    .push_back(Event::Timer(self.addr, timer_id, TimerEvent::Resend));
+                    .push_back(TimerEvent {
+                        dest: self.addr,
+                        timer_id,
+                        timer: Timer::Resend,
+                    });
                 return Ok(TimerId(timer_id));
             }
             Err(anyhow::anyhow!("expected event type"))
@@ -647,7 +684,7 @@ pub mod check {
                 .ok_or(anyhow::anyhow!("address not found"))?;
             let i = timer_events
                 .iter()
-                .position(|event| matches!(event, Event::Timer(_, id, _) if *id == timer_id))
+                .position(|event| event.timer_id == timer_id)
                 .ok_or(anyhow::anyhow!("timer not found"))?;
             timer_events.remove(i);
             Ok(())

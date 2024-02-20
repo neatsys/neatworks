@@ -1,5 +1,6 @@
 use augustus::{
-    app::KVStoreOp,
+    app::{KVStoreOp, KVStoreResult},
+    replication::CloseLoop,
     search::{breadth_first, Settings},
     unreplicated::check::{DryState, State},
 };
@@ -18,7 +19,22 @@ fn main() -> anyhow::Result<()> {
     state.launch()?;
 
     let settings = Settings {
-        invariant: |_: &_| Ok(()), // TODO
+        invariant: |state: &State<_>| {
+            state.close_loops.iter().try_for_each(|close_loop| {
+                check_result(close_loop, 0, KVStoreResult::PutOk)?;
+                check_result(
+                    close_loop,
+                    1,
+                    KVStoreResult::AppendResult(String::from("barbaz")),
+                )?;
+                check_result(
+                    close_loop,
+                    2,
+                    KVStoreResult::GetResult(String::from("barbaz")),
+                )?;
+                Ok(())
+            })
+        },
         goal: |state: &State<_>| state.close_loops.iter().all(|close_loop| close_loop.done),
         prune: |_: &_| false,
         max_depth: None,
@@ -27,5 +43,23 @@ fn main() -> anyhow::Result<()> {
         breadth_first::<_, DryState, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
     println!("{result:?}");
 
+    Ok(())
+}
+
+fn check_result<I>(
+    close_loop: &CloseLoop<I>,
+    index: usize,
+    expected_result: KVStoreResult,
+) -> anyhow::Result<()> {
+    let invocations = close_loop
+        .invocations
+        .as_ref()
+        .ok_or(anyhow::anyhow!("result not recorded"))?;
+    if let Some((_, result)) = invocations.get(index) {
+        let result = serde_json::from_slice::<KVStoreResult>(result)?;
+        if result != expected_result {
+            anyhow::bail!("expect {expected_result:?} get {result:?}")
+        }
+    }
     Ok(())
 }

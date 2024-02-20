@@ -142,7 +142,7 @@ where
             status_worker(
                 |elapsed| {
                     format!(
-                        "Explored: {}, Depth {} ({:.2}s, {:.2}K states/s",
+                        "Explored: {}, Depth {} ({:.2}s, {:.2}K states/s)",
                         discovered.len(),
                         depth.load(SeqCst),
                         elapsed.as_secs_f32(),
@@ -170,13 +170,17 @@ where
             .wait_while(result, |result| result.is_none())
             .map_err(|_| anyhow::anyhow!("posioned"))?
     };
+    println!("search finished");
     let result = result.take();
     for worker in workers {
         worker.join().map_err(|_| anyhow::anyhow!("worker panic"))?
     }
+    println!("worker joined");
+    search_finished.1.notify_all(); // safe fallback for waking status worker
     status_worker
         .join()
         .map_err(|_| anyhow::anyhow!("status worker panic"))?;
+    println!("status worker joined");
 
     let Some(result) = result else {
         return Ok(SearchResult::Timeout);
@@ -255,19 +259,24 @@ fn breath_first_worker<S: State, T, I, G, P>(
     };
     let mut local_depth = 0;
     loop {
+        println!("start depth {local_depth}");
         'depth: while let Some((state, dry_state)) = queue.pop() {
+            println!("check invariant");
             if let Err(err) = (settings.invariant)(&state) {
                 search_finish(SearchWorkerResult::InvariantViolation(state, err));
                 break;
             }
+            println!("check goal");
             if (settings.goal)(&state) {
                 search_finish(SearchWorkerResult::GoalFound(state));
                 break;
             }
+            println!("check events");
             for event in state.events() {
                 // these duplication will probably never panic, since initial state duplication
                 // already success
                 let mut next_state = state.duplicate().unwrap();
+                println!("step");
                 if let Err(err) = next_state.step(event.clone()) {
                     search_finish(SearchWorkerResult::Error(state, event, err));
                     break 'depth;
@@ -284,18 +293,21 @@ fn breath_first_worker<S: State, T, I, G, P>(
                     }
                 });
                 if inserted
-                    && Some(local_depth + 1) < settings.max_depth.map(Into::into)
+                    && Some(local_depth + 1) != settings.max_depth.map(Into::into)
                     && !(settings.prune)(&next_state)
                 {
                     pushing_queue.push((next_state, next_dry_state))
                 }
             }
         }
+        println!("end depth {local_depth} pushed {}", pushing_queue.len());
+
         // even if the above loop breaks, this wait always traps every worker
         // so that if some worker trap here first, then other worker `search_finish()`, the former
         // worker does not stuck here
         let wait_result = depth_barrier.wait();
         if search_finished.0.lock().unwrap().is_some() {
+            println!("search result is some");
             break;
         }
 
@@ -314,4 +326,5 @@ fn breath_first_worker<S: State, T, I, G, P>(
         std::thread::sleep(Duration::from_millis(10));
         (queue, pushing_queue) = (pushing_queue, queue)
     }
+    println!("worker exit");
 }

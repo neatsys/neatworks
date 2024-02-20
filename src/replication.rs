@@ -14,7 +14,7 @@ use crate::{
     net::{Addr, SendMessage, SendMessageToEach, SendMessageToEachExt as _},
 };
 
-#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Request<A> {
     pub client_id: u32,
     pub client_addr: A,
