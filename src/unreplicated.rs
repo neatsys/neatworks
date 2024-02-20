@@ -302,7 +302,7 @@ pub mod check {
     use crate::{
         app::KVStore,
         event::{erased::OnEvent, SendEvent, TimerId},
-        net::SendMessage,
+        net::{events::Recv, SendMessage},
         replication::{check::DryCloseLoop, CloseLoop, Invoke, InvokeOk, ReplicaNet, Request},
     };
 
@@ -320,7 +320,7 @@ pub mod check {
         replica: erased::Replica<KVStore, Addr>,
 
         message_events: Vec<Event>,
-        timer_events: BTreeMap<Addr, VecDeque<(u32, Event)>>,
+        timer_events: BTreeMap<Addr, VecDeque<Event>>,
         timer_id: u32,
 
         transient_events: Receiver<Event>,
@@ -331,7 +331,7 @@ pub mod check {
     #[derive(Clone)]
     pub enum Event {
         Message(Addr, MessageEvent),
-        Timer(u32, TimerEvent),
+        Timer(Addr, u32, TimerEvent),
     }
 
     #[derive(Clone)]
@@ -436,6 +436,7 @@ pub mod check {
                     )),
                     Box::new(Transient(transient_upcall_sender)),
                 );
+                clients.push(client);
                 transient_upcalls.push(transient_upcall_receiver)
             }
             let replica =
@@ -469,13 +470,13 @@ pub mod check {
         }
     }
 
-    impl<I: Clone> crate::search::State for State<I> {
+    impl<I: Clone + Iterator<Item = Vec<u8>>> crate::search::State for State<I> {
         type Event = Event;
 
         fn events(&self) -> Vec<Self::Event> {
             let mut events = self.message_events.clone();
             for timer_events in self.timer_events.values() {
-                if let Some((_, event)) = timer_events.front() {
+                if let Some(event) = timer_events.front() {
                     events.push(event.clone())
                 }
             }
@@ -536,11 +537,44 @@ pub mod check {
         }
 
         fn step(&mut self, event: Self::Event) -> anyhow::Result<()> {
-            todo!()
+            match event {
+                Event::Message(Addr::Replica, MessageEvent::Request(message)) => self
+                    .replica
+                    .on_event(Recv(message), &mut UnreachableTimer)?,
+                Event::Message(Addr::Client(i), MessageEvent::Reply(message)) => {
+                    let mut timer = Timer {
+                        addr: self.clients[i].addr,
+                        timer_events: &mut self.timer_events,
+                        timer_id: &mut self.timer_id,
+                    };
+                    self.clients[i].on_event(Recv(message), &mut timer)?
+                }
+                Event::Timer(Addr::Client(i), _, TimerEvent::Resend) => {
+                    self.timer_events
+                        .get_mut(&Addr::Client(i))
+                        .unwrap()
+                        .rotate_left(1);
+                    let mut timer = Timer {
+                        addr: self.clients[i].addr,
+                        timer_events: &mut self.timer_events,
+                        timer_id: &mut self.timer_id,
+                    };
+                    self.clients[i].on_event(erased::Resend, &mut timer)?
+                }
+                _ => anyhow::bail!("unexpected event"),
+            }
+            self.flush()
         }
     }
 
     impl<I: Iterator<Item = Vec<u8>>> State<I> {
+        pub fn launch(&mut self) -> anyhow::Result<()> {
+            for close_loop in &mut self.close_loops {
+                close_loop.launch()?
+            }
+            self.flush()
+        }
+
         fn flush(&mut self) -> anyhow::Result<()> {
             let mut run = true;
             while replace(&mut run, false) {
@@ -551,6 +585,7 @@ pub mod check {
                 for (i, transient_invokes) in self.transient_invokes.iter().enumerate() {
                     for invoke in transient_invokes {
                         let mut timer = Timer {
+                            addr: self.clients[i].addr,
                             timer_events: &mut self.timer_events,
                             timer_id: &mut self.timer_id,
                         };
@@ -560,11 +595,7 @@ pub mod check {
                 }
                 for (i, transient_upcalls) in self.transient_upcalls.iter().enumerate() {
                     for upcall in transient_upcalls {
-                        let mut timer = Timer {
-                            timer_events: &mut self.timer_events,
-                            timer_id: &mut self.timer_id,
-                        };
-                        // self.close_loops[i].on_event(upcall, &mut timer)?;
+                        self.close_loops[i].on_event(upcall, &mut UnreachableTimer)?;
                         run = true
                     }
                 }
@@ -574,27 +605,64 @@ pub mod check {
     }
 
     struct Timer<'a> {
-        timer_events: &'a mut BTreeMap<Addr, VecDeque<(u32, Event)>>,
+        addr: Addr,
+        timer_events: &'a mut BTreeMap<Addr, VecDeque<Event>>,
         timer_id: &'a mut u32,
     }
 
     impl crate::event::erased::Timer<erased::Client<Addr>> for Timer<'_> {
         fn set<M: Clone + Send + Sync + 'static>(
             &mut self,
-            period: std::time::Duration,
+            _period: std::time::Duration,
             event: M,
         ) -> anyhow::Result<TimerId>
         where
             erased::Client<Addr>: OnEvent<M>,
         {
+            // this is bad, really bad, at least not good
+            // it's so hard to keep everything not bad in a codebase that can do everything
             if (&event as &dyn Any).is::<erased::Resend>() {
-                return Ok(TimerId(0));
+                *self.timer_id += 1;
+                let timer_id = *self.timer_id;
+                self.timer_events
+                    .entry(self.addr)
+                    .or_default()
+                    .push_back(Event::Timer(self.addr, timer_id, TimerEvent::Resend));
+                return Ok(TimerId(timer_id));
             }
             Err(anyhow::anyhow!("expected event type"))
         }
 
-        fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()> {
-            todo!()
+        fn unset(&mut self, TimerId(timer_id): TimerId) -> anyhow::Result<()> {
+            let timer_events = self
+                .timer_events
+                .get_mut(&self.addr)
+                .ok_or(anyhow::anyhow!("address not found"))?;
+            let i = timer_events
+                .iter()
+                .position(|event| matches!(event, Event::Timer(_, id, _) if *id == timer_id))
+                .ok_or(anyhow::anyhow!("timer not found"))?;
+            timer_events.remove(i);
+            Ok(())
+        }
+    }
+
+    pub struct UnreachableTimer;
+
+    impl<T> crate::event::erased::Timer<T> for UnreachableTimer {
+        fn set<M: Clone + Send + Sync + 'static>(
+            &mut self,
+            _: std::time::Duration,
+            _: M,
+        ) -> anyhow::Result<TimerId>
+        where
+            T: OnEvent<M>,
+        {
+            unreachable!()
+        }
+
+        fn unset(&mut self, _: TimerId) -> anyhow::Result<()> {
+            unreachable!()
         }
     }
 }
