@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
     fmt::Debug,
-    num::NonZeroUsize,
     time::{Duration, Instant},
 };
 
@@ -23,43 +22,49 @@ pub struct Request<A> {
     pub op: Vec<u8>,
 }
 
-pub struct CloseLoop<E> {
-    client_senders: HashMap<u32, E>,
-    pub latencies: Vec<Duration>,
+#[derive(Debug, Clone)]
+pub struct Invoke(pub Vec<u8>);
+
+// newtype namespace may be desired after the type erasure migration
+pub type InvokeOk = (u32, Vec<u8>);
+
+pub struct CloseLoop {
+    clients: HashMap<u32, Box<dyn SendEvent<Invoke> + Send + Sync>>,
+    op_iter: Box<dyn Iterator<Item = Vec<u8>> + Send + Sync>,
+    pub latencies: Option<Vec<Duration>>,
     invoke_instants: HashMap<u32, Instant>,
-    max_count: Option<(usize, ConcurrentStop)>,
+    pub invocations: Option<Vec<(Vec<u8>, Vec<u8>)>>,
+    invoke_ops: HashMap<u32, Vec<u8>>,
+    stop: Option<CloseLoopStop>,
 }
 
-type ConcurrentStop = Box<dyn FnOnce() -> anyhow::Result<()> + Send + Sync>;
+type CloseLoopStop = Box<dyn FnOnce() -> anyhow::Result<()> + Send + Sync>;
 
-impl<E> Debug for CloseLoop<E> {
+impl Debug for CloseLoop {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Concurrent")
-            .field("<count>", &self.latencies.len())
-            .finish_non_exhaustive()
+        f.debug_struct("Concurrent").finish_non_exhaustive()
     }
 }
 
-impl<E> CloseLoop<E> {
-    pub fn new() -> Self {
+impl CloseLoop {
+    pub fn new(op_iter: impl Iterator<Item = Vec<u8>> + Send + Sync + 'static) -> Self {
         Self {
-            client_senders: Default::default(),
+            op_iter: Box::new(op_iter),
+            clients: Default::default(),
             latencies: Default::default(),
             invoke_instants: Default::default(),
-            max_count: None,
+            invocations: Default::default(),
+            invoke_ops: Default::default(),
+            stop: None,
         }
     }
-}
 
-impl<E> Default for CloseLoop<E> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<E> CloseLoop<E> {
-    pub fn insert_client_sender(&mut self, client_id: u32, sender: E) -> anyhow::Result<()> {
-        let replaced = self.client_senders.insert(client_id, sender);
+    pub fn insert_client(
+        &mut self,
+        client_id: u32,
+        sender: impl SendEvent<Invoke> + Send + Sync + 'static,
+    ) -> anyhow::Result<()> {
+        let replaced = self.clients.insert(client_id, Box::new(sender));
         if replaced.is_none() {
             Ok(())
         } else {
@@ -67,55 +72,65 @@ impl<E> CloseLoop<E> {
         }
     }
 
-    pub fn insert_max_count(&mut self, count: NonZeroUsize, stop: ConcurrentStop) {
-        self.max_count = Some((count.into(), stop));
+    pub fn insert_max_count(&mut self, stop: CloseLoopStop) {
+        self.stop = Some(stop);
     }
-}
 
-#[derive(Debug, Clone)]
-pub struct Invoke(pub Vec<u8>);
-
-pub type InvokeOk = (u32, Vec<u8>);
-
-impl<E> CloseLoop<E>
-where
-    E: SendEvent<Invoke>,
-{
     pub fn launch(&mut self) -> anyhow::Result<()> {
-        for (client_id, sender) in &mut self.client_senders {
-            sender.send(Invoke(Vec::new()))?; // TODO
-            self.invoke_instants.insert(*client_id, Instant::now());
+        for (client_id, sender) in &mut self.clients {
+            let op = self
+                .op_iter
+                .next()
+                .ok_or(anyhow::anyhow!("not enough op"))?;
+            if self.invocations.is_some() {
+                self.invoke_ops.insert(*client_id, op.clone());
+            }
+            if self.latencies.is_some() {
+                self.invoke_instants.insert(*client_id, Instant::now());
+            }
+            sender.send(Invoke(op))?
         }
         Ok(())
     }
 }
 
-impl<E> OnEvent<InvokeOk> for CloseLoop<E>
-where
-    E: SendEvent<Invoke>,
-{
+impl OnEvent<InvokeOk> for CloseLoop {
     fn on_event(
         &mut self,
-        (client_id, _result): InvokeOk,
+        (client_id, result): InvokeOk,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        let Some(sender) = self.client_senders.get_mut(&client_id) else {
+        let Some(sender) = self.clients.get_mut(&client_id) else {
             anyhow::bail!("unknown client id {client_id}")
         };
-        sender.send(Invoke(Vec::new()))?; // TODO
-        let replaced_instant = self
-            .invoke_instants
-            .insert(client_id, Instant::now())
-            .ok_or(anyhow::anyhow!(
-                "missing invocation instant of client id {client_id}"
-            ))?;
-        self.latencies.push(replaced_instant.elapsed());
-        if let Some((count, _)) = &self.max_count {
-            if self.latencies.len() == *count {
-                (self.max_count.take().unwrap().1)()?
-            }
+        if let Some(latencies) = &mut self.latencies {
+            let replaced_instant = self
+                .invoke_instants
+                .insert(client_id, Instant::now())
+                .ok_or(anyhow::anyhow!(
+                    "missing invocation instant of client id {client_id}"
+                ))?;
+            latencies.push(replaced_instant.elapsed())
         }
-        Ok(())
+        let op = self.op_iter.next();
+        if let Some(invocations) = &mut self.invocations {
+            let replaced_op = if let Some(op) = &op {
+                self.invoke_ops.insert(client_id, op.clone())
+            } else {
+                self.invoke_ops.remove(&client_id)
+            }
+            .ok_or(anyhow::anyhow!(
+                "missing invocation op of client id {client_id}"
+            ))?;
+            invocations.push((replaced_op, result))
+        }
+        if let Some(op) = op {
+            sender.send(Invoke(op))
+        } else if let Some(stop) = self.stop.take() {
+            stop()
+        } else {
+            Ok(())
+        }
     }
 }
 

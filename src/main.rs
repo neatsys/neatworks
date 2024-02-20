@@ -128,17 +128,13 @@ async fn start_client(State(state): State<AppState>, Json(config): Json<ClientCo
 }
 
 async fn client_session<S: OnEvent<Invoke> + Send + Sync + 'static>(
-    mut new_client: impl FnMut(u32, SocketAddr, Udp, SessionSender<CloseLoop<SessionSender<S>>>) -> S,
+    mut new_client: impl FnMut(u32, SocketAddr, Udp, SessionSender<CloseLoop>) -> S,
     on_buf: impl Fn(&[u8], &mut Sender<S>) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
     benchmark_result: Arc<Mutex<Option<BenchmarkResult>>>,
 ) -> anyhow::Result<()> {
-    let mut concurrent = CloseLoop::new();
-    // let cancel = CancellationToken::new();
-    // concurrent.insert_max_count(std::num::NonZeroUsize::new(1).unwrap(), {
-    //     let cancel = cancel.clone();
-    //     Box::new(move || Ok(cancel.cancel()))
-    // });
-    let mut concurrent_session = Session::<CloseLoop<_>>::new();
+    let mut concurrent = CloseLoop::new(repeat_with(Default::default));
+    concurrent.latencies.get_or_insert(Default::default());
+    let mut concurrent_session = Session::new();
     let mut sessions = JoinSet::new();
     for client_id in repeat_with(rand::random).take(1) {
         let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
@@ -152,7 +148,7 @@ async fn client_session<S: OnEvent<Invoke> + Send + Sync + 'static>(
             concurrent_session.erased_sender(),
         );
         let mut session = Session::new();
-        concurrent.insert_client_sender(client_id, session.erased_sender())?;
+        concurrent.insert_client(client_id, session.erased_sender())?;
         let mut sender = session.erased_sender();
         let on_buf = on_buf.clone();
         sessions.spawn(async move { net.recv_session(|buf| on_buf(buf, &mut sender)).await });
@@ -171,9 +167,9 @@ async fn client_session<S: OnEvent<Invoke> + Send + Sync + 'static>(
         }
         return Err(anyhow::anyhow!("unexpected shutdown"));
     }
-    let throughput = concurrent.latencies.len() as f32;
-    let latency =
-        concurrent.latencies.into_iter().sum::<Duration>() / (throughput.floor() as u32 + 1);
+    let throughput = concurrent.latencies.as_ref().unwrap().len() as f32;
+    let latency = concurrent.latencies.unwrap().into_iter().sum::<Duration>()
+        / (throughput.floor() as u32 + 1);
     sessions.shutdown().await;
     benchmark_result.lock().unwrap().replace(BenchmarkResult {
         throughput,

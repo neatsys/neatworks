@@ -68,7 +68,8 @@ async fn main() -> anyhow::Result<()> {
         let addr = SocketAddr::new([10, 0, 0, 2].into(), socket.local_addr()?.port());
         let raw_net = Udp(socket.into());
 
-        let mut close_loop = CloseLoop::new();
+        let mut close_loop = CloseLoop::new(repeat_with(Default::default));
+        close_loop.latencies.get_or_insert_with(Default::default);
         let mut close_loop_session = erased::Session::new();
 
         let mut state = Client::new(
@@ -82,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
             close_loop_session.erased_sender(),
         );
         let mut state_session = Session::new();
-        close_loop.insert_client_sender(id, state_session.sender())?;
+        close_loop.insert_client(id, state_session.sender())?;
         let mut state_sender = state_session.sender();
         sessions.spawn_on(
             async move {
@@ -105,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
                     result = close_loop_session.erased_run(&mut close_loop) => result?,
                     () = cancel.cancelled() => {}
                 }
-                let _ = count_sender.send(close_loop.latencies.len());
+                let _ = count_sender.send(close_loop.latencies.unwrap().len());
                 Ok(())
             },
             runtime.handle(),

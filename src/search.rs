@@ -164,9 +164,9 @@ where
     Ok(result)
 }
 
-type SearchFinished<S, E> = Arc<(Mutex<Option<SearchWorkerResult<S, E>>>, Condvar)>;
+type SearchFinished<R> = Arc<(Mutex<Option<R>>, Condvar)>;
 
-fn status_worker<S, E>(status: impl Fn(Duration) -> String, search_finished: SearchFinished<S, E>) {
+fn status_worker<R>(status: impl Fn(Duration) -> String, search_finished: SearchFinished<R>) {
     let start = Instant::now();
     let mut result = search_finished.0.lock().unwrap();
     let mut wait_result;
@@ -210,7 +210,7 @@ fn breath_first_worker<S: State, T, I, G, P>(
     mut pushing_queue: Arc<SegQueue<(S, Arc<T>)>>,
     depth: Arc<AtomicUsize>,
     depth_barrier: Arc<Barrier>,
-    search_finished: SearchFinished<S, S::Event>,
+    search_finished: SearchFinished<SearchWorkerResult<S, S::Event>>,
 ) where
     S: Into<T>,
     S::Event: Clone,
