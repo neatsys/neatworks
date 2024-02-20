@@ -589,7 +589,7 @@ impl<K> OnEvent<Recv<Verifiable<FragmentAvailable>>> for Peer<K> {
             return Ok(());
         }
         state.available.insert(fragment_available.peer_id);
-        if state.available.len() == self.chunk_n.into() {
+        if state.available.len() == self.chunk_n.get() {
             let state = self.uploads.remove(&fragment_available.chunk).unwrap();
             state.cancel.cancel();
             self.upcall.send(PutOk(state.preimage))?

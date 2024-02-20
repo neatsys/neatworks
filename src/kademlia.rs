@@ -183,7 +183,7 @@ impl<A: Addr> Buckets<A> {
             index_records.sort_unstable_by_key(|record| distance(&record.id, target));
             records.extend(index_records.into_iter().take(count.get() - records.len()));
             assert!(records.len() <= count.into());
-            if records.len() == count.into() {
+            if records.len() == count.get() {
                 break;
             }
         }

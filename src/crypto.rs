@@ -238,6 +238,6 @@ mod tests {
             a: 42,
             bs: b"hello".to_vec(),
         };
-        assert_ne!(foo.sha256(), <[_; 32]>::default());
+        assert_ne!(foo.sha256(), <[u8; 32]>::default());
     }
 }

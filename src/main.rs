@@ -194,7 +194,7 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
             config.replica_addrs[config.replica_id as usize],
         ))?;
         println!(
-            "Replica {} bind to address {:?}",
+            "Replica {} bind to {:?}",
             config.replica_id,
             socket.local_addr()
         );

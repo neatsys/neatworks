@@ -74,10 +74,10 @@ where
     let depth_barrier = Arc::new(Barrier::new(num_worker.get()));
     let search_finished = Arc::new((Mutex::new(None), Condvar::new()));
 
-    let initial_pure_state = Arc::new(initial_state.clone().into());
-    queue.push((initial_state, initial_pure_state.clone()));
+    let initial_dry_state = Arc::new(initial_state.clone().into());
+    queue.push((initial_state, initial_dry_state.clone()));
     discovered.insert(
-        initial_pure_state,
+        initial_dry_state,
         StateInfo {
             prev: None,
             depth: 0,
@@ -225,7 +225,7 @@ fn breath_first_worker<S: State, T, I, G, P>(
     };
     let mut local_depth = 0;
     loop {
-        'depth: while let Some((state, pure_state)) = queue.pop() {
+        'depth: while let Some((state, dry_state)) = queue.pop() {
             if let Err(err) = (settings.invariant)(&state) {
                 search_finish(SearchWorkerResult::InvariantViolation(state, err));
                 break;
@@ -240,24 +240,22 @@ fn breath_first_worker<S: State, T, I, G, P>(
                     search_finish(SearchWorkerResult::Error(state, event, err));
                     break 'depth;
                 }
-                let pure_next_state = Arc::new(next_state.clone().into());
+                let next_dry_state = Arc::new(next_state.clone().into());
                 // do not replace a previously-found state, which may be reached with a shorter
                 // trace from initial state
                 let mut inserted = false;
-                discovered
-                    .entry(pure_next_state.clone())
-                    .or_insert_with(|| {
-                        inserted = true;
-                        StateInfo {
-                            prev: Some((event, pure_state.clone())),
-                            depth: local_depth + 1,
-                        }
-                    });
+                discovered.entry(next_dry_state.clone()).or_insert_with(|| {
+                    inserted = true;
+                    StateInfo {
+                        prev: Some((event, dry_state.clone())),
+                        depth: local_depth + 1,
+                    }
+                });
                 if inserted
                     && Some(local_depth + 1) < settings.max_depth.map(Into::into)
                     && !(settings.prune)(&next_state)
                 {
-                    pushing_queue.push((next_state, pure_next_state))
+                    pushing_queue.push((next_state, next_dry_state))
                 }
             }
         }

@@ -288,3 +288,11 @@ pub mod erased {
         sender.send(Recv(deserialize(buf)?))
     }
 }
+
+pub mod check {
+    use super::erased;
+
+    pub struct State {
+        replica: erased::Replica<(), ()>,
+    }
+}
