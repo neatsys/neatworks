@@ -28,28 +28,28 @@ pub struct Invoke(pub Vec<u8>);
 // newtype namespace may be desired after the type erasure migration
 pub type InvokeOk = (u32, Vec<u8>);
 
-pub struct CloseLoop {
+pub struct CloseLoop<I> {
     clients: HashMap<u32, Box<dyn SendEvent<Invoke> + Send + Sync>>,
-    op_iter: Box<dyn Iterator<Item = Vec<u8>> + Send + Sync>,
+    op_iter: I,
     pub latencies: Option<Vec<Duration>>,
     invoke_instants: HashMap<u32, Instant>,
     pub invocations: Option<Vec<(Vec<u8>, Vec<u8>)>>,
     invoke_ops: HashMap<u32, Vec<u8>>,
-    stop: Option<CloseLoopStop>,
+    pub stop: Option<CloseLoopStop>,
 }
 
 type CloseLoopStop = Box<dyn FnOnce() -> anyhow::Result<()> + Send + Sync>;
 
-impl Debug for CloseLoop {
+impl<I> Debug for CloseLoop<I> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Concurrent").finish_non_exhaustive()
+        f.debug_struct("CloseLoop").finish_non_exhaustive()
     }
 }
 
-impl CloseLoop {
-    pub fn new(op_iter: impl Iterator<Item = Vec<u8>> + Send + Sync + 'static) -> Self {
+impl<I> CloseLoop<I> {
+    pub fn new(op_iter: I) -> Self {
         Self {
-            op_iter: Box::new(op_iter),
+            op_iter,
             clients: Default::default(),
             latencies: Default::default(),
             invoke_instants: Default::default(),
@@ -71,11 +71,34 @@ impl CloseLoop {
             Err(anyhow::anyhow!("duplicated client id"))
         }
     }
+}
 
-    pub fn insert_max_count(&mut self, stop: CloseLoopStop) {
-        self.stop = Some(stop);
+impl<I: Clone> CloseLoop<I> {
+    pub fn duplicate<E: SendEvent<Invoke> + Send + Sync + 'static>(
+        &self,
+        client: impl Fn() -> E,
+    ) -> anyhow::Result<Self> {
+        if self.latencies.is_some() || self.stop.is_some() {
+            anyhow::bail!("real time close loop is not for model checking")
+        }
+        Ok(Self {
+            op_iter: self.op_iter.clone(),
+            clients: self
+                .clients
+                .keys()
+                .copied()
+                .map(|id| (id, Box::new(client()) as _))
+                .collect(),
+            latencies: None,
+            invoke_instants: Default::default(),
+            invocations: self.invocations.clone(),
+            invoke_ops: self.invoke_ops.clone(),
+            stop: None,
+        })
     }
+}
 
+impl<I: Iterator<Item = Vec<u8>>> CloseLoop<I> {
     pub fn launch(&mut self) -> anyhow::Result<()> {
         for (client_id, sender) in &mut self.clients {
             let op = self
@@ -94,7 +117,7 @@ impl CloseLoop {
     }
 }
 
-impl OnEvent<InvokeOk> for CloseLoop {
+impl<I: Iterator<Item = Vec<u8>>> OnEvent<InvokeOk> for CloseLoop<I> {
     fn on_event(
         &mut self,
         (client_id, result): InvokeOk,
@@ -180,5 +203,26 @@ impl<N: for<'a> SendMessageToEach<A, M>, A: Addr, M> SendMessage<AllReplica, M>
                 }
             });
         self.inner_net.send_to_each(addrs, message)
+    }
+}
+
+pub mod check {
+    use super::CloseLoop;
+
+    #[derive(PartialEq, Eq, Hash)]
+    pub struct DryCloseLoop {
+        // seems necessary to include `op_iter` as well
+        // but clearly there's technical issue for doing that, and hopefully the workload will have
+        // the same intent when all other states are the same
+        invocations: Option<Vec<(Vec<u8>, Vec<u8>)>>,
+        // necessary to include `invoke_ops`?
+    }
+
+    impl<I> From<CloseLoop<I>> for DryCloseLoop {
+        fn from(value: CloseLoop<I>) -> Self {
+            Self {
+                invocations: value.invocations,
+            }
+        }
     }
 }

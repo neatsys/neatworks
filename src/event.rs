@@ -40,11 +40,11 @@ impl<M> SendEvent<M> for Void {
 }
 
 // pub type TimerId = u32;
-// intentionally switch to a non-Clone (nor even Copy) newtype to mitigate use
-// after free, that is, calling `unset` consume the TimerId so the timer cannot
-// be referred anymore
-// this does not solve leak though
-#[derive(Debug, Hash, PartialEq, Eq)]
+// intentionally switch to a non-Copy newtype to mitigate use after free, that
+// is, calling `unset` consume the TimerId so the timer cannot be referred
+// anymore
+// this does not solve leak though so Clone is permitted
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct TimerId(u32);
 
 pub trait Timer<M> {

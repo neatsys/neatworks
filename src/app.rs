@@ -15,8 +15,14 @@ impl App for Null {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct KVStore(BTreeMap<String, String>);
+
+impl KVStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 enum KVStoreOp {

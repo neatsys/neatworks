@@ -11,18 +11,25 @@ use std::{
 use crossbeam_queue::SegQueue;
 use dashmap::DashMap;
 
-pub trait State: Clone {
+pub trait State {
     type Event;
 
     fn events(&self) -> Vec<Self::Event>;
 
+    fn duplicate(&self) -> anyhow::Result<Self>
+    where
+        Self: Sized;
+
     fn step(&mut self, event: Self::Event) -> anyhow::Result<()>;
 
-    fn steps(&self) -> Vec<anyhow::Result<Self>> {
+    fn steps(&self) -> Vec<anyhow::Result<Self>>
+    where
+        Self: Sized,
+    {
         self.events()
             .into_iter()
             .map(|event| {
-                let mut system = self.clone();
+                let mut system = self.duplicate()?;
                 system.step(event)?;
                 Ok(system)
             })
@@ -74,7 +81,7 @@ where
     let depth_barrier = Arc::new(Barrier::new(num_worker.get()));
     let search_finished = Arc::new((Mutex::new(None), Condvar::new()));
 
-    let initial_dry_state = Arc::new(initial_state.clone().into());
+    let initial_dry_state = Arc::new(initial_state.duplicate()?.into());
     queue.push((initial_state, initial_dry_state.clone()));
     discovered.insert(
         initial_dry_state,
@@ -235,12 +242,14 @@ fn breath_first_worker<S: State, T, I, G, P>(
                 break;
             }
             for event in state.events() {
-                let mut next_state = state.clone();
+                // these duplication will probably never panic, since initial state duplication
+                // already success
+                let mut next_state = state.duplicate().unwrap();
                 if let Err(err) = next_state.step(event.clone()) {
                     search_finish(SearchWorkerResult::Error(state, event, err));
                     break 'depth;
                 }
-                let next_dry_state = Arc::new(next_state.clone().into());
+                let next_dry_state = Arc::new(next_state.duplicate().unwrap().into());
                 // do not replace a previously-found state, which may be reached with a shorter
                 // trace from initial state
                 let mut inserted = false;

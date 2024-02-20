@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Debug, net::SocketAddr, time::Duration};
+use std::{collections::BTreeMap, fmt::Debug, net::SocketAddr, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
@@ -9,7 +9,7 @@ use crate::{
     replication::{Invoke, Request},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Reply {
     seq: u32,
     result: Vec<u8>,
@@ -48,7 +48,7 @@ pub struct Client<N, U, A> {
     upcall: U,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ClientInvoke {
     op: Vec<u8>,
     resend_timer: TimerId,
@@ -139,7 +139,7 @@ pub enum ReplicaEvent<A> {
 }
 
 pub struct Replica<S, N, A> {
-    replies: HashMap<u32, Reply>,
+    replies: BTreeMap<u32, Reply>,
     _addr_marker: std::marker::PhantomData<A>,
     app: S,
     net: N,
@@ -290,9 +290,207 @@ pub mod erased {
 }
 
 pub mod check {
-    use super::erased;
+    use std::collections::{BTreeMap, VecDeque};
 
-    pub struct State {
-        replica: erased::Replica<(), ()>,
+    use serde::{Deserialize, Serialize};
+
+    use crate::{
+        app::KVStore,
+        event::SendEvent,
+        net::SendMessage,
+        replication::{check::DryCloseLoop, CloseLoop, Invoke, InvokeOk, ReplicaNet, Request},
+    };
+
+    use super::{erased, ClientInvoke, Reply};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub enum Addr {
+        Client(usize),
+        Replica,
+    }
+
+    pub struct State<I> {
+        clients: Vec<erased::Client<Addr>>,
+        close_loops: Vec<CloseLoop<I>>,
+        replica: erased::Replica<KVStore, Addr>,
+        message_events: Vec<Event>,
+        timer_events: BTreeMap<Addr, VecDeque<Event>>,
+    }
+
+    #[derive(Clone)]
+    pub enum Event {
+        MessageRequest(Addr, Request<Addr>),
+        MessageReply(Addr, Reply),
+        TimerResend(Addr),
+    }
+
+    #[derive(PartialEq, Eq, Hash)]
+    pub struct DryState {
+        clients: Vec<DryClient>,
+        close_loops: Vec<DryCloseLoop>,
+        replica: DryReplica,
+    }
+
+    #[derive(PartialEq, Eq, Hash)]
+    pub struct DryClient {
+        id: u32,
+        addr: Addr,
+        seq: u32,
+        invoke: Option<ClientInvoke>,
+    }
+
+    #[derive(PartialEq, Eq, Hash)]
+    pub struct DryReplica {
+        replies: BTreeMap<u32, Reply>,
+        app: KVStore,
+    }
+
+    impl<I> From<State<I>> for DryState {
+        fn from(value: State<I>) -> Self {
+            let clients = value
+                .clients
+                .into_iter()
+                .map(|client| DryClient {
+                    id: client.id,
+                    addr: client.addr,
+                    seq: client.seq,
+                    invoke: client.invoke,
+                })
+                .collect();
+            let close_loops = value.close_loops.into_iter().map(Into::into).collect();
+            let replica = DryReplica {
+                replies: value.replica.replies,
+                app: value.replica.app,
+            };
+            Self {
+                clients,
+                close_loops,
+                replica,
+            }
+        }
+    }
+
+    pub struct Recorder<M>(Vec<M>);
+
+    impl<M> Recorder<M> {
+        pub fn new() -> Self {
+            Self(Default::default())
+        }
+    }
+
+    impl<M> Default for Recorder<M> {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl<N: Into<M>, M> SendEvent<N> for Recorder<M> {
+        fn send(&mut self, event: N) -> anyhow::Result<()> {
+            self.0.push(event.into());
+            Ok(())
+        }
+    }
+
+    impl<A, N: Into<M>, M> SendMessage<A, N> for Recorder<(A, M)> {
+        fn send(&mut self, dest: A, message: N) -> anyhow::Result<()> {
+            self.0.push((dest, message.into()));
+            Ok(())
+        }
+    }
+
+    impl<I> State<I> {
+        pub fn new(num_client: usize) -> Self {
+            let clients = (0..num_client)
+                .map(|i| {
+                    erased::Client::new(
+                        1000 + i as u32,
+                        Addr::Client(i),
+                        Box::new(ReplicaNet::new(
+                            Recorder::<(_, Request<_>)>::new(),
+                            vec![Addr::Replica],
+                            None,
+                        )),
+                        Box::new(Recorder::<InvokeOk>::new()),
+                    )
+                })
+                .collect();
+            let replica =
+                erased::Replica::new(KVStore::new(), Box::new(Recorder::<(_, Reply)>::new()));
+            Self {
+                clients,
+                replica,
+                close_loops: Default::default(),
+                message_events: Default::default(),
+                timer_events: Default::default(),
+            }
+        }
+
+        pub fn push_workload(&mut self, workload: I) -> anyhow::Result<()> {
+            if self.close_loops.len() == self.clients.len() {
+                anyhow::bail!("more workload than client")
+            }
+            let mut close_loop = CloseLoop::new(workload);
+            close_loop.insert_client(
+                1000 + self.close_loops.len() as u32,
+                Recorder::<Invoke>::new(),
+            )?;
+            self.close_loops.push(close_loop);
+            Ok(())
+        }
+    }
+
+    impl<I: Clone> crate::search::State for State<I> {
+        type Event = Event;
+
+        fn events(&self) -> Vec<Self::Event> {
+            let mut events = self.message_events.clone();
+            for timer_events in self.timer_events.values() {
+                if let Some(event) = timer_events.front() {
+                    events.push(event.clone())
+                }
+            }
+            events
+        }
+
+        fn duplicate(&self) -> anyhow::Result<Self> {
+            let clients = self
+                .clients
+                .iter()
+                .map(|client| erased::Client {
+                    id: client.id,
+                    addr: client.addr,
+                    seq: client.seq,
+                    invoke: client.invoke.clone(),
+                    net: Box::new(ReplicaNet::new(
+                        Recorder::<(_, Request<_>)>::new(),
+                        vec![Addr::Replica],
+                        None,
+                    )),
+                    upcall: Box::new(Recorder::<InvokeOk>::new()),
+                })
+                .collect();
+            let close_loops = self
+                .close_loops
+                .iter()
+                .map(|close_loop| close_loop.duplicate(Recorder::<Invoke>::new))
+                .collect::<Result<_, _>>()?;
+            let replica = erased::Replica {
+                replies: self.replica.replies.clone(),
+                app: self.replica.app.clone(),
+                net: Box::new(Recorder::<(_, Reply)>::new()),
+                _addr_marker: Default::default(),
+            };
+            Ok(Self {
+                clients,
+                close_loops,
+                replica,
+                message_events: self.message_events.clone(),
+                timer_events: self.timer_events.clone(),
+            })
+        }
+
+        fn step(&mut self, event: Self::Event) -> anyhow::Result<()> {
+            todo!()
+        }
     }
 }
