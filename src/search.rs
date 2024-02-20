@@ -5,7 +5,6 @@ use std::{
         atomic::{AtomicUsize, Ordering::SeqCst},
         Arc, Barrier, Condvar, Mutex,
     },
-    thread::available_parallelism,
     time::{Duration, Instant},
 };
 
@@ -44,6 +43,7 @@ pub enum SearchResult<S, T, E> {
     InvariantViolation(Vec<(E, Arc<T>)>, anyhow::Error),
     GoalFound(S),
     SpaceExhausted,
+    Timeout,
 }
 
 enum SearchWorkerResult<S, E> {
@@ -53,9 +53,11 @@ enum SearchWorkerResult<S, E> {
     SpaceExhausted,
 }
 
-pub fn bfs<S, T, I, G, P>(
+pub fn breadth_first<S, T, I, G, P>(
     initial_state: S,
     settings: Settings<I, G, P>,
+    num_worker: NonZeroUsize,
+    max_duration: Option<Duration>,
 ) -> anyhow::Result<SearchResult<S, T, S::Event>>
 where
     S: State + Into<T> + Send + 'static,
@@ -65,13 +67,11 @@ where
     G: Fn(&S) -> bool + Clone + Send + 'static,
     P: Fn(&S) -> bool + Clone + Send + 'static,
 {
-    let num_worker = available_parallelism()?.get();
-
     let discovered = Arc::new(DashMap::new());
     let queue = Arc::new(SegQueue::new());
     let pushing_queue = Arc::new(SegQueue::new());
     let depth = Arc::new(AtomicUsize::new(0));
-    let depth_barrier = Arc::new(Barrier::new(num_worker));
+    let depth_barrier = Arc::new(Barrier::new(num_worker.get()));
     let search_finished = Arc::new((Mutex::new(None), Condvar::new()));
 
     let initial_pure_state = Arc::new(initial_state.clone().into());
@@ -85,7 +85,7 @@ where
     );
 
     let mut workers = Vec::new();
-    for _ in 0..num_worker {
+    for _ in 0..num_worker.get() {
         let settings = settings.clone();
         let discovered = discovered.clone();
         let queue = queue.clone();
@@ -94,7 +94,7 @@ where
         let depth_barrier = depth_barrier.clone();
         let search_finished = search_finished.clone();
         workers.push(std::thread::spawn(move || {
-            bfs_worker(
+            breath_first_worker(
                 settings,
                 discovered,
                 queue,
@@ -124,18 +124,33 @@ where
         }
     });
 
-    // TODO timeout
-    let result = search_finished.0.lock().unwrap();
-    let mut result = search_finished
-        .1
-        .wait_while(result, |result| result.is_none())
-        .unwrap();
-    let result = result.take().unwrap();
+    let result = search_finished
+        .0
+        .lock()
+        .map_err(|_| anyhow::anyhow!("posioned"))?;
+    let mut result = if let Some(max_duration) = max_duration {
+        search_finished
+            .1
+            .wait_timeout_while(result, max_duration, |result| result.is_none())
+            .map_err(|_| anyhow::anyhow!("posioned"))?
+            .0
+    } else {
+        search_finished
+            .1
+            .wait_while(result, |result| result.is_none())
+            .map_err(|_| anyhow::anyhow!("posioned"))?
+    };
+    let result = result.take();
     for worker in workers {
-        worker.join().unwrap();
+        worker.join().map_err(|_| anyhow::anyhow!("worker panic"))?
     }
-    status_worker.join().unwrap();
+    status_worker
+        .join()
+        .map_err(|_| anyhow::anyhow!("status worker panic"))?;
 
+    let Some(result) = result else {
+        return Ok(SearchResult::Timeout);
+    };
     let result = match result {
         SearchWorkerResult::Error(state, event, err) => {
             SearchResult::Error(trace(&discovered, Arc::new(state.into())), event, err)
@@ -149,10 +164,9 @@ where
     Ok(result)
 }
 
-fn status_worker<S, E>(
-    status: impl Fn(Duration) -> String,
-    search_finished: Arc<(Mutex<Option<SearchWorkerResult<S, E>>>, Condvar)>,
-) {
+type SearchFinished<S, E> = Arc<(Mutex<Option<SearchWorkerResult<S, E>>>, Condvar)>;
+
+fn status_worker<S, E>(status: impl Fn(Duration) -> String, search_finished: SearchFinished<S, E>) {
     let start = Instant::now();
     let mut result = search_finished.0.lock().unwrap();
     let mut wait_result;
@@ -187,14 +201,16 @@ fn trace<T: Eq + Hash, E: Clone>(
     trace
 }
 
-fn bfs_worker<S: State, T, I, G, P>(
+type Discovered<T, E> = Arc<DashMap<Arc<T>, StateInfo<T, E>>>;
+
+fn breath_first_worker<S: State, T, I, G, P>(
     settings: Settings<I, G, P>,
-    discovered: Arc<DashMap<Arc<T>, StateInfo<T, S::Event>>>,
+    discovered: Discovered<T, S::Event>,
     mut queue: Arc<SegQueue<(S, Arc<T>)>>,
     mut pushing_queue: Arc<SegQueue<(S, Arc<T>)>>,
     depth: Arc<AtomicUsize>,
     depth_barrier: Arc<Barrier>,
-    search_finished: Arc<(Mutex<Option<SearchWorkerResult<S, S::Event>>>, Condvar)>,
+    search_finished: SearchFinished<S, S::Event>,
 ) where
     S: Into<T>,
     S::Event: Clone,
@@ -245,8 +261,8 @@ fn bfs_worker<S: State, T, I, G, P>(
                 }
             }
         }
-        // even if the above loop breaks, this wait always blocks every worker
-        // so that if some worker first block here, then other worker `search_finish()`, the former
+        // even if the above loop breaks, this wait always traps every worker
+        // so that if some worker trap here first, then other worker `search_finish()`, the former
         // worker does not stuck here
         let wait_result = depth_barrier.wait();
         if search_finished.0.lock().unwrap().is_some() {
