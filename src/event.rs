@@ -114,6 +114,25 @@ pub mod erased {
     // but currently it's not used, the session does another wrapping before working
     // guess that will be case for every future event scheduler, hope not too ugly boilerplates
 
+    pub struct UnreachableTimer;
+
+    impl<T> Timer<T> for UnreachableTimer {
+        fn set<M: Clone + Send + Sync + 'static>(
+            &mut self,
+            _: std::time::Duration,
+            _: M,
+        ) -> anyhow::Result<TimerId>
+        where
+            T: OnEvent<M>,
+        {
+            unreachable!()
+        }
+
+        fn unset(&mut self, _: TimerId) -> anyhow::Result<()> {
+            unreachable!()
+        }
+    }
+
     pub trait OnEvent<M> {
         fn on_event(&mut self, event: M, timer: &mut impl Timer<Self>) -> anyhow::Result<()>
         where

@@ -301,7 +301,10 @@ pub mod check {
 
     use crate::{
         app::KVStore,
-        event::{erased::OnEvent, SendEvent, TimerId},
+        event::{
+            erased::{OnEvent, UnreachableTimer},
+            SendEvent, TimerId,
+        },
         net::{events::Recv, SendMessage},
         replication::{check::DryCloseLoop, CloseLoop, Invoke, InvokeOk, ReplicaNet, Request},
     };
@@ -315,9 +318,9 @@ pub mod check {
     }
 
     pub struct State<I> {
-        clients: Vec<erased::Client<Addr>>,
-        close_loops: Vec<CloseLoop<I>>,
-        replica: erased::Replica<KVStore, Addr>,
+        pub clients: Vec<erased::Client<Addr>>,
+        pub close_loops: Vec<CloseLoop<I>>,
+        pub replica: erased::Replica<KVStore, Addr>,
 
         message_events: Vec<Event>,
         timer_events: BTreeMap<Addr, VecDeque<Event>>,
@@ -328,31 +331,31 @@ pub mod check {
         transient_upcalls: Vec<Receiver<InvokeOk>>,
     }
 
-    #[derive(Clone)]
+    #[derive(Debug, Clone)]
     pub enum Event {
         Message(Addr, MessageEvent),
         Timer(Addr, u32, TimerEvent),
     }
 
-    #[derive(Clone)]
+    #[derive(Debug, Clone)]
     pub enum MessageEvent {
         Request(Request<Addr>),
         Reply(Reply),
     }
 
-    #[derive(Clone)]
+    #[derive(Debug, Clone)]
     pub enum TimerEvent {
         Resend,
     }
 
-    #[derive(PartialEq, Eq, Hash)]
+    #[derive(Debug, PartialEq, Eq, Hash)]
     pub struct DryState {
         clients: Vec<DryClient>,
         close_loops: Vec<DryCloseLoop>,
         replica: DryReplica,
     }
 
-    #[derive(PartialEq, Eq, Hash)]
+    #[derive(Debug, PartialEq, Eq, Hash)]
     pub struct DryClient {
         id: u32,
         addr: Addr,
@@ -360,7 +363,7 @@ pub mod check {
         invoke: Option<ClientInvoke>,
     }
 
-    #[derive(PartialEq, Eq, Hash)]
+    #[derive(Debug, PartialEq, Eq, Hash)]
     pub struct DryReplica {
         replies: BTreeMap<u32, Reply>,
         app: KVStore,
@@ -460,6 +463,7 @@ pub mod check {
             }
             let (transient_invoke_sender, transient_invoke_receiver) = channel();
             let mut close_loop = CloseLoop::new(workload);
+            close_loop.invocations.get_or_insert_with(Default::default);
             close_loop.insert_client(
                 1000 + self.close_loops.len() as u32,
                 Transient(transient_invoke_sender),
@@ -569,6 +573,9 @@ pub mod check {
 
     impl<I: Iterator<Item = Vec<u8>>> State<I> {
         pub fn launch(&mut self) -> anyhow::Result<()> {
+            if self.close_loops.len() != self.clients.len() {
+                anyhow::bail!("workload number does not match client number")
+            }
             for close_loop in &mut self.close_loops {
                 close_loop.launch()?
             }
@@ -644,25 +651,6 @@ pub mod check {
                 .ok_or(anyhow::anyhow!("timer not found"))?;
             timer_events.remove(i);
             Ok(())
-        }
-    }
-
-    pub struct UnreachableTimer;
-
-    impl<T> crate::event::erased::Timer<T> for UnreachableTimer {
-        fn set<M: Clone + Send + Sync + 'static>(
-            &mut self,
-            _: std::time::Duration,
-            _: M,
-        ) -> anyhow::Result<TimerId>
-        where
-            T: OnEvent<M>,
-        {
-            unreachable!()
-        }
-
-        fn unset(&mut self, _: TimerId) -> anyhow::Result<()> {
-            unreachable!()
         }
     }
 }

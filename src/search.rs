@@ -1,4 +1,5 @@
 use std::{
+    fmt::Debug,
     hash::Hash,
     num::NonZeroUsize,
     sync::{
@@ -39,18 +40,40 @@ pub trait State {
 
 #[derive(Debug, Clone)]
 pub struct Settings<I, G, P> {
-    invariant: I,
-    goal: G,
-    prune: P,
-    max_depth: Option<NonZeroUsize>,
+    pub invariant: I,
+    pub goal: G,
+    pub prune: P,
+    pub max_depth: Option<NonZeroUsize>,
 }
 
 pub enum SearchResult<S, T, E> {
-    Error(Vec<(E, Arc<T>)>, E, anyhow::Error),
+    Err(Vec<(E, Arc<T>)>, E, anyhow::Error),
     InvariantViolation(Vec<(E, Arc<T>)>, anyhow::Error),
     GoalFound(S),
     SpaceExhausted,
     Timeout,
+}
+
+impl<S: State + Into<T>, T: Debug, E: Debug> Debug for SearchResult<S, T, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Err(_, event, err) => {
+                // TODO
+                writeln!(f, "{event:?}")?;
+                write!(f, "{err:?}")
+            }
+            Self::InvariantViolation(_, err) => {
+                // TODO
+                write!(f, "{err:?}")
+            }
+            Self::GoalFound(state) => {
+                writeln!(f, "GoalFound")?;
+                writeln!(f, "  {:?}", state.duplicate().map(Into::into))
+            }
+            Self::SpaceExhausted => write!(f, "SpaceExhausted"),
+            Self::Timeout => write!(f, "Timeout"),
+        }
+    }
 }
 
 enum SearchWorkerResult<S, E> {
@@ -160,7 +183,7 @@ where
     };
     let result = match result {
         SearchWorkerResult::Error(state, event, err) => {
-            SearchResult::Error(trace(&discovered, Arc::new(state.into())), event, err)
+            SearchResult::Err(trace(&discovered, Arc::new(state.into())), event, err)
         }
         SearchWorkerResult::InvariantViolation(state, err) => {
             SearchResult::InvariantViolation(trace(&discovered, Arc::new(state.into())), err)

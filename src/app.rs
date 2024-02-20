@@ -24,15 +24,15 @@ impl KVStore {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-enum KVStoreOp {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum KVStoreOp {
     Put(String, String),
     Get(String),
     Append(String, String),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-enum KVStoreResult {
+pub enum KVStoreResult {
     PutOk,
     GetResult(String),
     KetyNotFound,

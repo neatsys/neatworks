@@ -36,6 +36,7 @@ pub struct CloseLoop<I> {
     pub invocations: Option<Vec<(Vec<u8>, Vec<u8>)>>,
     invoke_ops: HashMap<u32, Vec<u8>>,
     pub stop: Option<CloseLoopStop>,
+    pub done: bool,
 }
 
 type CloseLoopStop = Box<dyn FnOnce() -> anyhow::Result<()> + Send + Sync>;
@@ -56,6 +57,7 @@ impl<I> CloseLoop<I> {
             invocations: Default::default(),
             invoke_ops: Default::default(),
             stop: None,
+            done: false,
         }
     }
 
@@ -94,6 +96,7 @@ impl<I: Clone> CloseLoop<I> {
             invocations: self.invocations.clone(),
             invoke_ops: self.invoke_ops.clone(),
             stop: None,
+            done: self.done,
         })
     }
 }
@@ -149,9 +152,11 @@ impl<I: Iterator<Item = Vec<u8>>> OnEvent<InvokeOk> for CloseLoop<I> {
         }
         if let Some(op) = op {
             sender.send(Invoke(op))
-        } else if let Some(stop) = self.stop.take() {
-            stop()
         } else {
+            self.done = true;
+            if let Some(stop) = self.stop.take() {
+                stop()?
+            }
             Ok(())
         }
     }
@@ -209,7 +214,7 @@ impl<N: for<'a> SendMessageToEach<A, M>, A: Addr, M> SendMessage<AllReplica, M>
 pub mod check {
     use super::CloseLoop;
 
-    #[derive(PartialEq, Eq, Hash)]
+    #[derive(Debug, PartialEq, Eq, Hash)]
     pub struct DryCloseLoop {
         // seems necessary to include `op_iter` as well
         // but clearly there's technical issue for doing that, and hopefully the workload will have
