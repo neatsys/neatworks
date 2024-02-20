@@ -1,7 +1,7 @@
 use augustus::{
     app::{KVStoreOp, KVStoreResult},
     replication::CloseLoop,
-    search::{breadth_first, Settings},
+    search::{breadth_first, Settings, State as _},
     unreplicated::check::{DryState, State},
 };
 
@@ -39,10 +39,23 @@ fn main() -> anyhow::Result<()> {
         prune: |_: &_| false,
         max_depth: None,
     };
+    let result = breadth_first::<_, DryState, _, _, _>(
+        state.duplicate()?,
+        settings.clone(),
+        1.try_into().unwrap(),
+        None,
+    )?;
+    println!("{result:?}");
+
+    let settings = Settings {
+        invariant: settings.invariant,
+        goal: |_: &_| false,
+        prune: settings.goal,
+        max_depth: None,
+    };
     let result =
         breadth_first::<_, DryState, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
     println!("{result:?}");
-
     Ok(())
 }
 

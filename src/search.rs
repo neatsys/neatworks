@@ -54,22 +54,12 @@ pub enum SearchResult<S, T, E> {
     Timeout,
 }
 
-impl<S: State + Into<T>, T: Debug, E: Debug> Debug for SearchResult<S, T, E> {
+impl<S, T, E> Debug for SearchResult<S, T, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Err(_, event, err) => {
-                // TODO
-                writeln!(f, "{event:?}")?;
-                write!(f, "{err:?}")
-            }
-            Self::InvariantViolation(_, err) => {
-                // TODO
-                write!(f, "{err:?}")
-            }
-            Self::GoalFound(state) => {
-                writeln!(f, "GoalFound")?;
-                writeln!(f, "  {:?}", state.duplicate().map(Into::into))
-            }
+            Self::Err(_, _, err) => write!(f, "Err({err:?}"),
+            Self::InvariantViolation(_, err) => write!(f, "InvariantViolation({err:?})"),
+            Self::GoalFound(_) => write!(f, "GoalFound"),
             Self::SpaceExhausted => write!(f, "SpaceExhausted"),
             Self::Timeout => write!(f, "Timeout"),
         }
@@ -158,29 +148,32 @@ where
         .0
         .lock()
         .map_err(|_| anyhow::anyhow!("posioned"))?;
-    let mut result = if let Some(max_duration) = max_duration {
+    let result = if let Some(max_duration) = max_duration {
         search_finished
             .1
             .wait_timeout_while(result, max_duration, |result| result.is_none())
             .map_err(|_| anyhow::anyhow!("posioned"))?
             .0
+            .take()
     } else {
         search_finished
             .1
             .wait_while(result, |result| result.is_none())
             .map_err(|_| anyhow::anyhow!("posioned"))?
+            .take()
     };
-    println!("search finished");
-    let result = result.take();
+    // println!("search finished");
     for worker in workers {
         worker.join().map_err(|_| anyhow::anyhow!("worker panic"))?
     }
-    println!("worker joined");
-    search_finished.1.notify_all(); // safe fallback for waking status worker
+    // println!("worker joined");
+    // safe fallback for waking status worker
+    std::thread::sleep(Duration::from_millis(20));
+    search_finished.1.notify_all();
     status_worker
         .join()
         .map_err(|_| anyhow::anyhow!("status worker panic"))?;
-    println!("status worker joined");
+    // println!("status worker joined");
 
     let Some(result) = result else {
         return Ok(SearchResult::Timeout);
@@ -207,7 +200,7 @@ fn status_worker<R>(status: impl Fn(Duration) -> String, search_finished: Search
     while {
         (result, wait_result) = search_finished
             .1
-            .wait_timeout_while(result, Duration::from_secs(5), |result| result.is_none())
+            .wait_timeout(result, Duration::from_secs(5))
             .unwrap();
         wait_result.timed_out()
     } {
@@ -259,24 +252,24 @@ fn breath_first_worker<S: State, T, I, G, P>(
     };
     let mut local_depth = 0;
     loop {
-        println!("start depth {local_depth}");
+        // println!("start depth {local_depth}");
         'depth: while let Some((state, dry_state)) = queue.pop() {
-            println!("check invariant");
+            // println!("check invariant");
             if let Err(err) = (settings.invariant)(&state) {
                 search_finish(SearchWorkerResult::InvariantViolation(state, err));
                 break;
             }
-            println!("check goal");
+            // println!("check goal");
             if (settings.goal)(&state) {
                 search_finish(SearchWorkerResult::GoalFound(state));
                 break;
             }
-            println!("check events");
+            // println!("check events");
             for event in state.events() {
                 // these duplication will probably never panic, since initial state duplication
                 // already success
                 let mut next_state = state.duplicate().unwrap();
-                println!("step");
+                // println!("step");
                 if let Err(err) = next_state.step(event.clone()) {
                     search_finish(SearchWorkerResult::Error(state, event, err));
                     break 'depth;
@@ -300,16 +293,18 @@ fn breath_first_worker<S: State, T, I, G, P>(
                 }
             }
         }
-        println!("end depth {local_depth} pushed {}", pushing_queue.len());
+        // println!("end depth {local_depth} pushed {}", pushing_queue.len());
 
         // even if the above loop breaks, this wait always traps every worker
         // so that if some worker trap here first, then other worker `search_finish()`, the former
         // worker does not stuck here
         let wait_result = depth_barrier.wait();
+        // println!("barrier");
         if search_finished.0.lock().unwrap().is_some() {
-            println!("search result is some");
+            // println!("search result is some");
             break;
         }
+        // println!("continue on next depth");
 
         local_depth += 1;
         if wait_result.is_leader() {
@@ -326,5 +321,5 @@ fn breath_first_worker<S: State, T, I, G, P>(
         std::thread::sleep(Duration::from_millis(10));
         (queue, pushing_queue) = (pushing_queue, queue)
     }
-    println!("worker exit");
+    // println!("worker exit");
 }
