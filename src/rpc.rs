@@ -259,7 +259,7 @@ impl<N: for<'a> SendMessageToEach<A, M>, A: Addr, M> SendMessage<All, M> for Ind
 pub mod check {
     use super::{CloseLoop, Payload};
 
-    #[derive(Debug, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub struct DryCloseLoop {
         // seems necessary to include `op_iter` as well
         // but clearly there's technical issue for doing that, and hopefully the workload will have

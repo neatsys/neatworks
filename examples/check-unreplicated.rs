@@ -5,7 +5,7 @@ use augustus::{
         kvstore::{static_workload, InfinitePutGet},
         KVStoreOp, KVStoreResult,
     },
-    search::{breadth_first, Settings, State as _},
+    search::{breadth_first, random_depth_first, Settings, State as _},
     unreplicated::check::{DryState, State},
 };
 use rand::thread_rng;
@@ -96,13 +96,22 @@ fn main() -> anyhow::Result<()> {
     state.push_client(InfinitePutGet::new("KEY1", &mut thread_rng())?)?;
     state.push_client(InfinitePutGet::new("KEY2", &mut thread_rng())?)?;
     state.launch()?;
-    let settings = Settings {
+    let mut settings = Settings {
         invariant: |_: &_| Ok(()),
         goal: |_: &_| false,
         prune: |_: &_| false,
         max_depth: None,
     };
     let result = breadth_first::<_, DryState, _, _, _>(
+        state.duplicate()?,
+        settings.clone(),
+        available_parallelism()?,
+        // 1.try_into().unwrap(),
+        Duration::from_secs(15),
+    )?;
+    println!("{result:?}");
+    settings.max_depth = Some(1000.try_into().unwrap());
+    let result = random_depth_first::<_, DryState, _, _, _>(
         state,
         settings,
         available_parallelism()?,

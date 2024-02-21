@@ -22,7 +22,8 @@ opt-level = 3
 
 [profile.artifact]
 inherits = "release"
-strip = true
+debug = true
+# strip = true
 # lto = true
 
 [dependencies]

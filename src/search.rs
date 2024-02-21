@@ -1,9 +1,10 @@
 use std::{
     fmt::Debug,
     hash::Hash,
+    iter::{repeat, repeat_with},
     num::NonZeroUsize,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst},
+        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::SeqCst},
         Arc, Barrier, Condvar, Mutex,
     },
     time::{Duration, Instant},
@@ -11,6 +12,7 @@ use std::{
 
 use crossbeam_queue::SegQueue;
 use dashmap::DashMap;
+use rand::{seq::SliceRandom, thread_rng};
 
 pub trait State {
     type Event;
@@ -47,8 +49,8 @@ pub struct Settings<I, G, P> {
 }
 
 pub enum SearchResult<S, T, E> {
-    Err(Vec<(E, Arc<T>)>, E, anyhow::Error),
-    InvariantViolation(Vec<(E, Arc<T>)>, anyhow::Error),
+    Err(Vec<(E, T)>, E, anyhow::Error),
+    InvariantViolation(Vec<(E, T)>, anyhow::Error),
     GoalFound(S),
     SpaceExhausted,
     Timeout,
@@ -66,13 +68,6 @@ impl<S, T, E> Debug for SearchResult<S, T, E> {
     }
 }
 
-enum SearchWorkerResult<S, E> {
-    Error(S, E, anyhow::Error),
-    InvariantViolation(S, anyhow::Error),
-    GoalFound(S),
-    SpaceExhausted,
-}
-
 pub fn breadth_first<S, T, I, G, P>(
     initial_state: S,
     settings: Settings<I, G, P>,
@@ -82,15 +77,11 @@ pub fn breadth_first<S, T, I, G, P>(
 where
     S: State + Into<T> + Send + 'static,
     S::Event: Clone + Send + Sync,
-    T: Eq + Hash + Send + Sync + 'static,
+    T: Clone + Eq + Hash + Send + Sync + 'static,
     I: Fn(&S) -> anyhow::Result<()> + Clone + Send + 'static,
     G: Fn(&S) -> bool + Clone + Send + 'static,
     P: Fn(&S) -> bool + Clone + Send + 'static,
-    // T: Debug,
-    // S::Event: Debug,
 {
-    let max_duration = max_duration.into();
-
     let discovered = Arc::new(DashMap::new());
     let queue = Arc::new(SegQueue::new());
     let pushing_queue = Arc::new(SegQueue::new());
@@ -108,44 +99,130 @@ where
         },
     );
 
-    let mut workers = Vec::new();
-    for _ in 0..num_worker.get() {
-        let settings = settings.clone();
-        let discovered = discovered.clone();
-        let queue = queue.clone();
-        let pushing_queue = pushing_queue.clone();
-        let depth = depth.clone();
-        let depth_barrier = depth_barrier.clone();
-        let search_finished = search_finished.clone();
-        workers.push(std::thread::spawn(move || {
-            breath_first_worker(
-                settings,
-                discovered,
-                queue,
-                pushing_queue,
-                depth,
-                depth_barrier,
-                search_finished,
+    let result = search_internal(
+        max_duration,
+        repeat({
+            let discovered = discovered.clone();
+            let depth = depth.clone();
+            let search_finished = search_finished.clone();
+            move || {
+                breath_first_worker(
+                    settings,
+                    discovered,
+                    queue,
+                    pushing_queue,
+                    depth,
+                    depth_barrier,
+                    search_finished,
+                )
+            }
+        })
+        .take(num_worker.get()),
+        {
+            let discovered = discovered.clone();
+            move |elapsed| {
+                format!(
+                    "Explored: {}, Depth {} ({:.2}s, {:.2}K states/s)",
+                    discovered.len(),
+                    depth.load(SeqCst),
+                    elapsed.as_secs_f32(),
+                    discovered.len() as f32 / elapsed.as_secs_f32() / 1000.
+                )
+            }
+        },
+        search_finished,
+    )?;
+
+    let Some(result) = result else {
+        return Ok(SearchResult::Timeout);
+    };
+    let result = match result {
+        SearchWorkerResult::Error(state, event, err) => {
+            SearchResult::Err(trace(&discovered, state.into()), event, err)
+        }
+        SearchWorkerResult::InvariantViolation(state, err) => {
+            SearchResult::InvariantViolation(trace(&discovered, state.into()), err)
+        }
+        SearchWorkerResult::GoalFound(state) => SearchResult::GoalFound(state),
+        SearchWorkerResult::SpaceExhausted => SearchResult::SpaceExhausted,
+    };
+    Ok(result)
+}
+
+pub fn random_depth_first<S, T, I, G, P>(
+    initial_state: S,
+    settings: Settings<I, G, P>,
+    num_worker: NonZeroUsize,
+    max_duration: impl Into<Option<Duration>>,
+) -> anyhow::Result<SearchResult<S, T, S::Event>>
+where
+    S: State + Into<T> + Send + 'static,
+    S::Event: Clone + Send + Sync,
+    T: Eq + Hash + Send + Sync + 'static,
+    I: Fn(&S) -> anyhow::Result<()> + Clone + Send + 'static,
+    G: Fn(&S) -> bool + Clone + Send + 'static,
+    P: Fn(&S) -> bool + Clone + Send + 'static,
+{
+    let num_probe = Arc::new(AtomicU32::new(0));
+    let num_state = Arc::new(AtomicU32::new(0));
+    let search_finished = Arc::new((Mutex::new(None), Condvar::new(), AtomicBool::new(false)));
+
+    let initial_state = initial_state.duplicate()?;
+    let result = search_internal(
+        max_duration,
+        {
+            let num_probe = num_probe.clone();
+            let num_state = num_state.clone();
+            let search_finished = search_finished.clone();
+            repeat_with(move || {
+                let settings = settings.clone();
+                let initial_state = initial_state.duplicate().unwrap();
+                let num_probe = num_probe.clone();
+                let num_state = num_state.clone();
+                let search_finished = search_finished.clone();
+                move || {
+                    random_depth_first_worker(
+                        settings,
+                        initial_state,
+                        num_probe,
+                        num_state,
+                        search_finished,
+                    )
+                }
+            })
+            .take(num_worker.get())
+        },
+        move |elasped| {
+            format!(
+                "Explored: {}, Num Probes: {} ({:.2}s, {:.2}K explored/s)",
+                num_state.load(SeqCst),
+                num_probe.load(SeqCst),
+                elasped.as_secs_f32(),
+                num_state.load(SeqCst) as f32 / elasped.as_secs_f32() / 1000.
             )
-        }))
+        },
+        search_finished,
+    )?;
+    Ok(result.unwrap_or(SearchResult::Timeout))
+}
+
+fn search_internal<R: Send + 'static, F: FnOnce() + Send + 'static>(
+    max_duration: impl Into<Option<Duration>>,
+    workers: impl Iterator<Item = F>,
+    status: impl Fn(Duration) -> String + Send + 'static,
+    search_finished: SearchFinished<R>,
+) -> anyhow::Result<Option<R>>
+where
+{
+    let max_duration = max_duration.into();
+
+    let mut worker_tasks = Vec::new();
+    for worker in workers {
+        worker_tasks.push(std::thread::spawn(worker))
     }
     let status_worker = std::thread::spawn({
         let search_finished = search_finished.clone();
-        let discovered = discovered.clone();
-        move || {
-            status_worker(
-                |elapsed| {
-                    format!(
-                        "Explored: {}, Depth {} ({:.2}s, {:.2}K states/s)",
-                        discovered.len(),
-                        depth.load(SeqCst),
-                        elapsed.as_secs_f32(),
-                        discovered.len() as f32 / elapsed.as_secs_f32() / 1000.
-                    )
-                },
-                search_finished,
-            )
-        }
+        move || status_worker(status, search_finished)
     });
 
     let result = search_finished
@@ -170,7 +247,7 @@ where
     search_finished.2.store(true, SeqCst);
     search_finished.1.notify_all();
     // println!("search finished");
-    for worker in workers {
+    for worker in worker_tasks {
         worker.join().map_err(|_| anyhow::anyhow!("worker panic"))?
     }
     // println!("worker joined");
@@ -178,20 +255,6 @@ where
         .join()
         .map_err(|_| anyhow::anyhow!("status worker panic"))?;
     // println!("status worker joined");
-
-    let Some(result) = result else {
-        return Ok(SearchResult::Timeout);
-    };
-    let result = match result {
-        SearchWorkerResult::Error(state, event, err) => {
-            SearchResult::Err(trace(&discovered, Arc::new(state.into())), event, err)
-        }
-        SearchWorkerResult::InvariantViolation(state, err) => {
-            SearchResult::InvariantViolation(trace(&discovered, Arc::new(state.into())), err)
-        }
-        SearchWorkerResult::GoalFound(state) => SearchResult::GoalFound(state),
-        SearchWorkerResult::SpaceExhausted => SearchResult::SpaceExhausted,
-    };
     Ok(result)
 }
 
@@ -221,17 +284,24 @@ struct StateInfo<T, E> {
     depth: usize, // to assert trace correctness?
 }
 
-fn trace<T: Eq + Hash, E: Clone>(
+fn trace<T: Eq + Hash + Clone, E: Clone>(
     discovered: &DashMap<Arc<T>, StateInfo<T, E>>,
-    target: Arc<T>,
-) -> Vec<(E, Arc<T>)> {
+    target: T,
+) -> Vec<(E, T)> {
     let info = discovered.get(&target).unwrap();
-    let Some(prev) = &info.prev else {
+    let Some((prev_event, prev_state)) = &info.prev else {
         return Vec::new();
     };
-    let mut trace = trace(discovered, prev.1.clone());
-    trace.push((prev.0.clone(), target));
+    let mut trace = trace(discovered, T::clone(prev_state));
+    trace.push((prev_event.clone(), target));
     trace
+}
+
+enum SearchWorkerResult<S, E> {
+    Error(S, E, anyhow::Error),
+    InvariantViolation(S, anyhow::Error),
+    GoalFound(S),
+    SpaceExhausted,
 }
 
 type Discovered<T, E> = Arc<DashMap<Arc<T>, StateInfo<T, E>>>;
@@ -263,6 +333,7 @@ fn breath_first_worker<S: State, T, I, G, P>(
     loop {
         // println!("start depth {local_depth}");
         'depth: while let Some((state, dry_state)) = queue.pop() {
+            // TODO check initial state
             // println!("check events");
             for event in state.events() {
                 // these duplication will probably never panic, since initial state duplication
@@ -336,4 +407,59 @@ fn breath_first_worker<S: State, T, I, G, P>(
         (queue, pushing_queue) = (pushing_queue, queue)
     }
     // println!("worker exit");
+}
+
+fn random_depth_first_worker<S: State, T, I, G, P>(
+    settings: Settings<I, G, P>,
+    initial_state: S,
+    num_probe: Arc<AtomicU32>,
+    num_state: Arc<AtomicU32>,
+    search_finished: SearchFinished<SearchResult<S, T, S::Event>>,
+) where
+    S: Into<T>,
+    S::Event: Clone,
+    T: Eq + Hash,
+    I: Fn(&S) -> anyhow::Result<()>,
+    G: Fn(&S) -> bool,
+    P: Fn(&S) -> bool,
+{
+    let search_finish = |result| {
+        search_finished.0.lock().unwrap().get_or_insert(result);
+        search_finished.2.store(true, SeqCst);
+        search_finished.1.notify_all()
+    };
+    while !search_finished.2.load(SeqCst) {
+        num_probe.fetch_add(1, SeqCst);
+        let mut state = initial_state.duplicate().unwrap();
+        let mut trace = Vec::new();
+        // TODO check initial state
+        for depth in 0.. {
+            let events = state.events();
+            let Some(event) = events.choose(&mut thread_rng()).cloned() else {
+                break;
+            };
+            if let Err(err) = state.step(event.clone()) {
+                search_finish(SearchResult::Err(trace, event, err));
+                break;
+            }
+            num_state.fetch_add(1, SeqCst);
+            trace.push((event, state.duplicate().unwrap().into()));
+            if let Err(err) = (settings.invariant)(&state) {
+                search_finish(SearchResult::InvariantViolation(trace, err));
+                break;
+            }
+            // highly unpractical
+            // effectively monkey-typing an OSDI paper
+            if (settings.goal)(&state) {
+                search_finish(SearchResult::GoalFound(state));
+                break;
+            }
+            if (settings.prune)(&state)
+                || Some(depth + 1) == settings.max_depth.map(Into::into)
+                || search_finished.2.load(SeqCst)
+            {
+                break;
+            }
+        }
+    }
 }

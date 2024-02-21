@@ -424,7 +424,7 @@ pub mod check {
         Resend,
     }
 
-    #[derive(Debug, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub struct DryState {
         clients: Vec<DryClient>,
         close_loops: Vec<DryCloseLoop>,
@@ -433,7 +433,7 @@ pub mod check {
         timer_events: BTreeMap<Addr, VecDeque<TimerEvent>>,
     }
 
-    #[derive(Debug, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub struct DryClient {
         id: u32,
         addr: Addr,
@@ -441,7 +441,7 @@ pub mod check {
         invoke: Option<ClientInvoke>,
     }
 
-    #[derive(Debug, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub struct DryReplica {
         replies: BTreeMap<u32, Reply>,
         app: KVStore,
