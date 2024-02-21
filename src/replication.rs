@@ -110,10 +110,8 @@ impl<I: Iterator<Item = Workload>> CloseLoop<I> {
                 .workload_iter
                 .next()
                 .ok_or(anyhow::anyhow!("not enough op"))?;
-            if self.invocations.is_some() {
-                self.invoke_workloads
-                    .insert(*client_id, (op.clone(), expected_result));
-            }
+            self.invoke_workloads
+                .insert(*client_id, (op.clone(), expected_result));
             if self.latencies.is_some() {
                 self.invoke_instants.insert(*client_id, Instant::now());
             }
@@ -156,23 +154,23 @@ impl<I: Iterator<Item = Workload>> OnEvent<InvokeOk> for CloseLoop<I> {
             latencies.push(replaced_instant.elapsed())
         }
         let workload = self.workload_iter.next();
+        let (replaced_op, replaced_expected_result) = if let Some(workload) = &workload {
+            self.invoke_workloads.insert(client_id, workload.clone())
+        } else {
+            self.invoke_workloads.remove(&client_id)
+        }
+        .ok_or(anyhow::anyhow!(
+            "missing invocation record of client id {client_id}"
+        ))?;
+        if let Some(expected_result) = replaced_expected_result {
+            if result != expected_result {
+                Err(UnexpectedResult {
+                    expect: expected_result,
+                    actual: result.clone(),
+                })?
+            }
+        }
         if let Some(invocations) = &mut self.invocations {
-            let (replaced_op, replaced_expected_result) = if let Some(workload) = &workload {
-                self.invoke_workloads.insert(client_id, workload.clone())
-            } else {
-                self.invoke_workloads.remove(&client_id)
-            }
-            .ok_or(anyhow::anyhow!(
-                "missing invocation record of client id {client_id}"
-            ))?;
-            if let Some(expected_result) = replaced_expected_result {
-                if result != expected_result {
-                    Err(UnexpectedResult {
-                        expect: expected_result,
-                        actual: result.clone(),
-                    })?
-                }
-            }
             invocations.push((replaced_op, result))
         }
         if let Some((op, _)) = workload {

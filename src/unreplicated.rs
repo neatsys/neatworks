@@ -493,7 +493,7 @@ pub mod check {
 
             let (transient_invoke_sender, transient_invoke_receiver) = channel();
             let mut close_loop = CloseLoop::new(workload);
-            close_loop.invocations.get_or_insert_with(Default::default);
+            // close_loop.invocations.get_or_insert_with(Default::default);
             close_loop.insert_client(id, Transient(transient_invoke_sender))?;
             self.close_loops.push(close_loop);
             self.transient_invokes.push(transient_invoke_receiver);
