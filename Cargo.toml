@@ -38,10 +38,12 @@ lru = "0.12.2"
 primitive-types = "0.12.2"
 rand = "0.8.5"
 replication-control-messages = { version = "0.1.0", path = "tools/replication-control-messages" }
+rustc-hash = "1.1.0"
 secp256k1 = { version = "0.28.1", features = ["rand-std", "serde"] }
 serde = { version = "1.0.195", features = ["derive"] }
 serde_json = "1.0.114"
 sha2 = "0.10.8"
+tikv-jemallocator = "0.5.4"
 tokio = { version = "1.35.1", features = [
     "net",
     "time",

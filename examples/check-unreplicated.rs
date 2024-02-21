@@ -10,6 +10,13 @@ use augustus::{
 };
 use rand::thread_rng;
 
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 fn main() -> anyhow::Result<()> {
     let mut state = State::new();
     state.push_client(static_workload(

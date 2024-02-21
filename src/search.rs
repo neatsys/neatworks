@@ -1,6 +1,6 @@
 use std::{
     fmt::Debug,
-    hash::Hash,
+    hash::{BuildHasherDefault, Hash},
     iter::{repeat, repeat_with},
     num::NonZeroUsize,
     sync::{
@@ -13,6 +13,7 @@ use std::{
 use crossbeam_queue::SegQueue;
 use dashmap::DashMap;
 use rand::{seq::SliceRandom, thread_rng};
+use rustc_hash::FxHasher;
 
 pub trait State {
     type Event;
@@ -82,7 +83,9 @@ where
     G: Fn(&S) -> bool + Clone + Send + 'static,
     P: Fn(&S) -> bool + Clone + Send + 'static,
 {
-    let discovered = Arc::new(DashMap::new());
+    let discovered = Arc::new(DashMap::with_hasher(
+        BuildHasherDefault::<FxHasher>::default(),
+    ));
     let queue = Arc::new(SegQueue::new());
     let pushing_queue = Arc::new(SegQueue::new());
     let depth = Arc::new(AtomicUsize::new(0));
@@ -284,10 +287,9 @@ struct StateInfo<T, E> {
     depth: usize, // to assert trace correctness?
 }
 
-fn trace<T: Eq + Hash + Clone, E: Clone>(
-    discovered: &DashMap<Arc<T>, StateInfo<T, E>>,
-    target: T,
-) -> Vec<(E, T)> {
+type Discovered<T, E> = DashMap<Arc<T>, StateInfo<T, E>, BuildHasherDefault<FxHasher>>;
+
+fn trace<T: Eq + Hash + Clone, E: Clone>(discovered: &Discovered<T, E>, target: T) -> Vec<(E, T)> {
     let info = discovered.get(&target).unwrap();
     let Some((prev_event, prev_state)) = &info.prev else {
         return Vec::new();
@@ -304,11 +306,9 @@ enum SearchWorkerResult<S, E> {
     SpaceExhausted,
 }
 
-type Discovered<T, E> = Arc<DashMap<Arc<T>, StateInfo<T, E>>>;
-
 fn breath_first_worker<S: State, T, I, G, P>(
     settings: Settings<I, G, P>,
-    discovered: Discovered<T, S::Event>,
+    discovered: Arc<Discovered<T, S::Event>>,
     mut queue: Arc<SegQueue<(S, Arc<T>)>>,
     mut pushing_queue: Arc<SegQueue<(S, Arc<T>)>>,
     depth: Arc<AtomicUsize>,

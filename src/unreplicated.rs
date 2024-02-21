@@ -347,10 +347,40 @@ pub mod erased {
 // that to be exposed to model checker to reorder, duplicate or drop, and other
 // events e.g. the `Invoke` and `InvokeOk` between clients and close loops can
 // be considered as internal events and hided from model checker since it is
-// little useful to reorder them with message/timer events. the more flexibility
-// results in a weaker framework that can write less generic code for common
-// case (since we indeed assume less common cases), which results in more
-// boilerplates on app side to take that complexity. we always saw that in
+// little useful to reorder them with message/timer events.
+//
+// the more flexibility results in a weaker framework that can write less
+// generic code for common case (since we indeed assume less common cases),
+// which results in more boilerplates on app side to take that complexity. we
+// always saw that in various artifact executables, and now it's getting worse:
+// we will have to repeat the boilerplate for every protocol that demands unit
+// tests, which is...every protocol
+//
+// actually, it's even worse than the artifact boilerplate. here we must unify
+// every event type down to single representation, in order to have one "model"
+// that has full control of what's happening first and what's happening later.
+// protocols usually have no interest in helping on this, especially the ones
+// work with type-erased style event. as the result, we have to fill a lot of
+// event hierarchy, and adapt into/out of it. we must have the "into" adapter on
+// `impl SendEvent` and `impl Timer` side (and the latter one awfully based on
+// `dyn Any`), and have the "out of" adapter on `State::step` (and
+// `State::flush` below, which is tentatively decided as the conventional method
+// for propagating internal events without consulting model checker). what makes
+// it a problem is that all these boilerplates have to be protocol-specific.
+// there's hardly anything code to be reused across protocols
+//
+// that's it. the `impl Into<DryState>` boilerplate. the `State::duplicate`
+// boilerplate. the explicit event hierarchy, with the boilerplate to unify/
+// dispatch events. all these probably has interior complexity and can only be
+// abstracted at least at derivable macros level, that is, we cannot write a
+// bunch of trait and let compiler to generate them automatically. i guess this
+// is the cost we have to pay to perform model checking
+// * in a static-typed language
+// * which happens to lack runtime reflection
+// * and we do not have a strict model of what protocols we are/will be writing
+//   in mind
+// fortunately the performance speedup kind of pays off. however, when things
+// comes into unit testing, a less-effort approach is very desirable
 pub mod check {
     use std::{
         any::Any,
