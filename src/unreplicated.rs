@@ -6,7 +6,7 @@ use crate::{
     app::App,
     event::{OnEvent, SendEvent, Timer, TimerId},
     net::{deserialize, Addr, MessageNet, SendMessage},
-    replication::{Invoke, InvokeOk, Payload, Request},
+    rpc::{Invoke, InvokeOk, Payload, Request},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -221,7 +221,7 @@ pub mod erased {
             SendEvent,
         },
         net::{deserialize, events::Recv, Addr},
-        replication::{Invoke, Request},
+        rpc::{Invoke, Request},
     };
 
     use super::{ClientUpcall, Reply, ToClientNet, ToReplicaNet};
@@ -289,6 +289,68 @@ pub mod erased {
     }
 }
 
+// notes about this iteration of model checking design. later code below may get
+// extracted into a reusable module that generally supports model checking of
+// various protocols, but the code that matters will probably stay here
+//
+// although trying out searching in state space is more as a jourey out of
+// curious, the `State` that aggreates node states and network state and steps
+// on them is also demanded by simulation-style unit tests. a decent protocol
+// test suite probably involves infrastructures like `SimulatedTransport` in
+// SpecPaxos codebase, which effectively does one "probe" of random-DFS as
+// DSLabs defines, which restricted (may even deterministic) randomness that
+// makes some sense e.g. no re-deliver, prefer deliver messages over times, etc.
+//
+// (so a minor concern is that if there's boilerplate code similar the one below
+// for every protocol, whether `pub mod check` naming convention is appropriate.
+// `check` somehow implies model checking, which somehow implies the DSLabs way,
+// while a simluation test is kind of a different thing)
+//
+// the `impl OnEvent` owns `impl SendEvent` in this codebase. it's a tradeoff
+// on interface and code organization that so far seems good in other part of
+// the current codebase. It does expose some difficulties for model checking
+// though.
+//
+// the senders are probably not `Eq + Hash` which is required by BFS. so i
+// introduce the concept of "dry state" that is `Eq + Hash` and fulfills BFS's
+// demand: two states with identical dry state will have identical succesor
+// state space. interestingly DSLabs also has an "equal and hash wrapper" thing
+// for BFS and similarly "dehydrates" timers stuff from the state. i don't know
+// why that is necessary
+//
+// sender implementation for simulation almost has only two choices: either
+// channel sender, or shared mutable data structure which in Rust must be
+// guarded with `Mutex` or similar. Both SpecPaxos and DSLabs go with the second
+// choice (with unsafe bare metal data structure that carefully used). Currently
+// i choose the first one but that doesn't matter. both of them look ugly.
+// i don't like the idea that stepping a state must always come with creating
+// (potentially a bunch of) mutexes or channels. as far as i know the common
+// choice of model checking is to send the events by returning them from event
+// handlers, instead of by invoking on some owned internal objects. that
+// approach comes with its own performance and engineering overhead and i like
+// it even less
+//
+// another concern is about cloning. the cloning semantic on `impl OnEvent`s
+// is always funny. for example if it owns channel-based `impl SendEvent`, then
+// both the original object and the cloned one will send event to the same
+// receiver, which may or may not be expected. even if they impl Clone in this
+// way, `State` cannot be cloned by recursively cloning underlying
+// `impl OnEvent`s, because it must not share channels/shared data structure
+// with the original `State`. this is why the `State` trait does not subtyping
+// `Clone`, but has its own `duplicate` defined. the `impl State`s like the one
+// below probably cannot derive `Clone`, and even if so, model checking probably
+// should not make use of it
+//
+// the codebase intentially be flexible on event types. indeed, it does not
+// perform model checking for networking apps, but perform model checking for
+// general event-driven apps. each `impl State` defines its own set of events
+// that to be exposed to model checker to reorder, duplicate or drop, and other
+// events e.g. the `Invoke` and `InvokeOk` between clients and close loops can
+// be considered as internal events and hided from model checker since it is
+// little useful to reorder them with message/timer events. the more flexibility
+// results in a weaker framework that can write less generic code for common
+// case (since we indeed assume less common cases), which results in more
+// boilerplates on app side to take that complexity. we always saw that in
 pub mod check {
     use std::{
         any::Any,
@@ -306,9 +368,7 @@ pub mod check {
             SendEvent, TimerId,
         },
         net::{events::Recv, SendMessage},
-        replication::{
-            check::DryCloseLoop, CloseLoop, Invoke, InvokeOk, ReplicaNet, Request, Workload,
-        },
+        rpc::{check::DryCloseLoop, CloseLoop, IndexNet, Invoke, InvokeOk, Request, Workload},
     };
 
     use super::{erased, ClientInvoke, Reply};
@@ -485,7 +545,7 @@ pub mod check {
             let client = erased::Client::new(
                 id,
                 Addr::Client(index),
-                Box::new(ReplicaNet::new(
+                Box::new(IndexNet::new(
                     self.transient_net.clone(),
                     vec![Addr::Replica],
                     None,
@@ -536,7 +596,7 @@ pub mod check {
                     addr: client.addr,
                     seq: client.seq,
                     invoke: client.invoke.clone(),
-                    net: Box::new(ReplicaNet::new(
+                    net: Box::new(IndexNet::new(
                         transient_net.clone(),
                         vec![Addr::Replica],
                         None,

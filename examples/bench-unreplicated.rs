@@ -6,7 +6,7 @@ use augustus::{
     app::Null,
     event::{erased, Session},
     net::Udp,
-    replication::{CloseLoop, ReplicaNet},
+    rpc::{CloseLoop, IndexNet},
     unreplicated::{
         self, to_client_on_buf, Client, Replica, ToClientMessageNet, ToReplicaMessageNet,
     },
@@ -75,11 +75,7 @@ async fn main() -> anyhow::Result<()> {
         let mut state = Client::new(
             id,
             addr,
-            ToReplicaMessageNet::new(ReplicaNet::new(
-                raw_net.clone(),
-                replica_addrs.clone(),
-                None,
-            )),
+            ToReplicaMessageNet::new(IndexNet::new(raw_net.clone(), replica_addrs.clone(), None)),
             close_loop_session.erased_sender(),
         );
         let mut state_session = Session::new();

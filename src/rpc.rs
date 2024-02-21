@@ -209,13 +209,13 @@ impl<I: Iterator<Item = Workload>> OnEvent<InvokeOk> for CloseLoop<I> {
 }
 
 #[derive(Debug, Clone)]
-pub struct ReplicaNet<N, A> {
+pub struct IndexNet<N, A> {
     inner_net: N,
     replica_addrs: Vec<A>,
     all_except: Option<usize>,
 }
 
-impl<N, A> ReplicaNet<N, A> {
+impl<N, A> IndexNet<N, A> {
     pub fn new(inner_net: N, replica_addrs: Vec<A>, replica_id: impl Into<Option<u8>>) -> Self {
         Self {
             inner_net,
@@ -225,7 +225,7 @@ impl<N, A> ReplicaNet<N, A> {
     }
 }
 
-impl<N: SendMessage<A, M>, A: Addr, M> SendMessage<u8, M> for ReplicaNet<N, A> {
+impl<N: SendMessage<A, M>, A: Addr, M> SendMessage<u8, M> for IndexNet<N, A> {
     fn send(&mut self, dest: u8, message: M) -> anyhow::Result<()> {
         let dest = self
             .replica_addrs
@@ -235,13 +235,12 @@ impl<N: SendMessage<A, M>, A: Addr, M> SendMessage<u8, M> for ReplicaNet<N, A> {
     }
 }
 
+// intentionally not impl `Addr`; this must be consumed before reaching raw nets
 #[derive(Debug)]
-pub struct AllReplica;
+pub struct All;
 
-impl<N: for<'a> SendMessageToEach<A, M>, A: Addr, M> SendMessage<AllReplica, M>
-    for ReplicaNet<N, A>
-{
-    fn send(&mut self, AllReplica: AllReplica, message: M) -> anyhow::Result<()> {
+impl<N: for<'a> SendMessageToEach<A, M>, A: Addr, M> SendMessage<All, M> for IndexNet<N, A> {
+    fn send(&mut self, All: All, message: M) -> anyhow::Result<()> {
         let addrs = self
             .replica_addrs
             .iter()

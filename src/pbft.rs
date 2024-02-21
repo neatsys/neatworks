@@ -13,7 +13,7 @@ use crate::{
         SendEvent, TimerId,
     },
     net::{deserialize, events::Recv, Addr, MessageNet, SendMessage},
-    replication::{AllReplica, Invoke, InvokeOk, Payload, Request},
+    rpc::{All, Invoke, InvokeOk, Payload, Request},
     worker::erased::Worker,
 };
 
@@ -53,18 +53,18 @@ impl<T: SendMessage<A, Reply>, A> ToClientNet<A> for T {}
 
 pub trait ToReplicaNet<A>:
     SendMessage<u8, Request<A>>
-    + SendMessage<AllReplica, Request<A>>
-    + SendMessage<AllReplica, (Verifiable<PrePrepare>, Vec<Request<A>>)>
-    + SendMessage<AllReplica, Verifiable<Prepare>>
-    + SendMessage<AllReplica, Verifiable<Commit>>
+    + SendMessage<All, Request<A>>
+    + SendMessage<All, (Verifiable<PrePrepare>, Vec<Request<A>>)>
+    + SendMessage<All, Verifiable<Prepare>>
+    + SendMessage<All, Verifiable<Commit>>
 {
 }
 impl<
         T: SendMessage<u8, Request<A>>
-            + SendMessage<AllReplica, Request<A>>
-            + SendMessage<AllReplica, (Verifiable<PrePrepare>, Vec<Request<A>>)>
-            + SendMessage<AllReplica, Verifiable<Prepare>>
-            + SendMessage<AllReplica, Verifiable<Commit>>,
+            + SendMessage<All, Request<A>>
+            + SendMessage<All, (Verifiable<PrePrepare>, Vec<Request<A>>)>
+            + SendMessage<All, Verifiable<Prepare>>
+            + SendMessage<All, Verifiable<Commit>>,
         A,
     > ToReplicaNet<A> for T
 {
@@ -381,7 +381,7 @@ impl<S, A: Addr> OnEvent<(Signed<PrePrepare>, Vec<Request<A>>)> for Replica<S, A
         assert!(replaced.is_none());
         self.log[pre_prepare.op_num as usize].view_num = self.view_num;
         self.log[pre_prepare.op_num as usize].requests = requests.clone();
-        self.net.send(AllReplica, (pre_prepare, requests))
+        self.net.send(All, (pre_prepare, requests))
     }
 }
 
@@ -469,7 +469,7 @@ impl<S, A> OnEvent<Signed<Prepare>> for Replica<S, A> {
         if prepare.view_num != self.view_num {
             return Ok(());
         }
-        self.net.send(AllReplica, prepare.clone())?;
+        self.net.send(All, prepare.clone())?;
         if self.log[prepare.op_num as usize].prepares.is_empty() {
             self.insert_prepare(prepare)?
         }
@@ -600,7 +600,7 @@ impl<S: App, A: Addr> OnEvent<Signed<Commit>> for Replica<S, A> {
         if commit.view_num != self.view_num {
             return Ok(());
         }
-        self.net.send(AllReplica, commit.clone())?;
+        self.net.send(All, commit.clone())?;
         if self.log[commit.op_num as usize].commits.is_empty() {
             self.insert_commit(commit)?
         }

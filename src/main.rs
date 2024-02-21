@@ -15,7 +15,7 @@ use augustus::{
     },
     net::Udp,
     pbft,
-    replication::{CloseLoop, Invoke, InvokeOk, ReplicaNet},
+    rpc::{CloseLoop, IndexNet, Invoke, InvokeOk},
     unreplicated,
     worker::erased::spawn_backend,
 };
@@ -129,7 +129,7 @@ impl NewClient<unreplicated::erased::Client<SocketAddr>> for ClientConfig {
         unreplicated::erased::Client::new(
             id,
             addr,
-            Box::new(unreplicated::ToReplicaMessageNet::new(ReplicaNet::new(
+            Box::new(unreplicated::ToReplicaMessageNet::new(IndexNet::new(
                 net,
                 self.replica_addrs.clone(),
                 None,
@@ -150,7 +150,7 @@ impl NewClient<pbft::Client<SocketAddr>> for ClientConfig {
         pbft::Client::new(
             id,
             addr,
-            pbft::ToReplicaMessageNet::new(ReplicaNet::new(net, self.replica_addrs.clone(), None)),
+            pbft::ToReplicaMessageNet::new(IndexNet::new(net, self.replica_addrs.clone(), None)),
             upcall,
             self.num_replica,
             self.num_faulty,
@@ -251,7 +251,7 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
                 let state = pbft::Replica::<_, SocketAddr>::new(
                     config.replica_id,
                     Null,
-                    pbft::ToReplicaMessageNet::new(ReplicaNet::new(
+                    pbft::ToReplicaMessageNet::new(IndexNet::new(
                         net.clone(),
                         config.replica_addrs,
                         config.replica_id,
