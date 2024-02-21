@@ -3,7 +3,7 @@ use std::{
     hash::Hash,
     num::NonZeroUsize,
     sync::{
-        atomic::{AtomicUsize, Ordering::SeqCst},
+        atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst},
         Arc, Barrier, Condvar, Mutex,
     },
     time::{Duration, Instant},
@@ -77,7 +77,7 @@ pub fn breadth_first<S, T, I, G, P>(
     initial_state: S,
     settings: Settings<I, G, P>,
     num_worker: NonZeroUsize,
-    max_duration: Option<Duration>,
+    max_duration: impl Into<Option<Duration>>,
 ) -> anyhow::Result<SearchResult<S, T, S::Event>>
 where
     S: State + Into<T> + Send + 'static,
@@ -86,16 +86,17 @@ where
     I: Fn(&S) -> anyhow::Result<()> + Clone + Send + 'static,
     G: Fn(&S) -> bool + Clone + Send + 'static,
     P: Fn(&S) -> bool + Clone + Send + 'static,
-
-    T: Debug,
-    S::Event: Debug,
+    // T: Debug,
+    // S::Event: Debug,
 {
+    let max_duration = max_duration.into();
+
     let discovered = Arc::new(DashMap::new());
     let queue = Arc::new(SegQueue::new());
     let pushing_queue = Arc::new(SegQueue::new());
     let depth = Arc::new(AtomicUsize::new(0));
     let depth_barrier = Arc::new(Barrier::new(num_worker.get()));
-    let search_finished = Arc::new((Mutex::new(None), Condvar::new()));
+    let search_finished = Arc::new((Mutex::new(None), Condvar::new(), AtomicBool::new(false)));
 
     let initial_dry_state = Arc::new(initial_state.duplicate()?.into());
     queue.push((initial_state, initial_dry_state.clone()));
@@ -165,14 +166,14 @@ where
             .map_err(|_| anyhow::anyhow!("posioned"))?
             .take()
     };
+    std::thread::sleep(Duration::from_millis(20));
+    search_finished.2.store(true, SeqCst);
+    search_finished.1.notify_all();
     // println!("search finished");
     for worker in workers {
         worker.join().map_err(|_| anyhow::anyhow!("worker panic"))?
     }
     // println!("worker joined");
-    // safe fallback for waking status worker
-    std::thread::sleep(Duration::from_millis(20));
-    search_finished.1.notify_all();
     status_worker
         .join()
         .map_err(|_| anyhow::anyhow!("status worker panic"))?;
@@ -194,7 +195,7 @@ where
     Ok(result)
 }
 
-type SearchFinished<R> = Arc<(Mutex<Option<R>>, Condvar)>;
+type SearchFinished<R> = Arc<(Mutex<Option<R>>, Condvar, AtomicBool)>;
 
 fn status_worker<R>(status: impl Fn(Duration) -> String, search_finished: SearchFinished<R>) {
     let start = Instant::now();
@@ -203,7 +204,9 @@ fn status_worker<R>(status: impl Fn(Duration) -> String, search_finished: Search
     while {
         (result, wait_result) = search_finished
             .1
-            .wait_timeout(result, Duration::from_secs(5))
+            .wait_timeout_while(result, Duration::from_secs(5), |_| {
+                !search_finished.2.load(SeqCst)
+            })
             .unwrap();
         wait_result.timed_out()
     } {
@@ -248,28 +251,18 @@ fn breath_first_worker<S: State, T, I, G, P>(
     I: Fn(&S) -> anyhow::Result<()>,
     G: Fn(&S) -> bool,
     P: Fn(&S) -> bool,
-
-    T: Debug,
-    S::Event: Debug,
+    // T: Debug,
+    // S::Event: Debug,
 {
     let search_finish = |result| {
         search_finished.0.lock().unwrap().get_or_insert(result);
+        search_finished.2.store(true, SeqCst);
         search_finished.1.notify_all()
     };
     let mut local_depth = 0;
     loop {
         // println!("start depth {local_depth}");
         'depth: while let Some((state, dry_state)) = queue.pop() {
-            // println!("check invariant");
-            if let Err(err) = (settings.invariant)(&state) {
-                search_finish(SearchWorkerResult::InvariantViolation(state, err));
-                break;
-            }
-            // println!("check goal");
-            if (settings.goal)(&state) {
-                search_finish(SearchWorkerResult::GoalFound(state));
-                break;
-            }
             // println!("check events");
             for event in state.events() {
                 // these duplication will probably never panic, since initial state duplication
@@ -292,12 +285,27 @@ fn breath_first_worker<S: State, T, I, G, P>(
                     }
                 });
                 // println!("dry state {next_dry_state:?} inserted {inserted}");
-                if inserted
-                    && Some(local_depth + 1) != settings.max_depth.map(Into::into)
+                if !inserted {
+                    continue;
+                }
+                // println!("check invariant");
+                if let Err(err) = (settings.invariant)(&next_state) {
+                    search_finish(SearchWorkerResult::InvariantViolation(next_state, err));
+                    break 'depth;
+                }
+                // println!("check goal");
+                if (settings.goal)(&next_state) {
+                    search_finish(SearchWorkerResult::GoalFound(next_state));
+                    break 'depth;
+                }
+                if Some(local_depth + 1) != settings.max_depth.map(Into::into)
                     && !(settings.prune)(&next_state)
                 {
                     pushing_queue.push((next_state, next_dry_state))
                 }
+            }
+            if search_finished.2.load(SeqCst) {
+                break;
             }
         }
         // println!("end depth {local_depth} pushed {}", pushing_queue.len());
@@ -307,8 +315,7 @@ fn breath_first_worker<S: State, T, I, G, P>(
         // worker does not stuck here
         let wait_result = depth_barrier.wait();
         // println!("barrier");
-        if search_finished.0.lock().unwrap().is_some() {
-            // println!("search result is some");
+        if search_finished.2.load(SeqCst) {
             break;
         }
         // println!("continue on next depth");
