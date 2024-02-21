@@ -14,27 +14,50 @@ use crate::{
     net::{Addr, SendMessage, SendMessageToEach, SendMessageToEachExt as _},
 };
 
+#[derive(
+    Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default, derive_more::Deref, Serialize, Deserialize,
+)]
+pub struct Payload(pub Vec<u8>);
+
+impl Debug for Payload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Ok(s) = std::str::from_utf8(&self.0) {
+            write!(f, "b{s:?}")
+        } else {
+            write!(
+                f,
+                "Bytes({})",
+                self.0
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .concat()
+            )
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Request<A> {
     pub client_id: u32,
     pub client_addr: A,
     pub seq: u32,
-    pub op: Vec<u8>,
+    pub op: Payload,
 }
 
 #[derive(Debug, Clone)]
-pub struct Invoke(pub Vec<u8>);
+pub struct Invoke(pub Payload);
 
 // newtype namespace may be desired after the type erasure migration
-pub type InvokeOk = (u32, Vec<u8>);
+pub type InvokeOk = (u32, Payload);
 
 pub struct CloseLoop<I> {
     clients: HashMap<u32, Box<dyn SendEvent<Invoke> + Send + Sync>>,
     workload_iter: I,
     pub latencies: Option<Vec<Duration>>,
     invoke_instants: HashMap<u32, Instant>,
-    pub invocations: Option<Vec<(Vec<u8>, Vec<u8>)>>,
-    invoke_workloads: HashMap<u32, (Vec<u8>, Option<Vec<u8>>)>,
+    pub invocations: Option<Vec<(Payload, Payload)>>,
+    invoke_workloads: HashMap<u32, Workload>,
     pub stop: Option<CloseLoopStop>,
     pub done: bool,
 }
@@ -47,7 +70,7 @@ impl<I> Debug for CloseLoop<I> {
     }
 }
 
-pub type Workload = (Vec<u8>, Option<Vec<u8>>);
+pub type Workload = (Payload, Option<Payload>);
 
 impl<I> CloseLoop<I> {
     pub fn new(workload_iter: I) -> Self {
@@ -123,8 +146,8 @@ impl<I: Iterator<Item = Workload>> CloseLoop<I> {
 
 #[derive(Debug)]
 pub struct UnexpectedResult {
-    pub expect: Vec<u8>,
-    pub actual: Vec<u8>,
+    pub expect: Payload,
+    pub actual: Payload,
 }
 
 impl Display for UnexpectedResult {
@@ -235,15 +258,15 @@ impl<N: for<'a> SendMessageToEach<A, M>, A: Addr, M> SendMessage<AllReplica, M>
 }
 
 pub mod check {
-    use super::CloseLoop;
+    use super::{CloseLoop, Payload};
 
     #[derive(Debug, PartialEq, Eq, Hash)]
     pub struct DryCloseLoop {
         // seems necessary to include `op_iter` as well
         // but clearly there's technical issue for doing that, and hopefully the workload will have
         // the same intent when all other states are the same
-        invocations: Option<Vec<(Vec<u8>, Vec<u8>)>>,
-        // necessary to include `invoke_ops`?
+        invocations: Option<Vec<(Payload, Payload)>>,
+        // necessary to include `invoke_ops`? probably reflected by the invocation consumer
     }
 
     impl<I> From<CloseLoop<I>> for DryCloseLoop {

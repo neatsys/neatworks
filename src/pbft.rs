@@ -13,7 +13,7 @@ use crate::{
         SendEvent, TimerId,
     },
     net::{deserialize, events::Recv, Addr, MessageNet, SendMessage},
-    replication::{AllReplica, Invoke, InvokeOk, Request},
+    replication::{AllReplica, Invoke, InvokeOk, Payload, Request},
     worker::erased::Worker,
 };
 
@@ -43,7 +43,7 @@ pub struct Commit {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reply {
     seq: u32,
-    result: Vec<u8>,
+    result: Payload,
     view_num: u32,
     replica_id: u8,
 }
@@ -85,7 +85,7 @@ pub struct Client<A> {
 
 #[derive(Debug)]
 struct ClientInvoke {
-    op: Vec<u8>,
+    op: Payload,
     resend_timer: TimerId,
     replies: HashMap<u8, Reply>,
 }
@@ -718,7 +718,7 @@ impl<S: App, A: Addr> Replica<S, A> {
             self.commit_num += 1;
             // println!("Commit {}", self.commit_num);
             for request in &entry.requests {
-                let result = self.app.execute(&request.op)?;
+                let result = Payload(self.app.execute(&request.op)?);
                 let seq = request.seq;
                 let reply = Reply {
                     seq,

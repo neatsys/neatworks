@@ -1,5 +1,6 @@
 use augustus::{
     app::{KVStoreOp, KVStoreResult},
+    replication::Payload,
     search::{breadth_first, Settings, State as _},
     unreplicated::check::{DryState, State},
 };
@@ -24,8 +25,8 @@ fn main() -> anyhow::Result<()> {
         .into_iter()
         .map(|(op, result)| {
             (
-                serde_json::to_vec(&op).unwrap(),
-                Some(serde_json::to_vec(&result).unwrap()),
+                Payload(serde_json::to_vec(&op).unwrap()),
+                Some(Payload(serde_json::to_vec(&result).unwrap())),
             )
         }),
     )?;
@@ -69,8 +70,8 @@ fn main() -> anyhow::Result<()> {
                 })
                 .map(|(op, result)| {
                     (
-                        serde_json::to_vec(&op).unwrap(),
-                        Some(serde_json::to_vec(&result).unwrap()),
+                        Payload(serde_json::to_vec(&op).unwrap()),
+                        Some(Payload(serde_json::to_vec(&result).unwrap())),
                     )
                 }),
         )?

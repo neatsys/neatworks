@@ -86,6 +86,9 @@ where
     I: Fn(&S) -> anyhow::Result<()> + Clone + Send + 'static,
     G: Fn(&S) -> bool + Clone + Send + 'static,
     P: Fn(&S) -> bool + Clone + Send + 'static,
+
+    T: Debug,
+    S::Event: Debug,
 {
     let discovered = Arc::new(DashMap::new());
     let queue = Arc::new(SegQueue::new());
@@ -245,6 +248,9 @@ fn breath_first_worker<S: State, T, I, G, P>(
     I: Fn(&S) -> anyhow::Result<()>,
     G: Fn(&S) -> bool,
     P: Fn(&S) -> bool,
+
+    T: Debug,
+    S::Event: Debug,
 {
     let search_finish = |result| {
         search_finished.0.lock().unwrap().get_or_insert(result);
@@ -269,7 +275,7 @@ fn breath_first_worker<S: State, T, I, G, P>(
                 // these duplication will probably never panic, since initial state duplication
                 // already success
                 let mut next_state = state.duplicate().unwrap();
-                // println!("step");
+                // println!("step {event:?}");
                 if let Err(err) = next_state.step(event.clone()) {
                     search_finish(SearchWorkerResult::Error(state, event, err));
                     break 'depth;
@@ -285,6 +291,7 @@ fn breath_first_worker<S: State, T, I, G, P>(
                         depth: local_depth + 1,
                     }
                 });
+                // println!("dry state {next_dry_state:?} inserted {inserted}");
                 if inserted
                     && Some(local_depth + 1) != settings.max_depth.map(Into::into)
                     && !(settings.prune)(&next_state)

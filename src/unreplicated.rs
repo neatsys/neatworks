@@ -6,13 +6,13 @@ use crate::{
     app::App,
     event::{OnEvent, SendEvent, Timer, TimerId},
     net::{deserialize, Addr, MessageNet, SendMessage},
-    replication::{Invoke, Request},
+    replication::{Invoke, InvokeOk, Payload, Request},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Reply {
     seq: u32,
-    result: Vec<u8>,
+    result: Payload,
 }
 
 pub trait ToClientNet<A>: SendMessage<A, Reply> {}
@@ -23,7 +23,7 @@ impl<T: SendMessage<u8, Request<A>>, A> ToReplicaNet<A> for T {}
 
 #[derive(Debug, Clone, derive_more::From)]
 pub enum ClientEvent {
-    Invoke(Vec<u8>),
+    Invoke(Payload),
     Ingress(Reply),
     ResendTimeout,
 }
@@ -34,8 +34,8 @@ impl From<Invoke> for ClientEvent {
     }
 }
 
-pub trait ClientUpcall: SendEvent<(u32, Vec<u8>)> {}
-impl<T: SendEvent<(u32, Vec<u8>)>> ClientUpcall for T {}
+pub trait ClientUpcall: SendEvent<InvokeOk> {}
+impl<T: SendEvent<InvokeOk>> ClientUpcall for T {}
 
 #[derive(Debug)]
 pub struct Client<N, U, A> {
@@ -50,7 +50,7 @@ pub struct Client<N, U, A> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ClientInvoke {
-    op: Vec<u8>,
+    op: Payload,
     resend_timer: TimerId,
 }
 
@@ -86,7 +86,7 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> OnEvent<ClientEvent> for Clie
 impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
     fn on_invoke(
         &mut self,
-        op: Vec<u8>,
+        op: Payload,
         mut set_resend_timer: impl FnMut(Duration) -> anyhow::Result<TimerId>,
     ) -> anyhow::Result<()> {
         if self.invoke.is_some() {
@@ -189,7 +189,7 @@ impl<S: App, N: ToClientNet<A>, A> Replica<S, N, A> {
         }
         let reply = Reply {
             seq: request.seq,
-            result: self.app.execute(&request.op)?,
+            result: Payload(self.app.execute(&request.op)?),
         };
         self.replies.insert(request.client_id, reply.clone());
         self.net.send(request.client_addr, reply)
@@ -340,26 +340,26 @@ pub mod check {
         Timer(TimerEvent),
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct MessageEvent {
         dest: Addr,
         message: Message,
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     enum Message {
         Request(Request<Addr>),
         Reply(Reply),
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub struct TimerEvent {
         dest: Addr,
         timer_id: u32,
         timer: Timer,
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub enum Timer {
         Resend,
     }
@@ -369,6 +369,8 @@ pub mod check {
         clients: Vec<DryClient>,
         close_loops: Vec<DryCloseLoop>,
         replica: DryReplica,
+        message_events: BTreeSet<MessageEvent>,
+        timer_events: BTreeMap<Addr, VecDeque<TimerEvent>>,
     }
 
     #[derive(Debug, PartialEq, Eq, Hash)]
@@ -406,6 +408,8 @@ pub mod check {
                 clients,
                 close_loops,
                 replica,
+                message_events: value.message_events,
+                timer_events: value.timer_events,
             }
         }
     }
