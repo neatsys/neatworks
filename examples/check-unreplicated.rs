@@ -40,7 +40,7 @@ fn main() -> anyhow::Result<()> {
 
     let settings = Settings {
         invariant: |_: &_| Ok(()),
-        goal: |state: &State<_>| state.close_loops.iter().all(|close_loop| close_loop.done),
+        goal: |state: &State<_>| state.clients.iter().all(|client| client.close_loop.done),
         prune: |_: &_| false,
         max_depth: None,
     };
@@ -77,7 +77,7 @@ fn main() -> anyhow::Result<()> {
 
     let settings = Settings {
         invariant: |_: &_| Ok(()),
-        goal: |state: &State<_>| state.close_loops.iter().all(|close_loop| close_loop.done),
+        goal: |state: &State<_>| state.clients.iter().all(|client| client.close_loop.done),
         prune: |_: &_| false,
         max_depth: None,
     };
