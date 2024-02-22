@@ -329,8 +329,7 @@ fn breath_first_worker<S: State, T, I, G, P>(
         search_finished.2.store(true, SeqCst);
         search_finished.1.notify_all()
     };
-    let mut local_depth = 0;
-    loop {
+    for local_depth in 0.. {
         // println!("start depth {local_depth}");
         'depth: while let Some((state, dry_state)) = queue.pop() {
             // TODO check initial state
@@ -391,17 +390,17 @@ fn breath_first_worker<S: State, T, I, G, P>(
         }
         // println!("continue on next depth");
 
-        local_depth += 1;
         if wait_result.is_leader() {
-            depth.store(local_depth, SeqCst);
+            depth.store(local_depth + 1, SeqCst);
         }
         // one corner case: if some worker happen to perform empty check very late, and by that time
         // other workers already working on the next depth for a while and have exhausted the queue,
         // then the late worker will false positive report SpaceExhausted
-        if pushing_queue.is_empty() || Some(local_depth) == settings.max_depth.map(Into::into) {
+        if pushing_queue.is_empty() {
             search_finish(SearchWorkerResult::SpaceExhausted);
             break;
         }
+        assert_ne!(Some(local_depth + 1), settings.max_depth.map(Into::into));
         // i don't want to deal with that seriously, so just slow down the fast wakers a little bit
         std::thread::sleep(Duration::from_millis(10));
         (queue, pushing_queue) = (pushing_queue, queue)
