@@ -10,7 +10,7 @@ use augustus::{
     app::Null,
     crypto::Crypto,
     event::{
-        erased::{OnEvent, Sender, Session},
+        erased::{OnEvent, Session, SessionSender},
         SendEvent,
     },
     net::Udp,
@@ -160,7 +160,7 @@ impl NewClient<pbft::Client<SocketAddr>> for ClientConfig {
 
 async fn client_session<S: OnEvent<Invoke> + Send + Sync + 'static>(
     config: impl NewClient<S>,
-    on_buf: impl Fn(&[u8], &mut Sender<S>) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
+    on_buf: impl Fn(&[u8], &mut SessionSender<S>) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
     benchmark_result: Arc<Mutex<Option<BenchmarkResult>>>,
 ) -> anyhow::Result<()> {
     let mut concurrent = CloseLoop::new(repeat_with(Default::default));
@@ -280,9 +280,9 @@ async fn replica_session<
     F: Future<Output = anyhow::Result<()>> + Send + 'static,
 >(
     mut state: S,
-    on_buf: impl Fn(&[u8], &mut Sender<S>) -> anyhow::Result<()> + Send + Sync + 'static,
+    on_buf: impl Fn(&[u8], &mut SessionSender<S>) -> anyhow::Result<()> + Send + Sync + 'static,
     net: Udp,
-    crypto_session: impl FnOnce(Sender<S>) -> F,
+    crypto_session: impl FnOnce(SessionSender<S>) -> F,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let mut session = Session::new();

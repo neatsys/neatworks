@@ -14,7 +14,7 @@ use augustus::{
     blob,
     crypto::{Crypto, DigestHash, H256},
     event::{
-        erased::{Sender, Session},
+        erased::{Session, SessionSender},
         SendEvent,
     },
     kademlia::{self, Buckets, PeerId, PeerRecord},
@@ -161,7 +161,7 @@ struct AppState {
 #[derive(Debug, Default)]
 struct PeersState {
     sessions: JoinSet<anyhow::Result<()>>,
-    senders: Vec<Sender<Peer<[u8; 32]>>>,
+    senders: Vec<SessionSender<Peer<[u8; 32]>>>,
     // cancel
 }
 

@@ -169,9 +169,6 @@ pub mod erased {
         }
     }
 
-    // TODO convert to enum when there's second implementation
-    pub type Sender<S> = SessionSender<S>;
-
     // Session-specific code onward
     // a must-have newtype to allow us talk about Self type in super::Session's event position
     #[derive(derive_more::From)]
@@ -212,7 +209,7 @@ pub mod erased {
     pub type SessionSender<S> = Erasure<super::Sender<SessionEvent<S>>, S, Session<S>>;
 
     impl<S> Session<S> {
-        pub fn erased_sender(&self) -> Sender<S> {
+        pub fn erased_sender(&self) -> SessionSender<S> {
             Erasure(self.sender(), Default::default())
         }
     }
