@@ -387,9 +387,10 @@ pub mod erased {
 pub mod check {
     use std::{
         any::Any,
-        collections::{BTreeMap, BTreeSet, VecDeque},
+        collections::{BTreeMap, BTreeSet},
         mem::replace,
         sync::mpsc::{channel, Receiver, Sender},
+        time::Duration,
     };
 
     use serde::{Deserialize, Serialize};
@@ -425,7 +426,7 @@ pub mod check {
 
     pub struct ClientState<I> {
         pub state: erased::Client<Addr>,
-        timer_events: VecDeque<TimerEvent<Timer>>,
+        timer_events: Vec<TimerEvent<Timer>>,
         pub close_loop: CloseLoop<I>,
         transient_invokes: Receiver<Invoke>,
         transient_upcalls: Receiver<InvokeOk>,
@@ -452,6 +453,7 @@ pub mod check {
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub struct TimerEvent<T> {
         timer_id: u32,
+        period: Duration,
         timer: T,
     }
 
@@ -475,7 +477,7 @@ pub mod check {
         invoke: Option<ClientInvoke>,
 
         close_loop: DryCloseLoop,
-        timer_events: VecDeque<TimerEvent<Timer>>,
+        timer_events: Vec<TimerEvent<Timer>>,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -623,8 +625,15 @@ pub mod check {
                 .map(Event::Message)
                 .collect::<Vec<_>>();
             for client in &self.clients {
-                if let Some(event) = client.timer_events.front() {
-                    events.push(Event::Timer(event.clone()))
+                let mut prev_period = None;
+                for event in &client.timer_events {
+                    if let Some(prev_period) = prev_period {
+                        if event.period >= prev_period {
+                            break;
+                        }
+                    }
+                    events.push(Event::Timer(event.clone()));
+                    prev_period = Some(event.period)
                 }
             }
             events
@@ -702,12 +711,18 @@ pub mod check {
                     client.state.on_event(Recv(message), &mut timer)?
                 }
                 Event::Timer(TimerEvent {
-                    timer_id: _,
+                    timer_id,
+                    period: _,
                     timer: Timer::Resend(i),
                 }) => {
-                    // assert the front timer is the delivered timer
                     let client = &mut self.clients[i];
-                    client.timer_events.rotate_left(1);
+                    let i = client
+                        .timer_events
+                        .iter()
+                        .position(|event| event.timer_id == timer_id)
+                        .ok_or(anyhow::anyhow!("timer not found"))?;
+                    let event = client.timer_events.remove(i);
+                    client.timer_events.push(event);
                     let mut timer = AnyTimer {
                         to_event: to_client_timer_event(i),
                         timer_events: &mut client.timer_events,
@@ -757,7 +772,7 @@ pub mod check {
 
     struct AnyTimer<'a, F, M> {
         pub to_event: F,
-        pub timer_events: &'a mut VecDeque<TimerEvent<M>>, // generalize the data structure?
+        pub timer_events: &'a mut Vec<TimerEvent<M>>, // generalize the data structure?
         pub timer_id: &'a mut u32,
     }
 
@@ -766,7 +781,7 @@ pub mod check {
     {
         fn set<N: Clone + Send + Sync + 'static>(
             &mut self,
-            _period: std::time::Duration,
+            period: Duration,
             event: N,
         ) -> anyhow::Result<TimerId>
         where
@@ -775,8 +790,9 @@ pub mod check {
             let event = (self.to_event)(&event as _)?;
             *self.timer_id += 1;
             let timer_id = *self.timer_id;
-            self.timer_events.push_back(TimerEvent {
+            self.timer_events.push(TimerEvent {
                 timer_id,
+                period,
                 timer: event,
             });
             Ok(TimerId(timer_id))
