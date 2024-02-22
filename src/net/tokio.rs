@@ -121,6 +121,7 @@ impl<B: Buf> OnEvent<(SocketAddr, B)> for TcpControl<B> {
             connection.in_use = true;
             match UnboundedSender::send(&connection.sender, buf) {
                 Ok(()) => return Ok(()),
+                // fail to reuse connection, fallback to slow path
                 Err(err) => err.0,
             }
         } else {

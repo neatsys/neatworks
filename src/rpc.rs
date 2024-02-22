@@ -23,7 +23,7 @@ impl Debug for Payload {
         } else {
             write!(
                 f,
-                "Bytes({})",
+                "Payload({})",
                 self.0
                     .iter()
                     .map(|b| format!("{b:02x}"))

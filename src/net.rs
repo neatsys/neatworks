@@ -67,9 +67,12 @@ impl<T: ?Sized + SendMessage<A, M>, A, M> SendMessage<A, M> for Box<T> {
     }
 }
 
-// i have realized that this will always be used as
-// `IterAddr<&mut dyn Iterator<Item = A>>`, so change the definition to make it
-// more usable
+// an `IterAddr` type for broadcast (or multicast, depends on context)
+// serivce provider site should impl `SendMessage<IterAddr<_>, _>`, to fully
+// leverage the combinator that works with generic address types
+
+// this is not usable without "real" higher ranked trait bound i.e.
+// T: for<I: Iterator<Item = AddrType>> SendMessage<IterAddr<I>, MessageType>
 // #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // pub struct IterAddr<I>(pub I);
 
@@ -78,11 +81,15 @@ impl<T: ?Sized + SendMessage<A, M>, A, M> SendMessage<A, M> for Box<T> {
 // it may seem like a default implementation of SendMessage<IterAddr<A>, M>
 // should be provided as long as SendMessage<A, M> and M is Clone. but in this
 // codebase "address" has been abused and certain address iterator e.g.
-// IterAddr<AllReplica> does not really make sense
+// IterAddr<All> does not really make sense
 pub struct IterAddr<'a, A>(pub &'a mut (dyn Iterator<Item = A> + Send + Sync));
+
+// the user site interface. avoid writing out `IterAddr` explicitly
 // TODO better name
 pub trait SendMessageToEach<A, M>: for<'a> SendMessage<IterAddr<'a, A>, M> {}
 impl<T: for<'a> SendMessage<IterAddr<'a, A>, M>, A, M> SendMessageToEach<A, M> for T {}
+// this has to go into a separated trait because the method is not object safe,
+// while `SendMessageToEach` is a popular candicate for trait object
 pub trait SendMessageToEachExt<A, M>: SendMessageToEach<A, M> {
     fn send_to_each(
         &mut self,
