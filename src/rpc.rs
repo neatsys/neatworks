@@ -6,12 +6,9 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    event::{
-        erased::{OnEvent, Timer},
-        SendEvent,
-    },
-    net::{Addr, SendMessage, SendMessageToEach, SendMessageToEachExt as _},
+use crate::event::{
+    erased::{OnEvent, Timer},
+    SendEvent,
 };
 
 #[derive(
@@ -205,54 +202,6 @@ impl<I: Iterator<Item = Workload>> OnEvent<InvokeOk> for CloseLoop<I> {
             }
             Ok(())
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct IndexNet<N, A> {
-    inner_net: N,
-    replica_addrs: Vec<A>,
-    all_except: Option<usize>,
-}
-
-impl<N, A> IndexNet<N, A> {
-    pub fn new(inner_net: N, replica_addrs: Vec<A>, replica_id: impl Into<Option<u8>>) -> Self {
-        Self {
-            inner_net,
-            replica_addrs,
-            all_except: replica_id.into().map(|id| id as usize),
-        }
-    }
-}
-
-impl<N: SendMessage<A, M>, A: Addr, M> SendMessage<u8, M> for IndexNet<N, A> {
-    fn send(&mut self, dest: u8, message: M) -> anyhow::Result<()> {
-        let dest = self
-            .replica_addrs
-            .get(dest as usize)
-            .ok_or(anyhow::anyhow!("unknown replica id {dest}"))?;
-        self.inner_net.send(dest.clone(), message)
-    }
-}
-
-// intentionally not impl `Addr`; this must be consumed before reaching raw nets
-#[derive(Debug)]
-pub struct All;
-
-impl<N: for<'a> SendMessageToEach<A, M>, A: Addr, M> SendMessage<All, M> for IndexNet<N, A> {
-    fn send(&mut self, All: All, message: M) -> anyhow::Result<()> {
-        let addrs = self
-            .replica_addrs
-            .iter()
-            .enumerate()
-            .filter_map(|(id, addr)| {
-                if self.all_except == Some(id) {
-                    None
-                } else {
-                    Some(addr.clone())
-                }
-            });
-        self.inner_net.send_to_each(addrs, message)
     }
 }
 

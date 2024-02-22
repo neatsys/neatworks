@@ -12,8 +12,8 @@ use crate::{
         erased::{OnEvent, Timer},
         SendEvent, TimerId,
     },
-    net::{deserialize, events::Recv, Addr, MessageNet, SendMessage},
-    rpc::{All, Invoke, InvokeOk, Payload, Request},
+    net::{deserialize, events::Recv, Addr, All, MessageNet, SendMessage},
+    rpc::{Invoke, InvokeOk, Payload, Request},
     worker::erased::Worker,
 };
 

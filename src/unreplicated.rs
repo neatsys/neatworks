@@ -401,8 +401,8 @@ pub mod check {
             erased::{OnEvent, UnreachableTimer},
             SendEvent, TimerId,
         },
-        net::{events::Recv, SendMessage},
-        rpc::{check::DryCloseLoop, CloseLoop, IndexNet, Invoke, InvokeOk, Request, Workload},
+        net::{events::Recv, IndexNet, SendMessage},
+        rpc::{check::DryCloseLoop, CloseLoop, Invoke, InvokeOk, Request, Workload},
     };
 
     use super::{erased, ClientInvoke, Reply};

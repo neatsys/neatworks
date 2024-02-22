@@ -5,8 +5,8 @@ use std::{
 use augustus::{
     app::Null,
     event::{erased, Session},
-    net::Udp,
-    rpc::{CloseLoop, IndexNet},
+    net::{tokio::Udp, IndexNet},
+    rpc::CloseLoop,
     unreplicated::{
         self, to_client_on_buf, Client, Replica, ToClientMessageNet, ToReplicaMessageNet,
     },

@@ -7,7 +7,8 @@ use augustus::{
     net::{
         events::Recv,
         kademlia::{Control, Multicast, PeerNet},
-        SendMessage, Udp,
+        tokio::Udp,
+        SendMessage,
     },
     worker::erased::Worker,
 };

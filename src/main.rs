@@ -13,9 +13,9 @@ use augustus::{
         erased::{OnEvent, Session, SessionSender},
         SendEvent,
     },
-    net::Udp,
+    net::{tokio::Udp, IndexNet},
     pbft,
-    rpc::{CloseLoop, IndexNet, Invoke, InvokeOk},
+    rpc::{CloseLoop, Invoke, InvokeOk},
     unreplicated,
     worker::erased::spawn_backend,
 };
@@ -254,7 +254,7 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
                     pbft::ToReplicaMessageNet::new(IndexNet::new(
                         net.clone(),
                         config.replica_addrs,
-                        config.replica_id,
+                        config.replica_id as usize,
                     )),
                     pbft::ToClientMessageNet::new(net.clone()),
                     crypto_worker,
