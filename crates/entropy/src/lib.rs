@@ -7,10 +7,7 @@ use std::{
 };
 
 use augustus::{
-    blob::{
-        self,
-        stream::{RecvBlob, Serve, Transfer},
-    },
+    blob::{self, exp::Service},
     crypto::{Crypto, PublicKey, Verifiable, H256},
     event::{
         erased::{OnEvent, Timer},
@@ -23,7 +20,6 @@ use augustus::{
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use wirehair::{Decoder, Encoder};
 
@@ -81,9 +77,6 @@ impl<
 {
 }
 
-pub trait TransferBlob: SendEvent<Transfer<PeerId, SendFragment>> {}
-impl<T: SendEvent<Transfer<PeerId, SendFragment>>> TransferBlob for T {}
-
 #[derive(Debug, Clone)]
 pub struct Put<K>(pub K, pub Bytes);
 #[derive(Debug, Clone)]
@@ -126,11 +119,10 @@ impl<
 {
 }
 
-pub trait SendFsEvent:
-    SendEvent<fs::Store> + SendEvent<fs::Load> + SendEvent<fs::Download>
-{
-}
-impl<T: SendEvent<fs::Store> + SendEvent<fs::Load> + SendEvent<fs::Download>> SendFsEvent for T {}
+pub trait SendFsEvent: SendEvent<fs::Store> + SendEvent<fs::Load> {}
+impl<T: SendEvent<fs::Store> + SendEvent<fs::Load>> SendFsEvent for T {}
+
+pub struct DownloadOk(pub Chunk, pub u32, pub Vec<u8>);
 
 pub struct Peer<K> {
     id: PeerId,
@@ -152,7 +144,7 @@ pub struct Peer<K> {
     pending_pulls: HashMap<Chunk, Vec<PeerId>>,
 
     net: Box<dyn Net + Send + Sync>,
-    blob: Box<dyn TransferBlob + Send + Sync>,
+    blob: Box<dyn SendEvent<blob::exp::Event<PeerId, SendFragment, DownloadOk>> + Send + Sync>,
     upcall: Box<dyn Upcall<K> + Send + Sync>,
     codec_worker: CodecWorker,
     fs: Box<dyn SendFsEvent + Send + Sync>,
@@ -233,7 +225,7 @@ impl<K> Peer<K> {
         chunk_n: NonZeroUsize,
         chunk_m: NonZeroUsize,
         net: impl Net + Send + Sync + 'static,
-        blob: impl TransferBlob + Send + Sync + 'static,
+        blob: impl SendEvent<blob::exp::Event<PeerId, SendFragment, DownloadOk>> + Send + Sync + 'static,
         upcall: impl Upcall<K> + Send + Sync + 'static,
         codec_worker: CodecWorker,
         fs: impl SendFsEvent + Send + Sync + 'static,
@@ -402,43 +394,26 @@ impl<K> OnEvent<Encode> for Peer<K> {
             index,
             peer_id: Some(self.id),
         };
-        let cancel = state.cancel.clone();
-        self.blob.send(Transfer(
-            *peer_id,
-            send_fragment,
-            Box::new(move |mut stream| {
-                Box::pin(async move {
-                    if tokio::select! {
-                        result = stream.write_all(&fragment) => result,
-                        // concurrent sending finished on some other n peers
-                        () = cancel.cancelled() => return Ok(()),
-                    }
-                    // possible due to the invited peer has recovered from other concurrent sendings
-                    .is_err()
-                    {
-                        //
-                    }
-                    Ok(())
-                })
-            }),
-        ))
+        self.blob
+            .offer(*peer_id, send_fragment, fragment, state.cancel.clone())
     }
 }
 
-impl<K> OnEvent<RecvBlob<SendFragment>> for Peer<K> {
+impl<K> OnEvent<blob::exp::RecvOffer<SendFragment>> for Peer<K> {
     fn on_event(
         &mut self,
-        RecvBlob(send_fragment, stream): RecvBlob<SendFragment>,
+        send_fragment: blob::exp::RecvOffer<SendFragment>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if let Some(state) = self.downloads.get_mut(&send_fragment.chunk) {
             // println!("recv blob {}", H256(send_fragment.chunk));
-            return self.fs.send(fs::Download(
-                send_fragment.chunk,
-                send_fragment.index,
-                stream,
+            let chunk = send_fragment.chunk;
+            let index = send_fragment.index;
+            return self.blob.accept(
+                &send_fragment,
+                move |buf| DownloadOk(chunk, index, buf),
                 state.recover.cancel.clone(),
-            ));
+            );
         }
         if let Some(state) = self.persists.get_mut(&send_fragment.chunk) {
             let PersistStatus::Recovering(recover) = &mut state.status else {
@@ -461,21 +436,22 @@ impl<K> OnEvent<RecvBlob<SendFragment>> for Peer<K> {
                     .ok_or(anyhow::anyhow!("expected peer id in SendFragment"))?;
                 state.notify = Some(peer_id);
             }
-            return self.fs.send(fs::Download(
-                send_fragment.chunk,
-                send_fragment.index,
-                stream,
+            let chunk = send_fragment.chunk;
+            let index = send_fragment.index;
+            return self.blob.accept(
+                &send_fragment,
+                move |buf| DownloadOk(chunk, index, buf),
                 recover.cancel.clone(),
-            ));
+            );
         }
         Ok(())
     }
 }
 
-impl<K> OnEvent<fs::DownloadOk> for Peer<K> {
+impl<K> OnEvent<DownloadOk> for Peer<K> {
     fn on_event(
         &mut self,
-        fs::DownloadOk(chunk, index, fragment): fs::DownloadOk,
+        DownloadOk(chunk, index, fragment): DownloadOk,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if fragment.len() != self.fragment_len as usize {
@@ -657,20 +633,8 @@ impl<K> OnEvent<fs::LoadOk> for Peer<K> {
         for peer_id in pending {
             let fragment = fragment.clone();
             // println!("blob transfer {}", H256(chunk));
-            self.blob.send(Transfer(
-                peer_id,
-                send_fragment.clone(),
-                Box::new(move |mut stream| {
-                    Box::pin(async move {
-                        // possible due to the pulling peer has recovered from other concurrent
-                        // sendings
-                        if stream.write_all(&fragment).await.is_err() {
-                            //
-                        }
-                        Ok(())
-                    })
-                }),
-            ))?
+            self.blob
+                .offer(peer_id, send_fragment.clone(), fragment, None)?
         }
         Ok(())
     }
@@ -761,7 +725,7 @@ pub enum Message<A> {
     FindPeer(Verifiable<FindPeer<A>>),
     FindPeerOk(Verifiable<FindPeerOk<A>>),
 
-    BlobServe(Serve<SendFragment>),
+    BlobServe(blob::exp::Serve<SendFragment>),
 }
 
 pub type MessageNet<T, A> = augustus::net::MessageNet<T, Message<A>>;
@@ -786,7 +750,7 @@ pub fn on_buf<A: Addr>(
     buf: &[u8],
     entropy_sender: &mut impl SendRecvEvent,
     kademlia_sender: &mut impl kademlia::SendRecvEvent<A>,
-    blob_sender: &mut impl blob::stream::SendRecvEvent<SendFragment>,
+    blob_sender: &mut impl SendEvent<Recv<blob::exp::Serve<SendFragment>>>,
 ) -> anyhow::Result<()> {
     match deserialize(buf)? {
         Message::Invite(message) => entropy_sender.send(Recv(message)),
@@ -805,7 +769,6 @@ pub mod fs {
     use augustus::{crypto::H256, event::SendEvent};
     use tokio::{
         fs::{create_dir, read, remove_dir_all, write},
-        io::AsyncReadExt as _,
         net::TcpStream,
         sync::mpsc::UnboundedReceiver,
         task::JoinSet,
@@ -870,11 +833,10 @@ pub mod fs {
     pub enum Event {
         Store(Store),
         Load(Load),
-        Download(Download),
     }
 
-    pub trait Upcall: SendEvent<StoreOk> + SendEvent<LoadOk> + SendEvent<DownloadOk> {}
-    impl<T: SendEvent<StoreOk> + SendEvent<LoadOk> + SendEvent<DownloadOk>> Upcall for T {}
+    pub trait Upcall: SendEvent<StoreOk> + SendEvent<LoadOk> {}
+    impl<T: SendEvent<StoreOk> + SendEvent<LoadOk>> Upcall for T {}
 
     pub async fn session(
         path: impl AsRef<Path>,
@@ -883,19 +845,16 @@ pub mod fs {
     ) -> anyhow::Result<()> {
         let mut store_tasks = JoinSet::<anyhow::Result<_>>::new();
         let mut load_tasks = JoinSet::<anyhow::Result<_>>::new();
-        let mut download_tasks = JoinSet::<anyhow::Result<_>>::new();
         loop {
             enum Select {
                 Recv(Event),
                 JoinNextStore(Chunk),
                 JoinNextLoad((Chunk, u32, Vec<u8>)),
-                JoinNextDownload(Option<(Chunk, u32, Vec<u8>)>),
             }
             match tokio::select! {
                 event = events.recv() => Select::Recv(event.ok_or(anyhow::anyhow!("channel closed"))?),
                 Some(result) = store_tasks.join_next() => Select::JoinNextStore(result??),
                 Some(result) = load_tasks.join_next() => Select::JoinNextLoad(result??),
-                Some(result) = download_tasks.join_next() => Select::JoinNextDownload(result??),
             } {
                 Select::Recv(Event::Store(Store(chunk, index, fragment))) => {
                     let chunk_path = path.as_ref().join(format!("{:x}", H256(chunk)));
@@ -915,24 +874,9 @@ pub mod fs {
                         Ok((chunk, index, fragment))
                     });
                 }
-                Select::Recv(Event::Download(Download(chunk, index, mut stream, cancel))) => {
-                    download_tasks.spawn(async move {
-                        let mut fragment = Vec::new();
-                        let result = tokio::select! {
-                            result = stream.read_to_end(&mut fragment) => result,
-                            () = cancel.cancelled() => return Ok(None),
-                        };
-                        // Ok(None) if sender cancel the sending
-                        Ok(result.ok().map(|_| (chunk, index, fragment)))
-                    });
-                }
                 Select::JoinNextStore(chunk) => upcall.send(StoreOk(chunk))?,
                 Select::JoinNextLoad((chunk, index, fragment)) => {
                     upcall.send(LoadOk(chunk, index, fragment))?
-                }
-                Select::JoinNextDownload(None) => {}
-                Select::JoinNextDownload(Some((chunk, index, fragment))) => {
-                    upcall.send(DownloadOk(chunk, index, fragment))?
                 }
             }
         }

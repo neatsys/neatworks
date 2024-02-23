@@ -52,74 +52,99 @@ use crate::{
 pub mod exp {
     use std::net::SocketAddr;
 
+    use bytes::Bytes;
+    use serde::{Deserialize, Serialize};
     use tokio::sync::mpsc::UnboundedReceiver;
     use tokio_util::sync::CancellationToken;
 
-    use crate::{event::SendEvent, net::SendMessage};
+    use crate::{
+        event::SendEvent,
+        net::{events::Recv, SendMessage},
+    };
 
-    pub enum Event<A, M, N> {
-        Send {
-            addr: A,
-            message: M,
-            buf: Vec<u8>,
-            cancel: CancellationToken,
-        },
-        Accept {
-            serve_addr: SocketAddr,
-            into_recv_event: Box<dyn FnOnce(Vec<u8>) -> N + Send + Sync>,
-            cancel: CancellationToken,
-        },
+    pub struct Offer<A, M> {
+        pub dest: A,
+        pub message: M,
+        pub buf: Bytes,
+        pub cancel: Option<CancellationToken>,
     }
 
-    pub struct Accept<M> {
+    pub struct Accept<N> {
+        pub serve_addr: SocketAddr,
+        pub into_recv_event: Box<dyn FnOnce(Vec<u8>) -> N + Send + Sync>,
+        pub cancel: Option<CancellationToken>,
+    }
+
+    #[derive(derive_more::From)]
+    pub enum Event<A, M, N> {
+        Offer(Offer<A, M>),
+        Accept(Accept<N>),
+        Recv(Recv<Serve<M>>),
+    }
+
+    #[derive(derive_more::Deref)]
+    pub struct RecvOffer<M> {
+        #[deref]
         pub inner: M,
         serve_addr: SocketAddr,
     }
 
     pub trait Service<A, M, N> {
-        fn send(&mut self, dest: A, message: M, buf: Vec<u8>) -> anyhow::Result<CancellationToken>;
+        fn offer(
+            &mut self,
+            dest: A,
+            message: M,
+            buf: impl Into<Bytes>,
+            cancel: impl Into<Option<CancellationToken>>,
+        ) -> anyhow::Result<()>;
 
         fn accept(
             &mut self,
-            accept_event: &Accept<M>,
+            recv_offer: &RecvOffer<M>,
             into_recv_event: impl FnOnce(Vec<u8>) -> N + Send + Sync + 'static,
-        ) -> anyhow::Result<CancellationToken>;
+            cancel: impl Into<Option<CancellationToken>>,
+        ) -> anyhow::Result<()>;
     }
 
-    impl<T: SendEvent<Event<A, M, N>>, A, M, N> Service<A, M, N> for T {
-        fn send(&mut self, dest: A, message: M, buf: Vec<u8>) -> anyhow::Result<CancellationToken> {
-            let cancel = CancellationToken::new();
-            let send = Event::Send {
-                addr: dest,
+    impl<T: SendEvent<Event<A, M, N>> + ?Sized, A, M, N> Service<A, M, N> for T {
+        fn offer(
+            &mut self,
+            dest: A,
+            message: M,
+            buf: impl Into<Bytes>,
+            cancel: impl Into<Option<CancellationToken>>,
+        ) -> anyhow::Result<()> {
+            let offer = Offer {
+                dest,
                 message,
-                buf,
-                cancel: cancel.clone(),
+                buf: buf.into(),
+                cancel: cancel.into(),
             };
-            SendEvent::send(self, send)?;
-            Ok(cancel)
+            SendEvent::send(self, Event::Offer(offer))
         }
 
         fn accept(
             &mut self,
-            accept_event: &Accept<M>,
+            recv_offer: &RecvOffer<M>,
             into_recv_event: impl FnOnce(Vec<u8>) -> N + Send + Sync + 'static,
-        ) -> anyhow::Result<CancellationToken> {
-            let cancel = CancellationToken::new();
-            let accept_transfer = Event::Accept {
-                serve_addr: accept_event.serve_addr,
+            cancel: impl Into<Option<CancellationToken>>,
+        ) -> anyhow::Result<()> {
+            let accept = Accept {
+                serve_addr: recv_offer.serve_addr,
                 into_recv_event: Box::new(into_recv_event),
-                cancel: cancel.clone(),
+                cancel: cancel.into(),
             };
-            SendEvent::send(self, accept_transfer)?;
-            Ok(cancel)
+            SendEvent::send(self, Event::Accept(accept))
         }
     }
 
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Serve<M>(M, SocketAddr);
 
-    pub fn session<A, M, N>(
+    pub async fn session<A, M, N>(
         events: UnboundedReceiver<Event<A, M, N>>,
-        net: Box<dyn SendMessage<A, Serve<M>> + Send + Sync>,
+        net: impl SendMessage<A, Serve<M>>,
+        upcall: impl SendEvent<RecvOffer<M>>,
     ) -> anyhow::Result<()> {
         Ok(())
     }
