@@ -763,6 +763,9 @@ pub fn on_buf<A: Addr>(
     }
 }
 
+// TODO generalize and lift into workspace crate
+// the problem arise when justify upcall design
+// possibly follows blob design if that works well
 pub mod fs {
     use std::{fmt::Debug, path::Path};
 
@@ -809,19 +812,6 @@ pub mod fs {
     impl Debug for LoadOk {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("LoadOk")
-                .field("chunk", &H256(self.0))
-                .field("index", &self.1)
-                .field("data", &format!("<{} bytes>", self.2.len()))
-                .finish()
-        }
-    }
-
-    #[derive(Clone)]
-    pub struct DownloadOk(pub Chunk, pub u32, pub Vec<u8>);
-
-    impl Debug for DownloadOk {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("DownloadOk")
                 .field("chunk", &H256(self.0))
                 .field("index", &self.1)
                 .field("data", &format!("<{} bytes>", self.2.len()))

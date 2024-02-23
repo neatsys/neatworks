@@ -299,7 +299,7 @@ async fn start_peer(
     });
     let kademlia_session = kademlia_session.erased_run(&mut kademlia_peer);
     let blob_session = blob::exp::session(
-        // ip,
+        ip,
         blob_receiver,
         MessageNet::<_, SocketAddr>::new(PeerNet(kademlia_control_session.erased_sender())),
         peer_session.erased_sender(),

@@ -50,11 +50,16 @@ use crate::{
 };
 
 pub mod exp {
-    use std::net::SocketAddr;
+    use std::net::{IpAddr, SocketAddr};
 
     use bytes::Bytes;
     use serde::{Deserialize, Serialize};
-    use tokio::sync::mpsc::UnboundedReceiver;
+    use tokio::{
+        io::{AsyncReadExt as _, AsyncWriteExt as _},
+        net::{TcpListener, TcpStream},
+        sync::mpsc::UnboundedReceiver,
+        task::JoinSet,
+    };
     use tokio_util::sync::CancellationToken;
 
     use crate::{
@@ -79,7 +84,7 @@ pub mod exp {
     pub enum Event<A, M, N> {
         Offer(Offer<A, M>),
         Accept(Accept<N>),
-        Recv(Recv<Serve<M>>),
+        RecvServe(Recv<Serve<M>>),
     }
 
     #[derive(derive_more::Deref)]
@@ -141,12 +146,87 @@ pub mod exp {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Serve<M>(M, SocketAddr);
 
-    pub async fn session<A, M, N>(
-        events: UnboundedReceiver<Event<A, M, N>>,
-        net: impl SendMessage<A, Serve<M>>,
-        upcall: impl SendEvent<RecvOffer<M>>,
+    pub async fn session<A, M, N: Send + 'static>(
+        ip: IpAddr,
+        mut events: UnboundedReceiver<Event<A, M, N>>,
+        mut net: impl SendMessage<A, Serve<M>>,
+        mut upcall: impl SendEvent<RecvOffer<M>> + SendEvent<N>,
     ) -> anyhow::Result<()> {
-        Ok(())
+        let mut bind_tasks = JoinSet::<anyhow::Result<_>>::new();
+        let mut send_tasks = JoinSet::<anyhow::Result<_>>::new();
+        let mut recv_tasks = JoinSet::<anyhow::Result<_>>::new();
+        let mut pending_bind = Vec::new();
+        loop {
+            enum Select<A, M, N> {
+                Recv(Event<A, M, N>),
+                JoinNextBind(TcpListener),
+                JoinNextSend(()),
+                JoinNextRecv(Option<N>),
+            }
+            match tokio::select! {
+                event = events.recv() => Select::Recv(event.ok_or(anyhow::anyhow!("channel closed"))?),
+                Some(result) = bind_tasks.join_next() => Select::JoinNextBind(result??),
+                Some(result) = send_tasks.join_next() => Select::JoinNextSend(result??),
+                Some(result) = recv_tasks.join_next() => Select::JoinNextRecv(result??),
+            } {
+                Select::Recv(Event::Offer(offer)) => {
+                    pending_bind.push(offer);
+                    bind_tasks.spawn(async move { Ok(TcpListener::bind((ip, 0)).await?) });
+                }
+                Select::JoinNextBind(listener) => {
+                    let offer = pending_bind.pop().unwrap();
+                    // it's possible that the message arrives before listener start accepting
+                    // send inside spawned task requires clone and send `net`
+                    // i don't want that, and spurious error like this should be fine
+                    net.send(offer.dest, Serve(offer.message, listener.local_addr()?))?;
+                    send_tasks.spawn(async move {
+                        let task = async {
+                            let (mut stream, _) = listener.accept().await?;
+                            Ok(stream.write_all(&offer.buf).await?)
+                        };
+                        if let Some(cancel) = offer.cancel {
+                            tokio::select! {
+                                result = task => result,
+                                () = cancel.cancelled() => Ok(())
+                            }
+                        } else {
+                            task.await
+                        }
+                    });
+                }
+                Select::JoinNextSend(()) => {}
+                Select::Recv(Event::RecvServe(Recv(Serve(message, serve_addr)))) => {
+                    upcall.send(RecvOffer {
+                        inner: message,
+                        serve_addr,
+                    })?
+                }
+                Select::Recv(Event::Accept(accept)) => {
+                    recv_tasks.spawn(async move {
+                        let task = async {
+                            let mut stream = TcpStream::connect(accept.serve_addr).await?;
+                            let mut buf = Vec::new();
+                            stream.read_to_end(&mut buf).await?;
+                            Result::<_, anyhow::Error>::Ok(buf)
+                        };
+                        let buf = if let Some(cancel) = accept.cancel {
+                            tokio::select! {
+                                result = task => result,
+                                () = cancel.cancelled() => return Ok(None)
+                            }
+                        } else {
+                            task.await
+                        }?;
+                        Ok(Some((accept.into_recv_event)(buf)))
+                    });
+                }
+                Select::JoinNextRecv(recv_event) => {
+                    if let Some(recv_event) = recv_event {
+                        upcall.send(recv_event)?
+                    }
+                }
+            }
+        }
     }
 }
 
