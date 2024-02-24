@@ -424,10 +424,10 @@ pub mod check {
         transient_message_events: Receiver<MessageEvent>,
     }
 
-    pub struct ClientState<I> {
+    pub struct ClientState<W> {
         pub state: erased::Client<Addr>,
         timer_events: Vec<TimerEvent<Timer>>,
-        pub close_loop: CloseLoop<I>,
+        pub close_loop: CloseLoop<W>,
         transient_invokes: Receiver<Invoke>,
         transient_upcalls: Receiver<InvokeOk>,
     }
@@ -463,20 +463,20 @@ pub mod check {
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-    pub struct DryState {
-        clients: Vec<DryClientState>,
+    pub struct DryState<T> {
+        clients: Vec<DryClientState<T>>,
         replica: DryReplica,
         message_events: BTreeSet<MessageEvent>,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-    pub struct DryClientState {
+    pub struct DryClientState<T> {
         id: u32,
         addr: Addr,
         seq: u32,
         invoke: Option<ClientInvoke>,
 
-        close_loop: DryCloseLoop,
+        close_loop: DryCloseLoop<T>,
         timer_events: Vec<TimerEvent<Timer>>,
     }
 
@@ -486,8 +486,8 @@ pub mod check {
         app: KVStore,
     }
 
-    impl<I> From<State<I>> for DryState {
-        fn from(value: State<I>) -> Self {
+    impl<W: Workload> From<State<W>> for DryState<W::Dry> {
+        fn from(value: State<W>) -> Self {
             let clients = value
                 .clients
                 .into_iter()
@@ -557,7 +557,7 @@ pub mod check {
         }
     }
 
-    impl<I> State<I> {
+    impl<W> State<W> {
         pub fn new() -> Self {
             let (transient_event_sender, transient_event_receiver) = channel();
             let transient_net = Transient(transient_event_sender);
@@ -572,7 +572,7 @@ pub mod check {
             }
         }
 
-        pub fn push_client(&mut self, workload: I) -> anyhow::Result<()> {
+        pub fn push_client(&mut self, workload: W) -> anyhow::Result<()> {
             let index = self.clients.len();
             let id = index as u32 + 1000;
             let (transient_upcall_sender, transient_upcall_receiver) = channel();
@@ -588,9 +588,7 @@ pub mod check {
             );
 
             let (transient_invoke_sender, transient_invoke_receiver) = channel();
-            let mut close_loop = CloseLoop::new(workload);
-            // close_loop.invocations.get_or_insert_with(Default::default);
-            close_loop.insert_client(id, Transient(transient_invoke_sender))?;
+            let close_loop = CloseLoop::new(Transient(transient_invoke_sender), workload);
 
             self.clients.push(ClientState {
                 state: client,
@@ -614,7 +612,7 @@ pub mod check {
         }
     }
 
-    impl<I: Clone + Iterator<Item = Workload>> crate::search::State for State<I> {
+    impl<W: Clone + Workload> crate::search::State for State<W> {
         type Event = Event;
 
         fn events(&self) -> Vec<Self::Event> {
@@ -662,7 +660,7 @@ pub mod check {
                 let (transient_invoke_sender, transient_invoke_receiver) = channel();
                 let close_loop = client
                     .close_loop
-                    .duplicate(|| Transient(transient_invoke_sender.clone()))?;
+                    .duplicate(Transient(transient_invoke_sender.clone()))?;
 
                 clients.push(ClientState {
                     state: duplicated_client,
@@ -736,7 +734,7 @@ pub mod check {
         }
     }
 
-    impl<I: Iterator<Item = Workload>> State<I> {
+    impl<W: Workload> State<W> {
         pub fn launch(&mut self) -> anyhow::Result<()> {
             for client in &mut self.clients {
                 client.close_loop.launch()?

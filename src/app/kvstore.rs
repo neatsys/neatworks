@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use rand::{distributions::Alphanumeric, rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
-use crate::rpc::{Payload, Workload};
+use crate::rpc::{Check, Payload, Workload};
 
 use super::App;
 
@@ -59,16 +59,18 @@ impl App for KVStore {
 
 pub fn static_workload(
     rounds: impl ExactSizeIterator<Item = (Op, Result)>,
-) -> anyhow::Result<impl Iterator<Item = Workload> + Clone> {
-    Ok(rounds
-        .map(|(op, result)| {
-            Ok((
-                Payload(serde_json::to_vec(&op)?),
-                Some(Payload(serde_json::to_vec(&result)?)),
-            ))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?
-        .into_iter())
+) -> anyhow::Result<impl Workload<Dry = ()> + Clone> {
+    Ok(Check::new(
+        rounds
+            .map(|(op, result)| {
+                Ok((
+                    Payload(serde_json::to_vec(&op)?),
+                    Payload(serde_json::to_vec(&result)?),
+                ))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .into_iter(),
+    ))
 }
 
 #[derive(Clone)]
@@ -91,7 +93,7 @@ impl InfinitePutGet {
 }
 
 impl Iterator for InfinitePutGet {
-    type Item = Workload;
+    type Item = (Payload, Payload);
 
     fn next(&mut self) -> Option<Self::Item> {
         let index = self.rng.gen_range(0..5);
@@ -119,7 +121,7 @@ impl Iterator for InfinitePutGet {
         self.should_get = !self.should_get;
         Some((
             Payload(serde_json::to_vec(&op).unwrap()),
-            Some(Payload(serde_json::to_vec(&result).unwrap())),
+            Payload(serde_json::to_vec(&result).unwrap()),
         ))
     }
 }

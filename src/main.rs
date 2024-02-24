@@ -15,7 +15,7 @@ use augustus::{
     },
     net::{tokio::Udp, IndexNet},
     pbft,
-    rpc::{CloseLoop, Invoke, InvokeOk},
+    rpc::{CloseLoop, Invoke, InvokeOk, OpLatency},
     unreplicated,
     worker::erased::spawn_backend,
 };
@@ -29,6 +29,7 @@ use tokio::{
     runtime,
     signal::ctrl_c,
     spawn,
+    sync::Barrier,
     task::{spawn_blocking, JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
@@ -163,48 +164,71 @@ async fn client_session<S: OnEvent<Invoke> + Send + Sync + 'static>(
     on_buf: impl Fn(&[u8], &mut SessionSender<S>) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
     benchmark_result: Arc<Mutex<Option<BenchmarkResult>>>,
 ) -> anyhow::Result<()> {
-    let mut concurrent = CloseLoop::new(repeat_with(Default::default));
-    concurrent.latencies.get_or_insert(Default::default());
-    let mut concurrent_session = Session::new();
     let mut sessions = JoinSet::new();
-    for client_id in repeat_with(rand::random).take(1) {
+    let stop = CancellationToken::new();
+    let latencies = Arc::new(Mutex::new(Vec::new()));
+    const N: usize = 1;
+    let barrier = Arc::new(Barrier::new(N + 1));
+    for client_id in repeat_with(rand::random).take(N) {
         let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
         let addr = socket.local_addr()?;
         println!("Client {client_id:08x} bind to {addr}");
         let net = Udp(socket.into());
+
+        let mut session = Session::new();
+        let mut close_loop_session = Session::new();
+
         let mut state = config.new_client(
             client_id,
             addr,
             net.clone(),
-            concurrent_session.erased_sender(),
+            close_loop_session.erased_sender(),
         );
-        let mut session = Session::new();
-        concurrent.insert_client(client_id, session.erased_sender())?;
+        let mut close_loop = CloseLoop::new(
+            session.erased_sender(),
+            OpLatency::new(repeat_with(Default::default)),
+        );
+
         let mut sender = session.erased_sender();
         let on_buf = on_buf.clone();
         sessions.spawn(async move { net.recv_session(|buf| on_buf(buf, &mut sender)).await });
         sessions.spawn(async move { session.erased_run(&mut state).await });
+        let stop = stop.clone();
+        let latencies = latencies.clone();
+        let barrier = barrier.clone();
+        sessions.spawn(async move {
+            close_loop.launch()?;
+            tokio::select! {
+                result = close_loop_session.erased_run(&mut close_loop) => result?,
+                () = stop.cancelled() => {}
+            }
+            latencies
+                .lock()
+                .unwrap()
+                .extend(close_loop.workload.latencies);
+            barrier.wait().await;
+            Ok(())
+        });
     }
-    concurrent.launch()?;
     // TODO escape with an error indicating the root problem instead of a disconnected channel error
     // caused by the problem
     // is it (easily) possible?
     'select: {
         tokio::select! {
-            result = concurrent_session.erased_run(&mut concurrent) => result?,
             result = sessions.join_next() => result.unwrap()??,
             () = tokio::time::sleep(Duration::from_secs(1)) => break 'select,
             // () = cancel.cancelled() => break 'select,
         }
         return Err(anyhow::anyhow!("unexpected shutdown"));
     }
-    let throughput = concurrent.latencies.as_ref().unwrap().len() as f32;
-    let latency = concurrent.latencies.unwrap().into_iter().sum::<Duration>()
-        / (throughput.floor() as u32 + 1);
+    stop.cancel();
+    barrier.wait().await;
     sessions.shutdown().await;
+    let mut latencies = latencies.lock().unwrap();
+    let throughput = latencies.len() as f32;
     benchmark_result.lock().unwrap().replace(BenchmarkResult {
-        throughput,
-        latency,
+        throughput: latencies.len() as f32,
+        latency: latencies.drain(..).sum::<Duration>() / (throughput.floor() as u32 + 1),
     });
     Ok(())
 }

@@ -1,3 +1,7 @@
+// some submodule has not `impl App`, but `impl Iterator<Workload>`
+// applications and workloads are tighly coupled, so it should be desirable to
+// keep them together (and i don't want their modules to be named
+// `app_and_workload`)
 pub mod kvstore;
 pub mod ycsb;
 
@@ -22,4 +26,4 @@ impl App for Null {
     }
 }
 
-pub use kvstore::{KVStore, Op, Result};
+pub use kvstore::KVStore;

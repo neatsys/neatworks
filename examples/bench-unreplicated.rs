@@ -6,7 +6,7 @@ use augustus::{
     app::Null,
     event::{erased, Session},
     net::{tokio::Udp, IndexNet},
-    rpc::CloseLoop,
+    rpc::{CloseLoop, OpLatency},
     unreplicated::{
         self, to_client_on_buf, Client, Replica, ToClientMessageNet, ToReplicaMessageNet,
     },
@@ -76,8 +76,7 @@ async fn main() -> anyhow::Result<()> {
         let addr = SocketAddr::new([10, 0, 0, 8].into(), socket.local_addr()?.port());
         let raw_net = Udp(socket.into());
 
-        let mut close_loop = CloseLoop::new(repeat_with(Default::default));
-        close_loop.latencies.get_or_insert_with(Default::default);
+        let mut state_session = Session::new();
         let mut close_loop_session = erased::Session::new();
 
         let mut state = Client::new(
@@ -86,8 +85,10 @@ async fn main() -> anyhow::Result<()> {
             ToReplicaMessageNet::new(IndexNet::new(raw_net.clone(), replica_addrs.clone(), None)),
             close_loop_session.erased_sender(),
         );
-        let mut state_session = Session::new();
-        close_loop.insert_client(id, state_session.sender())?;
+        let mut close_loop = CloseLoop::new(
+            state_session.sender(),
+            OpLatency::new(repeat_with(Default::default)),
+        );
         let mut state_sender = state_session.sender();
         sessions.spawn_on(
             async move {
@@ -110,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
                     result = close_loop_session.erased_run(&mut close_loop) => result?,
                     () = cancel.cancelled() => {}
                 }
-                let _ = count_sender.send(close_loop.latencies.unwrap().len());
+                let _ = count_sender.send(close_loop.workload.latencies.len());
                 Ok(())
             },
             runtime.handle(),

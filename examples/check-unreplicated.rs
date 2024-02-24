@@ -1,10 +1,8 @@
 use std::{thread::available_parallelism, time::Duration};
 
 use augustus::{
-    app::{
-        kvstore::{static_workload, InfinitePutGet},
-        Op, Result,
-    },
+    app::kvstore::{static_workload, InfinitePutGet, Op, Result},
+    rpc::Check,
     search::{breadth_first, random_depth_first, Settings, State as _},
     unreplicated::check::{DryState, State},
 };
@@ -44,7 +42,7 @@ fn main() -> anyhow::Result<()> {
         prune: |_: &_| false,
         max_depth: None,
     };
-    let result = breadth_first::<_, DryState, _, _, _>(
+    let result = breadth_first::<_, DryState<_>, _, _, _>(
         state.duplicate()?,
         settings.clone(),
         1.try_into().unwrap(),
@@ -59,7 +57,7 @@ fn main() -> anyhow::Result<()> {
         max_depth: None,
     };
     let result =
-        breadth_first::<_, DryState, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
+        breadth_first::<_, DryState<_>, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
     println!("{result:?}");
 
     let mut state = State::new();
@@ -79,7 +77,7 @@ fn main() -> anyhow::Result<()> {
         prune: |_: &_| false,
         max_depth: None,
     };
-    let result = breadth_first::<_, DryState, _, _, _>(
+    let result = breadth_first::<_, DryState<_>, _, _, _>(
         state.duplicate()?,
         settings.clone(),
         1.try_into().unwrap(),
@@ -94,12 +92,12 @@ fn main() -> anyhow::Result<()> {
         max_depth: None,
     };
     let result =
-        breadth_first::<_, DryState, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
+        breadth_first::<_, DryState<_>, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
     println!("{result:?}");
 
     let mut state = State::new();
-    state.push_client(InfinitePutGet::new("KEY1", &mut thread_rng())?)?;
-    state.push_client(InfinitePutGet::new("KEY2", &mut thread_rng())?)?;
+    state.push_client(Check::new(InfinitePutGet::new("KEY1", &mut thread_rng())?))?;
+    state.push_client(Check::new(InfinitePutGet::new("KEY2", &mut thread_rng())?))?;
     state.launch()?;
     let mut settings = Settings {
         invariant: |_: &_| Ok(()),
@@ -107,7 +105,7 @@ fn main() -> anyhow::Result<()> {
         prune: |_: &_| false,
         max_depth: None,
     };
-    let result = breadth_first::<_, DryState, _, _, _>(
+    let result = breadth_first::<_, DryState<_>, _, _, _>(
         state.duplicate()?,
         settings.clone(),
         available_parallelism()?,
@@ -116,7 +114,7 @@ fn main() -> anyhow::Result<()> {
     )?;
     println!("{result:?}");
     settings.max_depth = Some(1000.try_into().unwrap());
-    let result = random_depth_first::<_, DryState, _, _, _>(
+    let result = random_depth_first::<_, DryState<_>, _, _, _>(
         state,
         settings,
         available_parallelism()?,

@@ -1,4 +1,5 @@
-// a reduced implementation of YCSB core workload
+// a reduced implementation of YCSB core workload. there's no `impl App` here,
+// other modules may contain implementors that work with `Op` and `Result`
 // table name is omitted, and no support to multiple fields so field name is
 // also omitted
 // only nondeterministic value is implemented, and data integrity is always off
