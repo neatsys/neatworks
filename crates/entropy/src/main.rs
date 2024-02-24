@@ -1,4 +1,5 @@
 use std::{
+    backtrace::BacktraceStatus,
     collections::HashMap,
     env::args,
     future::IntoFuture,
@@ -174,7 +175,11 @@ async fn ok(State(state): State<AppState>) -> (StatusCode, &'static str) {
             Err(err) => warn!("{err}"),
             Ok(Err(err)) => {
                 warn!("{err}");
-                warn!("\n{}", err.backtrace())
+                if err.backtrace().status() == BacktraceStatus::Captured {
+                    warn!("\n{}", err.backtrace())
+                } else {
+                    warn!("{}", err.backtrace())
+                }
             }
             Ok(Ok(())) => warn!("unexpected peer exit"),
         }
@@ -303,7 +308,7 @@ async fn start_peer(
         }
     });
     let kademlia_session = kademlia_session.erased_run(&mut kademlia_peer);
-    let blob_session = blob::exp::session(
+    let blob_session = blob::session(
         ip,
         blob_receiver,
         MessageNet::<_, SocketAddr>::new(PeerNet(kademlia_control_session.erased_sender())),
@@ -337,7 +342,7 @@ async fn put_chunk(
     Path(peer_index): Path<usize>,
     mut multipart: Multipart,
 ) -> (StatusCode, String) {
-    match async {
+    let task = async {
         let buf = multipart
             .next_field()
             .await?
@@ -352,9 +357,8 @@ async fn put_chunk(
         // detach receiving, so that even if http connection closed receiver keeps alive
         tokio::spawn(receiver).await??;
         Result::<_, anyhow::Error>::Ok(format!("{:x}", H256(chunk)))
-    }
-    .await
-    {
+    };
+    match task.await {
         Ok(result) => (StatusCode::OK, result),
         Err(err) => {
             warn!("{err}");
@@ -367,16 +371,15 @@ async fn get_chunk(
     State(state): State<AppState>,
     Path((peer_index, chunk)): Path<(usize, String)>,
 ) -> (StatusCode, Vec<u8>) {
-    match async {
+    let task = async {
         let chunk = chunk.parse::<H256>()?.into();
         let (sender, receiver) = oneshot::channel();
         let replaced = state.pending_gets.lock().await.insert(chunk, sender);
         assert!(replaced.is_none());
         state.peers.lock().await.senders[peer_index].send(Get(chunk))?;
         Result::<_, anyhow::Error>::Ok(tokio::spawn(receiver).await??)
-    }
-    .await
-    {
+    };
+    match task.await {
         Ok(result) => (StatusCode::OK, result),
         Err(err) => {
             warn!("{err}");
@@ -506,8 +509,7 @@ async fn poll_benchmark_put(
     if !puts[&put_id].is_finished() {
         (StatusCode::OK, Json(None))
     } else {
-        match async { Result::<_, anyhow::Error>::Ok(puts.remove(&put_id).unwrap().await??) }.await
-        {
+        match async { puts.remove(&put_id).unwrap().await? }.await {
             Ok(result) => (StatusCode::OK, Json(Some(result))),
             Err(err) => {
                 warn!("{err}");
@@ -605,8 +607,7 @@ async fn poll_benchmark_get(
     if !gets[&get_id].is_finished() {
         (StatusCode::OK, Json(None))
     } else {
-        match async { Result::<_, anyhow::Error>::Ok(gets.remove(&get_id).unwrap().await??) }.await
-        {
+        match async { gets.remove(&get_id).unwrap().await? }.await {
             Ok(result) => (StatusCode::OK, Json(Some(result))),
             Err(err) => {
                 warn!("{err}");

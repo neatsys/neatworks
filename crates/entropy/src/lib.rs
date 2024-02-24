@@ -7,7 +7,7 @@ use std::{
 };
 
 use augustus::{
-    blob::{self, exp::ServiceExt},
+    blob::{self, RecvOffer, ServiceExt as _},
     crypto::{Crypto, PublicKey, Verifiable, H256},
     event::{
         erased::{OnEvent, Timer},
@@ -144,7 +144,7 @@ pub struct Peer<K> {
     pending_pulls: HashMap<Chunk, Vec<PeerId>>,
 
     net: Box<dyn Net + Send + Sync>,
-    blob: Box<dyn blob::exp::Service<PeerId, SendFragment, DownloadOk> + Send + Sync>,
+    blob: Box<dyn blob::Service<PeerId, SendFragment, DownloadOk> + Send + Sync>,
     upcall: Box<dyn Upcall<K> + Send + Sync>,
     codec_worker: CodecWorker,
     fs: Box<dyn SendFsEvent + Send + Sync>,
@@ -225,7 +225,7 @@ impl<K> Peer<K> {
         chunk_n: NonZeroUsize,
         chunk_m: NonZeroUsize,
         net: impl Net + Send + Sync + 'static,
-        blob: impl blob::exp::Service<PeerId, SendFragment, DownloadOk> + Send + Sync + 'static,
+        blob: impl blob::Service<PeerId, SendFragment, DownloadOk> + Send + Sync + 'static,
         upcall: impl Upcall<K> + Send + Sync + 'static,
         codec_worker: CodecWorker,
         fs: impl SendFsEvent + Send + Sync + 'static,
@@ -399,10 +399,10 @@ impl<K> OnEvent<Encode> for Peer<K> {
     }
 }
 
-impl<K> OnEvent<blob::exp::RecvOffer<SendFragment>> for Peer<K> {
+impl<K> OnEvent<RecvOffer<SendFragment>> for Peer<K> {
     fn on_event(
         &mut self,
-        mut send_fragment: blob::exp::RecvOffer<SendFragment>,
+        mut send_fragment: RecvOffer<SendFragment>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if let Some(state) = self.downloads.get_mut(&send_fragment.chunk) {
@@ -725,7 +725,7 @@ pub enum Message<A> {
     FindPeer(Verifiable<FindPeer<A>>),
     FindPeerOk(Verifiable<FindPeerOk<A>>),
 
-    BlobServe(blob::exp::Serve<SendFragment>),
+    BlobServe(blob::Serve<SendFragment>),
 }
 
 pub type MessageNet<T, A> = augustus::net::MessageNet<T, Message<A>>;
@@ -750,7 +750,7 @@ pub fn on_buf<A: Addr>(
     buf: &[u8],
     entropy_sender: &mut impl SendRecvEvent,
     kademlia_sender: &mut impl kademlia::SendRecvEvent<A>,
-    blob_sender: &mut impl SendEvent<Recv<blob::exp::Serve<SendFragment>>>,
+    blob_sender: &mut impl SendEvent<Recv<blob::Serve<SendFragment>>>,
 ) -> anyhow::Result<()> {
     match deserialize(buf)? {
         Message::Invite(message) => entropy_sender.send(Recv(message)),
