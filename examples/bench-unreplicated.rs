@@ -17,6 +17,13 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+// #[cfg(not(target_env = "msvc"))]
+// use tikv_jemallocator::Jemalloc;
+
+// #[cfg(not(target_env = "msvc"))]
+// #[global_allocator]
+// static GLOBAL: Jemalloc = Jemalloc;
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let role = args().nth(1);
@@ -29,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
         let mode = args().nth(2);
         let recv_session;
         let state_session = if mode.as_deref() == Some("erased") {
+            println!("Starting replica in erased mode");
             let mut state = unreplicated::erased::Replica::new(Null, Box::new(net));
             let mut state_session = erased::Session::new();
             let mut state_sender = state_session.erased_sender();
@@ -58,14 +66,14 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
 
-    let replica_addrs = vec![SocketAddr::new([10, 0, 0, 1].into(), 4000)];
+    let replica_addrs = vec![SocketAddr::new([10, 0, 0, 7].into(), 4000)];
     let mut sessions = JoinSet::new();
     let runtime = runtime::Builder::new_multi_thread().enable_all().build()?;
     let (count_sender, mut count_receiver) = unbounded_channel();
     let cancel = CancellationToken::new();
     for id in repeat_with(rand::random).take(40) {
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
-        let addr = SocketAddr::new([10, 0, 0, 2].into(), socket.local_addr()?.port());
+        let addr = SocketAddr::new([10, 0, 0, 8].into(), socket.local_addr()?.port());
         let raw_net = Udp(socket.into());
 
         let mut close_loop = CloseLoop::new(repeat_with(Default::default));

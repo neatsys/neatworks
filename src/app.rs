@@ -1,4 +1,5 @@
 pub mod kvstore;
+pub mod ycsb;
 
 pub trait App {
     // following SpexPaxos convention, this interface takes "binary in, binary out" approach, avoids
@@ -21,4 +22,4 @@ impl App for Null {
     }
 }
 
-pub use kvstore::{KVStore, KVStoreOp, KVStoreResult};
+pub use kvstore::{KVStore, Op, Result};

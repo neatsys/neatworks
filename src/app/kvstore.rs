@@ -17,14 +17,14 @@ impl KVStore {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum KVStoreOp {
+pub enum Op {
     Put(String, String),
     Get(String),
     Append(String, String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum KVStoreResult {
+pub enum Result {
     PutOk,
     GetResult(String),
     KetyNotFound,
@@ -35,22 +35,22 @@ impl App for KVStore {
     fn execute(&mut self, op: &[u8]) -> anyhow::Result<Vec<u8>> {
         let Self(store) = self;
         let result = match serde_json::from_slice(op)? {
-            KVStoreOp::Put(key, value) => {
+            Op::Put(key, value) => {
                 store.insert(key, value);
-                KVStoreResult::PutOk
+                Result::PutOk
             }
-            KVStoreOp::Get(key) => {
+            Op::Get(key) => {
                 if let Some(value) = store.get(&key) {
-                    KVStoreResult::GetResult(value.clone())
+                    Result::GetResult(value.clone())
                 } else {
-                    KVStoreResult::KetyNotFound
+                    Result::KetyNotFound
                 }
             }
-            KVStoreOp::Append(key, postfix) => {
+            Op::Append(key, postfix) => {
                 let mut value = store.get(&key).cloned().unwrap_or_default();
                 value += &postfix;
                 store.insert(key, value.clone());
-                KVStoreResult::AppendResult(value)
+                Result::AppendResult(value)
             }
         };
         Ok(serde_json::to_vec(&result)?)
@@ -58,7 +58,7 @@ impl App for KVStore {
 }
 
 pub fn static_workload(
-    rounds: impl ExactSizeIterator<Item = (KVStoreOp, KVStoreResult)>,
+    rounds: impl ExactSizeIterator<Item = (Op, Result)>,
 ) -> anyhow::Result<impl Iterator<Item = Workload> + Clone> {
     Ok(rounds
         .map(|(op, result)| {
@@ -97,11 +97,11 @@ impl Iterator for InfinitePutGet {
         let index = self.rng.gen_range(0..5);
         let (op, result) = if self.should_get {
             (
-                KVStoreOp::Get(format!("{}-{index}", self.namespace)),
+                Op::Get(format!("{}-{index}", self.namespace)),
                 if self.values[index] == String::default() {
-                    KVStoreResult::KetyNotFound
+                    Result::KetyNotFound
                 } else {
-                    KVStoreResult::GetResult(self.values[index].clone())
+                    Result::GetResult(self.values[index].clone())
                 },
             )
         } else {
@@ -112,8 +112,8 @@ impl Iterator for InfinitePutGet {
                 .collect::<String>();
             self.values[index] = value.clone();
             (
-                KVStoreOp::Put(format!("{}-{index}", self.namespace), value),
-                KVStoreResult::PutOk,
+                Op::Put(format!("{}-{index}", self.namespace), value),
+                Result::PutOk,
             )
         };
         self.should_get = !self.should_get;

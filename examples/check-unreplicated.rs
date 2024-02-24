@@ -3,7 +3,7 @@ use std::{thread::available_parallelism, time::Duration};
 use augustus::{
     app::{
         kvstore::{static_workload, InfinitePutGet},
-        KVStoreOp, KVStoreResult,
+        Op, Result,
     },
     search::{breadth_first, random_depth_first, Settings, State as _},
     unreplicated::check::{DryState, State},
@@ -22,16 +22,16 @@ fn main() -> anyhow::Result<()> {
     state.push_client(static_workload(
         [
             (
-                KVStoreOp::Put(String::from("foo"), String::from("bar")),
-                KVStoreResult::PutOk,
+                Op::Put(String::from("foo"), String::from("bar")),
+                Result::PutOk,
             ),
             (
-                KVStoreOp::Append(String::from("foo"), String::from("baz")),
-                KVStoreResult::AppendResult(String::from("barbaz")),
+                Op::Append(String::from("foo"), String::from("baz")),
+                Result::AppendResult(String::from("barbaz")),
             ),
             (
-                KVStoreOp::Get(String::from("foo")),
-                KVStoreResult::GetResult(String::from("barbaz")),
+                Op::Get(String::from("foo")),
+                Result::GetResult(String::from("barbaz")),
             ),
         ]
         .into_iter(),
@@ -66,10 +66,8 @@ fn main() -> anyhow::Result<()> {
     for i in 0..2 {
         state.push_client(static_workload((0..3).map(move |x| {
             (
-                KVStoreOp::Append(format!("KEY-{i}"), x.to_string()),
-                KVStoreResult::AppendResult(
-                    (0..=x).map(|x| x.to_string()).collect::<Vec<_>>().concat(),
-                ),
+                Op::Append(format!("KEY-{i}"), x.to_string()),
+                Result::AppendResult((0..=x).map(|x| x.to_string()).collect::<Vec<_>>().concat()),
             )
         }))?)?
     }
