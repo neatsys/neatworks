@@ -411,6 +411,7 @@ impl<K> OnEvent<RecvOffer<SendFragment>> for Peer<K> {
             let index = send_fragment.index;
             return self.blob.accept(
                 &mut send_fragment,
+                self.fragment_len as usize,
                 move |buf| DownloadOk(chunk, index, buf),
                 state.recover.cancel.clone(),
             );
@@ -440,6 +441,7 @@ impl<K> OnEvent<RecvOffer<SendFragment>> for Peer<K> {
             let index = send_fragment.index;
             return self.blob.accept(
                 &mut send_fragment,
+                self.fragment_len as usize,
                 move |buf| DownloadOk(chunk, index, buf),
                 recover.cancel.clone(),
             );
@@ -454,9 +456,6 @@ impl<K> OnEvent<DownloadOk> for Peer<K> {
         DownloadOk(chunk, index, fragment): DownloadOk,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        if fragment.len() != self.fragment_len as usize {
-            return Ok(()); // incomplete sending, well, not very elegant
-        }
         if let Some(state) = self.downloads.get_mut(&chunk) {
             // println!("download {} index {index}", H256(chunk));
             return state.recover.submit_decode(

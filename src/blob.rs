@@ -39,7 +39,7 @@ use std::{
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    io::{AsyncReadExt, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
     sync::mpsc::UnboundedReceiver,
     task::{yield_now, JoinSet},
@@ -62,6 +62,7 @@ pub struct Offer<A, M> {
 
 pub struct Accept<N> {
     pub serve_addr: SocketAddr,
+    pub expect_len: Option<usize>,
     pub into_recv_event: Box<dyn FnOnce(Vec<u8>) -> N + Send + Sync>,
     pub cancel: Option<CancellationToken>,
 }
@@ -95,6 +96,7 @@ pub trait ServiceExt<A, M, N> {
     fn accept(
         &mut self,
         recv_offer: &mut RecvOffer<M>,
+        expect_len: impl Into<Option<usize>>,
         into_recv_event: impl FnOnce(Vec<u8>) -> N + Send + Sync + 'static,
         cancel: impl Into<Option<CancellationToken>>,
     ) -> anyhow::Result<()>;
@@ -106,7 +108,7 @@ pub trait ServiceExt<A, M, N> {
     // revisit this if necessary
     fn reject(&mut self, recv_offer: &mut RecvOffer<M>) -> anyhow::Result<()> {
         let cancel = CancellationToken::new();
-        self.accept(recv_offer, |_| unreachable!(), cancel.clone())?;
+        self.accept(recv_offer, None, |_| unreachable!(), cancel.clone())?;
         cancel.cancel();
         Ok(())
     }
@@ -132,6 +134,7 @@ impl<T: Service<A, M, N> + ?Sized, A, M, N> ServiceExt<A, M, N> for T {
     fn accept(
         &mut self,
         recv_offer: &mut RecvOffer<M>,
+        expect_len: impl Into<Option<usize>>,
         into_recv_event: impl FnOnce(Vec<u8>) -> N + Send + Sync + 'static,
         cancel: impl Into<Option<CancellationToken>>,
     ) -> anyhow::Result<()> {
@@ -143,6 +146,7 @@ impl<T: Service<A, M, N> + ?Sized, A, M, N> ServiceExt<A, M, N> for T {
                 .ok_or(anyhow::anyhow!(
                     "the offer has already been accepted/rejected"
                 ))?,
+            expect_len: expect_len.into(),
             into_recv_event: Box::new(into_recv_event),
             cancel: cancel.into(),
         };
@@ -226,7 +230,12 @@ pub async fn session<A, M, N: Send + 'static>(
                     let task = async {
                         let mut stream = TcpStream::connect(accept.serve_addr).await?;
                         let mut buf = Vec::new();
-                        stream.read_to_end(&mut buf).await?;
+                        if let Some(expect_len) = accept.expect_len {
+                            buf.resize(expect_len, Default::default());
+                            stream.read_exact(&mut buf).await?;
+                        } else {
+                            stream.read_to_end(&mut buf).await?;
+                        }
                         Result::<_, anyhow::Error>::Ok(buf)
                     };
                     let buf = if let Some(cancel) = accept.cancel {
