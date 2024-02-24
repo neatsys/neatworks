@@ -59,6 +59,7 @@ enum Upcall {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt::init();
     let mut rlimit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
     if rlimit.current.is_some() && rlimit.current < rlimit.maximum {
         rlimit.current = rlimit.maximum;

@@ -432,13 +432,18 @@ impl<A: Addr> OnEvent<ResendFindPeer<A>> for Peer<A> {
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let state = self.query_states.get_mut(&target).unwrap();
-        eprintln!(
-            "Resend FindPeer({}, {}) {record:?}",
+        // eprintln!(
+        //     "Resend FindPeer({}, {}) {record:?}",
+        //     H256(target),
+        //     state.find_peer.count
+        // );
+        // self.net
+        //     .send_to_each([record.addr.clone()].into_iter(), state.find_peer.clone())
+        Err(anyhow::anyhow!(
+            "FindPeer({}, {}) timeout {record:?}",
             H256(target),
             state.find_peer.count
-        );
-        self.net
-            .send_to_each([record.addr.clone()].into_iter(), state.find_peer.clone())
+        ))
     }
 }
 

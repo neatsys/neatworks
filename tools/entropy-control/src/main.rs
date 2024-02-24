@@ -15,7 +15,7 @@ use entropy_control::{retain_instances, terraform_instances, TerraformOutputInst
 use entropy_control_messages::{
     GetConfig, GetResult, PeerUrl, PutConfig, PutResult, StartPeersConfig,
 };
-use rand::{seq::SliceRandom, thread_rng, Rng};
+use rand::{seq::SliceRandom, thread_rng};
 use tokio::{
     fs::OpenOptions,
     io::{AsyncReadExt, AsyncSeekExt},
@@ -33,13 +33,13 @@ async fn main() -> anyhow::Result<()> {
     let control_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .build()?;
-    let instances = terraform_instances().await?;
+    // let instances = terraform_instances().await?;
     // let instances = vec![instances[0].clone()];
-    // let instances = vec![entropy_control::TerraformOutputInstance {
-    //     public_ip: [127, 0, 0, 1].into(),
-    //     private_ip: [127, 0, 0, 1].into(),
-    //     public_dns: "localhost".into(),
-    // }];
+    let instances = vec![entropy_control::TerraformOutputInstance {
+        public_ip: [127, 0, 0, 1].into(),
+        private_ip: [127, 0, 0, 1].into(),
+        public_dns: "localhost".into(),
+    }];
 
     if category.ends_with("latency") {
         let mut out = OpenOptions::new()
@@ -59,10 +59,10 @@ async fn main() -> anyhow::Result<()> {
             control_client.clone(),
             &instances,
             &category,
-            1 << 22,
-            NonZeroUsize::new(32).unwrap(),
-            NonZeroUsize::new(80).unwrap(),
-            NonZeroUsize::new(88).unwrap(),
+            1 << 10,
+            NonZeroUsize::new(4).unwrap(),
+            NonZeroUsize::new(5).unwrap(),
+            NonZeroUsize::new(8).unwrap(),
             NonZeroUsize::new(8).unwrap(),
             NonZeroUsize::new(10).unwrap(),
             1,
@@ -70,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
             &mut out,
         )
         .await?;
+        return Ok(());
 
         benchmark(
             control_client.clone(),
@@ -232,7 +233,7 @@ async fn benchmark(
     mut out: impl FnMut(String),
 ) -> anyhow::Result<()> {
     let chunk_len = fragment_len * chunk_k.get() as u32;
-    assert_eq!(chunk_len as usize * k.get(), 1 << 30);
+    // assert_eq!(chunk_len as usize * k.get(), 1 << 30);
     let replication_factor = if category.starts_with("ipfs") { 3 } else { 1 };
 
     let prefix = format!(
@@ -276,10 +277,10 @@ async fn benchmark(
                 chunk_m,
             ));
         }
-        tokio::select! {
-            () = sleep(Duration::from_secs(5)) => {}
-            Some(result) = start_peers_sessions.join_next() => result??
-        }
+        // tokio::select! {
+        //     () = sleep(Duration::from_secs(5)) => {}
+        //     Some(result) = start_peers_sessions.join_next() => result??
+        // }
     }
 
     let peer_urls = if category.starts_with("ipfs") {
@@ -648,8 +649,8 @@ async fn close_loop_session(
         count = shared_count.fetch_add(1, SeqCst);
         count < valid_range.end
     } {
-        let backoff = Duration::from_millis(thread_rng().gen_range(1000..5000));
-        sleep(backoff).await;
+        // let backoff = Duration::from_millis(thread_rng().gen_range(1000..5000));
+        // sleep(backoff).await;
         let put_url = instance_urls
             .choose(&mut thread_rng())
             .ok_or(anyhow::anyhow!("no instance available"))?;

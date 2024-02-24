@@ -1,14 +1,15 @@
 use std::{
-    collections::HashMap, fmt::Debug, mem::replace, net::SocketAddr, sync::Arc, time::Duration,
+    collections::HashMap, fmt::Debug, io::ErrorKind, mem::replace, net::SocketAddr, sync::Arc,
+    time::Duration,
 };
 
-use anyhow::Context;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpSocket, TcpStream},
     sync::mpsc::{unbounded_channel, UnboundedSender},
     task::JoinSet,
 };
+use tracing::warn;
 
 use crate::event::{
     erased::{OnEvent, Timer},
@@ -56,6 +57,7 @@ impl<B: Buf> SendMessage<IterAddr<'_, SocketAddr>, B> for Udp {
     }
 }
 
+// `impl SendMessage` stub that forward messages to `TcpControl`
 #[derive(Debug, Clone)]
 pub struct Tcp<E>(pub E);
 
@@ -78,6 +80,14 @@ impl<E: SendEvent<(SocketAddr, B)>, B: Buf> SendMessage<IterAddr<'_, SocketAddr>
     }
 }
 
+// TODO consider generialize into a universal contruction for supporting oneshot
+// unidirectional message with connections, best effort reusing established
+// connections
+// (that said the contruction should guarantee to reuse for fixed communication
+// pattern e.g. replication group, gossip protocol when without reconfiguration,
+// etc)
+// is there a second connection-based user for the universal contruction? maybe
+// TLS, QUIC, i don't know
 #[derive(Debug)]
 pub struct TcpControl<B> {
     // TODO replace timeout-based cleanup with LRU + throttle
@@ -130,23 +140,21 @@ impl<B: Buf> OnEvent<(SocketAddr, B)> for TcpControl<B> {
 
         let (sender, mut receiver) = unbounded_channel::<B>();
         tokio::spawn(async move {
-            // let mut stream = TcpStream::connect(dest).await.unwrap();
-            let socket = TcpSocket::new_v4().unwrap();
-            // socket.set_reuseaddr(true).unwrap();
-            let mut stream = match socket.connect(dest).await {
-                Ok(stream) => stream,
-                Err(err) => panic!("{dest}: {err}"),
-            };
-            while let Some(buf) = receiver.recv().await {
-                async {
+            if let Err(err) = async {
+                // let mut stream = TcpStream::connect(dest).await.unwrap();
+                let socket = TcpSocket::new_v4()?;
+                // socket.set_reuseaddr(true).unwrap();
+                let mut stream = socket.connect(dest).await?;
+                while let Some(buf) = receiver.recv().await {
                     stream.write_u64(buf.as_ref().len() as _).await?;
                     stream.write_all(buf.as_ref()).await?;
                     stream.flush().await?;
-                    Result::<_, anyhow::Error>::Ok(())
                 }
-                .await
-                .context(dest)
-                .unwrap()
+                Result::<_, anyhow::Error>::Ok(())
+            }
+            .await
+            {
+                warn!("{dest} {err}")
             }
         });
         sender
@@ -205,21 +213,29 @@ pub async fn tcp_listen_session(
             Select::Accept((mut stream, _)) => {
                 let sender = sender.clone();
                 stream_sessions.spawn(async move {
-                    while let Ok(len) = stream.read_u64().await {
+                    loop {
+                        let len = match stream.read_u64().await {
+                            Ok(len) => len,
+                            Err(err) => {
+                                if err.kind() != ErrorKind::UnexpectedEof {
+                                    warn!("{:?} {err}", stream.peer_addr());
+                                }
+                                return Ok(());
+                            }
+                        };
                         if len as usize >= MAX_TCP_BUF_LEN {
-                            eprintln!(
-                                "Closing connection to {:?} for too large buf: {len}",
-                                stream.peer_addr()
-                            );
-                            break;
+                            warn!("{:?} invalid buffer length: {len}", stream.peer_addr());
+                            return Ok(());
                         }
                         let mut buf = vec![0; len as _];
-                        stream.read_exact(&mut buf).await?;
+                        if let Err(err) = stream.read_exact(&mut buf).await {
+                            warn!("{:?} {err}", stream.peer_addr());
+                            return Ok(());
+                        }
                         sender
                             .send(buf)
                             .map_err(|_| anyhow::anyhow!("channel closed"))?
                     }
-                    Ok(())
                 });
             }
             Select::Recv(buf) => on_buf(&buf)?,

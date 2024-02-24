@@ -3,7 +3,7 @@ use std::{collections::HashMap, fmt::Debug, time::Duration};
 use tokio::{
     sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
     task::{AbortHandle, JoinError, JoinSet},
-    time::interval,
+    time::{interval, sleep},
 };
 
 use super::{OnEvent, SendEvent, Sender, Timer, TimerId};
@@ -159,6 +159,7 @@ impl<M: Send + 'static> Timer<M> for Session<M> {
         let timer_id = self.timer_id;
         let mut sender = self.sender.clone();
         let handle = self.timer_sessions.spawn(async move {
+            sleep(period).await;
             let mut interval = interval(period);
             loop {
                 interval.tick().await;
