@@ -7,7 +7,7 @@ use std::{
 };
 
 use augustus::{
-    blob::{self, exp::Service},
+    blob::{self, exp::ServiceExt},
     crypto::{Crypto, PublicKey, Verifiable, H256},
     event::{
         erased::{OnEvent, Timer},
@@ -144,7 +144,7 @@ pub struct Peer<K> {
     pending_pulls: HashMap<Chunk, Vec<PeerId>>,
 
     net: Box<dyn Net + Send + Sync>,
-    blob: Box<dyn SendEvent<blob::exp::Event<PeerId, SendFragment, DownloadOk>> + Send + Sync>,
+    blob: Box<dyn blob::exp::Service<PeerId, SendFragment, DownloadOk> + Send + Sync>,
     upcall: Box<dyn Upcall<K> + Send + Sync>,
     codec_worker: CodecWorker,
     fs: Box<dyn SendFsEvent + Send + Sync>,
@@ -225,7 +225,7 @@ impl<K> Peer<K> {
         chunk_n: NonZeroUsize,
         chunk_m: NonZeroUsize,
         net: impl Net + Send + Sync + 'static,
-        blob: impl SendEvent<blob::exp::Event<PeerId, SendFragment, DownloadOk>> + Send + Sync + 'static,
+        blob: impl blob::exp::Service<PeerId, SendFragment, DownloadOk> + Send + Sync + 'static,
         upcall: impl Upcall<K> + Send + Sync + 'static,
         codec_worker: CodecWorker,
         fs: impl SendFsEvent + Send + Sync + 'static,
@@ -402,7 +402,7 @@ impl<K> OnEvent<Encode> for Peer<K> {
 impl<K> OnEvent<blob::exp::RecvOffer<SendFragment>> for Peer<K> {
     fn on_event(
         &mut self,
-        send_fragment: blob::exp::RecvOffer<SendFragment>,
+        mut send_fragment: blob::exp::RecvOffer<SendFragment>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if let Some(state) = self.downloads.get_mut(&send_fragment.chunk) {
@@ -410,7 +410,7 @@ impl<K> OnEvent<blob::exp::RecvOffer<SendFragment>> for Peer<K> {
             let chunk = send_fragment.chunk;
             let index = send_fragment.index;
             return self.blob.accept(
-                &send_fragment,
+                &mut send_fragment,
                 move |buf| DownloadOk(chunk, index, buf),
                 state.recover.cancel.clone(),
             );
@@ -439,7 +439,7 @@ impl<K> OnEvent<blob::exp::RecvOffer<SendFragment>> for Peer<K> {
             let chunk = send_fragment.chunk;
             let index = send_fragment.index;
             return self.blob.accept(
-                &send_fragment,
+                &mut send_fragment,
                 move |buf| DownloadOk(chunk, index, buf),
                 recover.cancel.clone(),
             );

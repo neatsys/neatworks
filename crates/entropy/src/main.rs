@@ -49,6 +49,7 @@ use tokio::{
     task::{JoinHandle, JoinSet},
     time::timeout,
 };
+use tracing::warn;
 use wirehair::{Decoder, Encoder};
 
 #[derive(Debug, Clone, derive_more::From)]
@@ -170,9 +171,12 @@ async fn ok(State(state): State<AppState>) -> (StatusCode, &'static str) {
     let mut peers = state.peers.lock().await;
     if let Ok(Some(result)) = timeout(Duration::ZERO, peers.sessions.join_next()).await {
         match result {
-            Err(err) => eprintln!("{err}"),
-            Ok(Err(err)) => eprintln!("{err}"),
-            Ok(Ok(())) => eprintln!("unexpected peer exit"),
+            Err(err) => warn!("{err}"),
+            Ok(Err(err)) => {
+                warn!("{err}");
+                warn!("\n{}", err.backtrace())
+            }
+            Ok(Ok(())) => warn!("unexpected peer exit"),
         }
         (StatusCode::INTERNAL_SERVER_ERROR, "err")
     } else {
@@ -332,39 +336,53 @@ async fn put_chunk(
     State(state): State<AppState>,
     Path(peer_index): Path<usize>,
     mut multipart: Multipart,
-) -> String {
-    let buf = multipart
-        .next_field()
-        .await
-        .unwrap()
-        .unwrap()
-        .bytes()
-        .await
-        .unwrap();
-    let chunk = buf.sha256();
-    let (sender, receiver) = oneshot::channel();
-    let replaced = state.pending_puts.lock().await.insert(chunk, sender);
-    assert!(replaced.is_none());
-    state.peers.lock().await.senders[peer_index]
-        .send(Put(chunk, buf))
-        .unwrap();
-    // detach receiving, so that even if http connection closed receiver keeps alive
-    tokio::spawn(receiver).await.unwrap().unwrap();
-    format!("{:x}", H256(chunk))
+) -> (StatusCode, String) {
+    match async {
+        let buf = multipart
+            .next_field()
+            .await?
+            .ok_or(anyhow::anyhow!("missing filed"))?
+            .bytes()
+            .await?;
+        let chunk = buf.sha256();
+        let (sender, receiver) = oneshot::channel();
+        let replaced = state.pending_puts.lock().await.insert(chunk, sender);
+        assert!(replaced.is_none());
+        state.peers.lock().await.senders[peer_index].send(Put(chunk, buf))?;
+        // detach receiving, so that even if http connection closed receiver keeps alive
+        tokio::spawn(receiver).await??;
+        Result::<_, anyhow::Error>::Ok(format!("{:x}", H256(chunk)))
+    }
+    .await
+    {
+        Ok(result) => (StatusCode::OK, result),
+        Err(err) => {
+            warn!("{err}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "err".into())
+        }
+    }
 }
 
 async fn get_chunk(
     State(state): State<AppState>,
     Path((peer_index, chunk)): Path<(usize, String)>,
-) -> Vec<u8> {
-    let chunk = chunk.parse::<H256>().unwrap().into();
-    let (sender, receiver) = oneshot::channel();
-    let replaced = state.pending_gets.lock().await.insert(chunk, sender);
-    assert!(replaced.is_none());
-    state.peers.lock().await.senders[peer_index]
-        .send(Get(chunk))
-        .unwrap();
-    tokio::spawn(receiver).await.unwrap().unwrap()
+) -> (StatusCode, Vec<u8>) {
+    match async {
+        let chunk = chunk.parse::<H256>()?.into();
+        let (sender, receiver) = oneshot::channel();
+        let replaced = state.pending_gets.lock().await.insert(chunk, sender);
+        assert!(replaced.is_none());
+        state.peers.lock().await.senders[peer_index].send(Get(chunk))?;
+        Result::<_, anyhow::Error>::Ok(tokio::spawn(receiver).await??)
+    }
+    .await
+    {
+        Ok(result) => (StatusCode::OK, result),
+        Err(err) => {
+            warn!("{err}");
+            (StatusCode::INTERNAL_SERVER_ERROR, b"err".to_vec())
+        }
+    }
 }
 
 async fn benchmark_put(State(state): State<AppState>, Json(config): Json<PutConfig>) -> Json<u32> {
@@ -483,12 +501,19 @@ async fn put_impl(
 async fn poll_benchmark_put(
     State(state): State<AppState>,
     Path(put_id): Path<u32>,
-) -> Json<Option<PutResult>> {
+) -> (StatusCode, Json<Option<PutResult>>) {
     let mut puts = state.benchmark_puts.lock().await;
     if !puts[&put_id].is_finished() {
-        Json(None)
+        (StatusCode::OK, Json(None))
     } else {
-        Json(Some(puts.remove(&put_id).unwrap().await.unwrap().unwrap()))
+        match async { Result::<_, anyhow::Error>::Ok(puts.remove(&put_id).unwrap().await??) }.await
+        {
+            Ok(result) => (StatusCode::OK, Json(Some(result))),
+            Err(err) => {
+                warn!("{err}");
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(None))
+            }
+        }
     }
 }
 
@@ -575,11 +600,18 @@ async fn benchmark_get(State(state): State<AppState>, Json(config): Json<GetConf
 async fn poll_benchmark_get(
     State(state): State<AppState>,
     Path(get_id): Path<u32>,
-) -> Json<Option<GetResult>> {
+) -> (StatusCode, Json<Option<GetResult>>) {
     let mut gets = state.benchmark_gets.lock().await;
     if !gets[&get_id].is_finished() {
-        Json(None)
+        (StatusCode::OK, Json(None))
     } else {
-        Json(Some(gets.remove(&get_id).unwrap().await.unwrap().unwrap()))
+        match async { Result::<_, anyhow::Error>::Ok(gets.remove(&get_id).unwrap().await??) }.await
+        {
+            Ok(result) => (StatusCode::OK, Json(Some(result))),
+            Err(err) => {
+                warn!("{err}");
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(None))
+            }
+        }
     }
 }

@@ -5,7 +5,7 @@ use std::{
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpSocket, TcpStream},
+    net::{TcpListener, TcpStream},
     sync::mpsc::{unbounded_channel, UnboundedSender},
     task::JoinSet,
 };
@@ -141,10 +141,10 @@ impl<B: Buf> OnEvent<(SocketAddr, B)> for TcpControl<B> {
         let (sender, mut receiver) = unbounded_channel::<B>();
         tokio::spawn(async move {
             if let Err(err) = async {
-                // let mut stream = TcpStream::connect(dest).await.unwrap();
-                let socket = TcpSocket::new_v4()?;
+                let mut stream = TcpStream::connect(dest).await?;
+                // let socket = TcpSocket::new_v4()?;
                 // socket.set_reuseaddr(true).unwrap();
-                let mut stream = socket.connect(dest).await?;
+                // let mut stream = socket.connect(dest).await?;
                 while let Some(buf) = receiver.recv().await {
                     stream.write_u64(buf.as_ref().len() as _).await?;
                     stream.write_all(buf.as_ref()).await?;

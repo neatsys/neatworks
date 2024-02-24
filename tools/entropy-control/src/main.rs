@@ -277,10 +277,10 @@ async fn benchmark(
                 chunk_m,
             ));
         }
-        // tokio::select! {
-        //     () = sleep(Duration::from_secs(5)) => {}
-        //     Some(result) = start_peers_sessions.join_next() => result??
-        // }
+        tokio::select! {
+            () = sleep(Duration::from_millis(1200)) => {}
+            Some(result) = start_peers_sessions.join_next() => result??
+        }
     }
 
     let peer_urls = if category.starts_with("ipfs") {

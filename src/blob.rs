@@ -50,7 +50,10 @@ use crate::{
 };
 
 pub mod exp {
-    use std::net::{IpAddr, SocketAddr};
+    use std::{
+        net::{IpAddr, SocketAddr},
+        time::Duration,
+    };
 
     use bytes::Bytes;
     use serde::{Deserialize, Serialize};
@@ -58,9 +61,11 @@ pub mod exp {
         io::{AsyncReadExt as _, AsyncWriteExt as _},
         net::{TcpListener, TcpStream},
         sync::mpsc::UnboundedReceiver,
-        task::JoinSet,
+        task::{yield_now, JoinSet},
+        time::timeout,
     };
     use tokio_util::sync::CancellationToken;
+    use tracing::info;
 
     use crate::{
         event::SendEvent,
@@ -91,10 +96,13 @@ pub mod exp {
     pub struct RecvOffer<M> {
         #[deref]
         pub inner: M,
-        serve_addr: SocketAddr,
+        serve_addr: Option<SocketAddr>,
     }
 
-    pub trait Service<A, M, N> {
+    pub trait Service<A, M, N>: SendEvent<Event<A, M, N>> {}
+    impl<T: SendEvent<Event<A, M, N>>, A, M, N> Service<A, M, N> for T {}
+
+    pub trait ServiceExt<A, M, N> {
         fn offer(
             &mut self,
             dest: A,
@@ -105,13 +113,25 @@ pub mod exp {
 
         fn accept(
             &mut self,
-            recv_offer: &RecvOffer<M>,
+            recv_offer: &mut RecvOffer<M>,
             into_recv_event: impl FnOnce(Vec<u8>) -> N + Send + Sync + 'static,
             cancel: impl Into<Option<CancellationToken>>,
         ) -> anyhow::Result<()>;
+
+        // implicitly reject by not calling `accept` also works, just with a definite penalty of
+        // holding ephemeral server for timeout period
+        // that said, this method is not used currently, since it probably cannot enable faster
+        // releasing of ephemeral server with this implementation
+        // revisit this if necessary
+        fn reject(&mut self, recv_offer: &mut RecvOffer<M>) -> anyhow::Result<()> {
+            let cancel = CancellationToken::new();
+            self.accept(recv_offer, |_| unreachable!(), cancel.clone())?;
+            cancel.cancel();
+            Ok(())
+        }
     }
 
-    impl<T: SendEvent<Event<A, M, N>> + ?Sized, A, M, N> Service<A, M, N> for T {
+    impl<T: Service<A, M, N> + ?Sized, A, M, N> ServiceExt<A, M, N> for T {
         fn offer(
             &mut self,
             dest: A,
@@ -130,12 +150,18 @@ pub mod exp {
 
         fn accept(
             &mut self,
-            recv_offer: &RecvOffer<M>,
+            recv_offer: &mut RecvOffer<M>,
             into_recv_event: impl FnOnce(Vec<u8>) -> N + Send + Sync + 'static,
             cancel: impl Into<Option<CancellationToken>>,
         ) -> anyhow::Result<()> {
             let accept = Accept {
-                serve_addr: recv_offer.serve_addr,
+                serve_addr: recv_offer
+                    .serve_addr
+                    .take()
+                    // TODO compile time check instead
+                    .ok_or(anyhow::anyhow!(
+                        "the offer has already been accepted/rejected"
+                    ))?,
                 into_recv_event: Box::new(into_recv_event),
                 cancel: cancel.into(),
             };
@@ -153,8 +179,8 @@ pub mod exp {
         mut upcall: impl SendEvent<RecvOffer<M>> + SendEvent<N>,
     ) -> anyhow::Result<()> {
         let mut bind_tasks = JoinSet::<anyhow::Result<_>>::new();
-        let mut send_tasks = JoinSet::<anyhow::Result<_>>::new();
-        let mut recv_tasks = JoinSet::<anyhow::Result<_>>::new();
+        let mut send_tasks = JoinSet::new();
+        let mut recv_tasks = JoinSet::new();
         let mut pending_bind = Vec::new();
         loop {
             enum Select<A, M, N> {
@@ -166,8 +192,8 @@ pub mod exp {
             match tokio::select! {
                 event = events.recv() => Select::Recv(event.ok_or(anyhow::anyhow!("channel closed"))?),
                 Some(result) = bind_tasks.join_next() => Select::JoinNextBind(result??),
-                Some(result) = send_tasks.join_next() => Select::JoinNextSend(result??),
-                Some(result) = recv_tasks.join_next() => Select::JoinNextRecv(result??),
+                Some(result) = send_tasks.join_next() => Select::JoinNextSend(result?),
+                Some(result) = recv_tasks.join_next() => Select::JoinNextRecv(result?),
             } {
                 Select::Recv(Event::Offer(offer)) => {
                     pending_bind.push(offer);
@@ -175,30 +201,41 @@ pub mod exp {
                 }
                 Select::JoinNextBind(listener) => {
                     let offer = pending_bind.pop().unwrap();
-                    // it's possible that the message arrives before listener start accepting
-                    // send inside spawned task requires clone and send `net`
-                    // i don't want that, and spurious error like this should be fine
-                    net.send(offer.dest, Serve(offer.message, listener.local_addr()?))?;
+                    let addr = listener.local_addr()?;
                     send_tasks.spawn(async move {
                         let task = async {
-                            let (mut stream, _) = listener.accept().await?;
-                            Ok(stream.write_all(&offer.buf).await?)
+                            // escaping path to prevent the ephemeral server leaks forever
+                            // that could happen e.g. remote does not accept the transfer
+                            let (mut stream, _) =
+                                timeout(Duration::from_millis(2500), listener.accept()).await??;
+                            Result::<_, anyhow::Error>::Ok(stream.write_all(&offer.buf).await?)
                         };
-                        if let Some(cancel) = offer.cancel {
+                        let result = if let Some(cancel) = offer.cancel {
                             tokio::select! {
                                 result = task => result,
                                 () = cancel.cancelled() => Ok(())
                             }
                         } else {
                             task.await
+                        };
+                        if let Err(err) = result {
+                            info!("{err}")
                         }
                     });
+                    // it's possible that the message arrives before listener start accepting
+                    // send inside spawned task requires clone and send `net`
+                    // i don't want that, instead do best effort spurious error mitigation with
+                    // active yielding
+                    // notice that such spuerious error is not hard error, just effectively false
+                    // positive cancel the transfer
+                    yield_now().await;
+                    net.send(offer.dest, Serve(offer.message, addr))?;
                 }
                 Select::JoinNextSend(()) => {}
                 Select::Recv(Event::RecvServe(Recv(Serve(message, serve_addr)))) => {
                     upcall.send(RecvOffer {
                         inner: message,
-                        serve_addr,
+                        serve_addr: Some(serve_addr),
                     })?
                 }
                 Select::Recv(Event::Accept(accept)) => {
@@ -212,12 +249,18 @@ pub mod exp {
                         let buf = if let Some(cancel) = accept.cancel {
                             tokio::select! {
                                 result = task => result,
-                                () = cancel.cancelled() => return Ok(None)
+                                () = cancel.cancelled() => return None
                             }
                         } else {
                             task.await
-                        }?;
-                        Ok(Some((accept.into_recv_event)(buf)))
+                        };
+                        match buf {
+                            Ok(buf) => Some((accept.into_recv_event)(buf)),
+                            Err(err) => {
+                                info!("{err}");
+                                None
+                            }
+                        }
                     });
                 }
                 Select::JoinNextRecv(recv_event) => {
