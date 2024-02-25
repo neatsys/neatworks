@@ -13,7 +13,7 @@ use std::{
 
 use augustus::{
     blob,
-    crypto::{Crypto, DigestHash, H256},
+    crypto::{Crypto, DigestHash, PublicKey, H256},
     event::{
         erased::{Session, SessionSender},
         SendEvent,
@@ -226,10 +226,10 @@ async fn start_peers(State(state): State<AppState>, Json(config): Json<StartPeer
 }
 
 async fn start_peer(
-    record: PeerRecord<SocketAddr>,
+    record: PeerRecord<PublicKey, SocketAddr>,
     crypto: Crypto<PeerId>,
     mut rng: StdRng,
-    mut records: Vec<PeerRecord<SocketAddr>>,
+    mut records: Vec<PeerRecord<PublicKey, SocketAddr>>,
     mut peer_session: Session<Peer<[u8; 32]>>,
     upcall_sender: UnboundedSender<Upcall>,
     config: StartPeersConfig,

@@ -8,7 +8,7 @@ use crate::{
         erased::{OnEvent, Timer},
         SendEvent, TimerId,
     },
-    kademlia::{PeerId, PeerRecord, Query, QueryResult, QueryStatus, Target},
+    kademlia::{PeerId, Query, QueryResult, QueryStatus, Target},
 };
 
 use super::{Addr, SendMessage, SendMessageToEach, SendMessageToEachExt as _};
@@ -42,14 +42,14 @@ pub struct Control<M, A, B = [u8; 32]> {
     // addresses that recently send messages to
     // assuming temporal locality of addresses that those sent addresses are more likely to be sent
     // to (again) later
-    records: LruCache<B, PeerRecord<A>>,
+    addrs: LruCache<B, A>,
 }
 
 impl<M: Debug, A: Debug, B: Debug + Eq + Hash> Debug for Control<M, A, B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Control")
             .field("pending_messages", &self.querying_unicasts)
-            .field("records", &self.records)
+            .field("records", &self.addrs)
             .finish_non_exhaustive()
     }
 }
@@ -82,7 +82,7 @@ impl<M, A, B: Eq + Hash> Control<M, A, B> {
             // cache size is arbitrary chosen for entropy
             // in entropy an address may be unicast after it has been multicast, and the multicast
             // has at most 120 receivers
-            records: LruCache::new(160.try_into().unwrap()),
+            addrs: LruCache::new(160.try_into().unwrap()),
         }
     }
 }
@@ -98,9 +98,9 @@ impl<M, A: Addr> OnEvent<(PeerId, M)> for Control<M, A, PeerId> {
         (peer_id, message): (PeerId, M),
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        if let Some(record) = self.records.get(&peer_id) {
+        if let Some(addr) = self.addrs.get(&peer_id) {
             // eprintln!("Unicast({}) cached", H256(peer_id));
-            self.inner_net.send(record.addr.clone(), message)?
+            self.inner_net.send(addr.clone(), message)?
         } else if let Some(querying) = self.querying_multicasts.get_mut(&peer_id) {
             // the multicast query happens to accomplish the desired query, so "pretend" to be a
             // multicast
@@ -187,7 +187,7 @@ impl<M: Clone, A: Addr> OnEvent<QueryResult<A>> for Control<M, A, PeerId> {
         for record in &upcall.closest {
             // the unicast happens to be resolved by this query result
             if let Some(querying) = self.querying_unicasts.remove(&record.id) {
-                self.records.push(record.id, record.clone());
+                self.addrs.push(record.id, record.addr.clone());
                 // we don't care whether that original query will finish (or have finished) or not
                 timer.unset(querying.timer)?;
                 for message in querying.messages {
@@ -200,13 +200,13 @@ impl<M: Clone, A: Addr> OnEvent<QueryResult<A>> for Control<M, A, PeerId> {
         }
         if let Some(querying) = self.querying_unicasts.remove(&upcall.target) {
             timer.unset(querying.timer)?;
-            assert!(!self.records.contains(&upcall.target));
+            assert!(!self.addrs.contains(&upcall.target));
             // the destination is unreachable and the messages are dropped
             return Ok(());
         }
         if let Some(querying) = self.querying_multicasts.remove(&upcall.target) {
             for record in &upcall.closest {
-                self.records.push(record.id, record.clone());
+                self.addrs.push(record.id, record.addr.clone());
             }
             timer.unset(querying.timer)?;
             for (count, message) in querying.messages {

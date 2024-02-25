@@ -1,7 +1,7 @@
 use std::{
+    array::from_fn,
     collections::{HashMap, HashSet},
     fmt::Debug,
-    iter::repeat_with,
     num::NonZeroUsize,
     time::Duration,
 };
@@ -29,7 +29,7 @@ use crate::{
 pub type PeerId = [u8; 32];
 pub type Target = [u8; 32];
 
-const BITS: usize = 256;
+const U256_BITS: usize = 256;
 
 fn distance(peer_id: &PeerId, target: &Target) -> U256 {
     U256::from_little_endian(peer_id) ^ U256::from_little_endian(target)
@@ -42,13 +42,13 @@ fn distance_from(peer_id: &PeerId, distance: U256) -> Target {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct PeerRecord<A> {
+pub struct PeerRecord<K, A> {
     pub id: PeerId,
-    pub key: PublicKey,
+    pub key: K,
     pub addr: A,
 }
 
-impl<A: Debug> Debug for PeerRecord<A> {
+impl<K: Debug, A: Debug> Debug for PeerRecord<K, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PeerRecord")
             .field("id", &format!("{}", H256(self.id)))
@@ -58,8 +58,8 @@ impl<A: Debug> Debug for PeerRecord<A> {
     }
 }
 
-impl<A> PeerRecord<A> {
-    pub fn new(key: PublicKey, addr: A) -> Self {
+impl<K: DigestHash, A> PeerRecord<K, A> {
+    pub fn new(key: K, addr: A) -> Self {
         Self {
             id: key.sha256(),
             key,
@@ -69,18 +69,18 @@ impl<A> PeerRecord<A> {
 }
 
 #[derive(Debug)]
-pub struct Buckets<A> {
-    origin: PeerRecord<A>,
-    distances: Vec<Bucket<A>>,
+pub struct Buckets<K, A, const BITS: usize = U256_BITS> {
+    origin: PeerRecord<K, A>,
+    distances: [Bucket<K, A>; BITS],
 }
 
 #[derive(Debug, Clone)]
-struct Bucket<A> {
-    records: Vec<PeerRecord<A>>,
-    cached_records: Vec<PeerRecord<A>>,
+struct Bucket<K, A> {
+    records: Vec<PeerRecord<K, A>>,
+    cached_records: Vec<PeerRecord<K, A>>,
 }
 
-impl<A> Default for Bucket<A> {
+impl<K, A> Default for Bucket<K, A> {
     fn default() -> Self {
         Self {
             records: Default::default(),
@@ -92,22 +92,26 @@ impl<A> Default for Bucket<A> {
 const BUCKET_SIZE: usize = 20;
 const NUM_CONCURRENCY: usize = 30;
 
-impl<A> Buckets<A> {
-    pub fn new(origin: PeerRecord<A>) -> Self {
+impl<K, A, const BITS: usize> Buckets<K, A, BITS> {
+    pub fn new(origin: PeerRecord<K, A>) -> Self {
         Self {
             origin,
-            distances: repeat_with(Default::default).take(BITS).collect(),
+            distances: from_fn(|_| Default::default()),
         }
     }
 
     fn index(&self, target: &Target) -> usize {
-        distance(&self.origin.id, target).leading_zeros() as _
+        let rev_log = distance(&self.origin.id, target).leading_zeros() as usize;
+        assert!(rev_log < U256_BITS);
+        U256_BITS - 1 - rev_log
     }
 
-    pub fn insert(&mut self, record: PeerRecord<A>) -> anyhow::Result<()> {
+    pub fn insert(&mut self, record: PeerRecord<K, A>) -> anyhow::Result<()> {
+        #[cfg(not(kani))]
         if record.id == self.origin.id {
             anyhow::bail!("cannot insert origin id")
         }
+        // `assume` not equal for kani
         let index = self.index(&record.id);
         let bucket = &mut self.distances[index];
         // if record exists in the bucket, move it to the end
@@ -141,8 +145,8 @@ impl<A> Buckets<A> {
     }
 }
 
-impl<A: Addr> Buckets<A> {
-    pub fn remove(&mut self, id: &PeerId) -> Option<PeerRecord<A>> {
+impl<K: Clone, A: Addr, const BITS: usize> Buckets<K, A, BITS> {
+    pub fn remove(&mut self, id: &PeerId) -> Option<PeerRecord<K, A>> {
         let index = self.index(id);
         let bucket = &mut self.distances[index];
         let Some(bucket_index) = bucket.records.iter().position(|record| &record.id == id) else {
@@ -159,20 +163,15 @@ impl<A: Addr> Buckets<A> {
         Some(record)
     }
 
-    fn find_closest(&self, target: &Target, count: NonZeroUsize) -> Vec<PeerRecord<A>> {
+    fn find_closest(&self, target: &Target, count: NonZeroUsize) -> Vec<PeerRecord<K, A>> {
         let mut records = Vec::new();
         let index = self.index(target);
         let origin_distance = distance(&self.origin.id, target);
         // look up order derived from libp2p::kad, personally i don't understand why this works
         // anyway the result is asserted before returning
-        // notice that bucket index here is reversed to libp2p's, i.e. libp2p_to_this(i) = 255 - i
         for index in (index..BITS)
-            .filter(|i| origin_distance.bit(BITS - 1 - *i))
-            .chain(
-                (0..BITS)
-                    .rev()
-                    .filter(|i| !origin_distance.bit(BITS - 1 - *i)),
-            )
+            .filter(|i| origin_distance.bit(*i))
+            .chain((0..BITS).rev().filter(|i| !origin_distance.bit(*i)))
         {
             let mut index_records = self.distances[index].records.clone();
             // ensure origin peer is included if it is indeed close enough
@@ -198,15 +197,15 @@ impl<A: Addr> Buckets<A> {
 pub struct FindPeer<A> {
     target: Target,
     count: NonZeroUsize,
-    record: PeerRecord<A>,
+    record: PeerRecord<PublicKey, A>,
 }
 
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]
 pub struct FindPeerOk<A> {
     seq: u32,
     target: Target,
-    closest: Vec<PeerRecord<A>>,
-    record: PeerRecord<A>,
+    closest: Vec<PeerRecord<PublicKey, A>>,
+    record: PeerRecord<PublicKey, A>,
 }
 
 pub trait Net<A>:
@@ -227,7 +226,7 @@ pub struct QueryResult<A> {
     pub status: QueryStatus,
     pub target: Target,
     // every peer here has been contacted just now, so they are probably reachable for a while
-    pub closest: Vec<PeerRecord<A>>,
+    pub closest: Vec<PeerRecord<PublicKey, A>>,
 }
 
 #[derive(Debug)]
@@ -274,9 +273,9 @@ impl<
 }
 
 pub struct Peer<A> {
-    record: PeerRecord<A>,
+    record: PeerRecord<PublicKey, A>,
 
-    buckets: Buckets<A>,
+    buckets: Buckets<PublicKey, A>,
     query_states: HashMap<Target, QueryState<A>>,
     refresh_targets: HashSet<Target>,
     on_bootstrap: Option<OnBootstrap>,
@@ -300,14 +299,14 @@ impl<A> Debug for Peer<A> {
 #[derive(Debug)]
 struct QueryState<A> {
     find_peer: Verifiable<FindPeer<A>>,
-    records: Vec<PeerRecord<A>>,
+    records: Vec<PeerRecord<PublicKey, A>>,
     contacting: HashMap<PeerId, TimerId>,
     contacted: HashSet<PeerId>,
 }
 
 impl<A: Addr> Peer<A> {
     pub fn new(
-        buckets: Buckets<A>, // seed peers inserted
+        buckets: Buckets<PublicKey, A>, // seed peers inserted
         net: impl Net<A> + Send + Sync + 'static,
         upcall: impl Upcall<A> + Send + Sync + 'static,
         crypto_worker: CryptoWorker<A>,
@@ -378,7 +377,7 @@ impl<A: Addr> Peer<A> {
 }
 
 #[derive(Debug, Clone)]
-struct ResendFindPeer<A>(Target, PeerRecord<A>);
+struct ResendFindPeer<A>(Target, PeerRecord<PublicKey, A>);
 const RESEND_FIND_PEER_DURATION: Duration = Duration::from_millis(2500);
 
 impl<A: Addr> OnEvent<Signed<FindPeer<A>>> for Peer<A> {
@@ -679,20 +678,20 @@ impl<A: Addr> OnEvent<Verified<FindPeerOk<A>>> for Peer<A> {
 
 impl<A: Addr> Peer<A> {
     fn refresh_buckets(&mut self) -> anyhow::Result<()> {
-        let mut end_index = BITS;
+        let mut start_index = 0;
         if self.on_bootstrap.is_some() {
             // optimize for bootstrap: skip from the closest bucket until the first non-empty one,
             // and skip that non-empty bucket as well. assert the refreshing of those buckets cannot
             // discover any peer
             while {
-                end_index -= 1;
-                self.buckets.distances[end_index].records.is_empty()
+                start_index += 1;
+                self.buckets.distances[start_index].records.is_empty()
             } {}
         }
-        for i in 0..end_index {
+        for i in start_index..U256_BITS {
             let d = rand_distance(i, &mut rand::thread_rng());
             let target = distance_from(&self.record.id, d);
-            assert_eq!(self.buckets.index(&target), BITS - i - 1);
+            assert_eq!(self.buckets.index(&target), i);
             self.refresh_targets.insert(target);
         }
         // refresh the buckets without concurrency
@@ -716,6 +715,28 @@ fn rand_distance(index: usize, rng: &mut impl rand::Rng) -> U256 {
     let lower = usize::pow(2, rem);
     let upper = usize::pow(2, rem + 1);
     bytes[quot] = rng.gen_range(lower..upper) as u8;
+    U256::from_little_endian(&bytes)
+}
+
+#[cfg(kani)]
+fn rand_distance_model(index: usize) -> U256 {
+    // let mut bytes = [0u8; 32];
+    let quot = index / 8;
+    // rng.fill_bytes(&mut bytes[..quot]);
+
+    let mut bytes = kani::any::<[u8; 32]>();
+    const ZERO_BYTES: [u8; 32] = [0; 32];
+    kani::assume(bytes[quot..] == ZERO_BYTES[quot..]);
+
+    let rem = (index % 8) as u32;
+    let lower = usize::pow(2, rem);
+    let upper = usize::pow(2, rem + 1);
+
+    // bytes[quot] = rng.gen_range(lower..upper) as u8;
+    bytes[quot] = kani::any();
+    kani::assume(bytes[quot] >= lower as u8);
+    kani::assume(bytes[quot] < upper as u8);
+
     U256::from_little_endian(&bytes)
 }
 
@@ -753,7 +774,7 @@ mod tests {
         let secp = secp256k1::Secp256k1::signing_only();
         let (_, public_key) = secp.generate_keypair(&mut rand::thread_rng());
         let origin = PeerRecord::new(public_key, ());
-        let mut buckets = Buckets::new(origin);
+        let mut buckets = Buckets::<_, _>::new(origin);
         for _ in 0..1000 {
             let (_, public_key) = secp.generate_keypair(&mut rand::thread_rng());
             buckets.insert(PeerRecord::new(public_key, ()))?
@@ -799,5 +820,59 @@ mod tests {
         let buckets = Buckets::new(origin.clone());
         let mut peer = Peer::new(buckets, NullNet, NullUpcall, Worker::Null);
         peer.refresh_buckets()
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    fn distance_inversion() {
+        let id = kani::any();
+        let d = <U256 as From<[_; 32]>>::from(kani::any());
+        assert_eq!(distance(&id, &distance_from(&id, d)), d);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(1)]
+    fn ordered_closest() {
+        let origin = PeerRecord {
+            id: kani::any(),
+            key: (),
+            addr: (),
+        };
+        const BITS: usize = 8;
+        let mut buckets = Buckets::<_, _, BITS>::new(origin.clone());
+        for _ in 0..2 {
+            let record = PeerRecord {
+                id: kani::any(),
+                key: (),
+                addr: (),
+            };
+            kani::assume(record.id != origin.id);
+            kani::assume(record.id[BITS / 8..] == origin.id[BITS / 8..]);
+            let result = buckets.insert(record);
+            assert!(result.is_ok())
+        }
+        let records = buckets.find_closest(&kani::any(), 2.try_into().unwrap());
+        assert_eq!(records.len(), 2)
+    }
+
+    #[kani::proof]
+    fn refresh_buckets() {
+        let origin = PeerRecord {
+            id: kani::any(),
+            key: (),
+            addr: (),
+        };
+        const BITS: usize = 32;
+        let buckets = Buckets::<_, _, BITS>::new(origin.clone());
+
+        let i = kani::any();
+        kani::assume(i < BITS);
+        let d = rand_distance_model(i);
+        let target = distance_from(&origin.id, d);
+        assert_eq!(buckets.index(&target), i);
     }
 }
