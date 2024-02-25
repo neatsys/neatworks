@@ -758,41 +758,47 @@ impl<
 }
 
 #[cfg(test)]
+use proptest::prelude::*;
+
+#[cfg(test)]
+proptest::proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1000))]
+
+    #[test]
+    fn distance_inversion(id: PeerId, d: [u8; 32]) {
+        let d = U256::from_little_endian(&d);
+        assert_eq!(distance(&id, &distance_from(&id, d)), d)
+    }
+
+    #[test]
+    fn ordered_closest(id: PeerId, insert_ids: [PeerId; 1000], targets: [Target; 100]) {
+        let origin = PeerRecord {
+            id,
+            key: (),
+            addr: (),
+        };
+        let mut buckets = Buckets::<_, _>::new(origin);
+        for insert_id in insert_ids {
+            let record = PeerRecord {
+                id: insert_id,
+                key: (),
+                addr: (),
+            };
+            // not 100% safe, but only crash by chance 1/(2^256)
+            buckets.insert(record).unwrap()
+        }
+        for target in targets {
+            let records = buckets.find_closest(&target, 20.try_into().unwrap());
+            assert_eq!(records.len(), 20)
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use crate::net::IterAddr;
 
     use super::*;
-
-    #[test]
-    fn distance_inversion() {
-        let id = rand::random::<PeerId>();
-        let d = <U256 as From<[_; 32]>>::from(rand::random());
-        assert_eq!(distance(&id, &distance_from(&id, d)), d);
-    }
-
-    fn ordered_closest() -> anyhow::Result<()> {
-        let secp = secp256k1::Secp256k1::signing_only();
-        let (_, public_key) = secp.generate_keypair(&mut rand::thread_rng());
-        let origin = PeerRecord::new(public_key, ());
-        let mut buckets = Buckets::<_, _>::new(origin);
-        for _ in 0..1000 {
-            let (_, public_key) = secp.generate_keypair(&mut rand::thread_rng());
-            buckets.insert(PeerRecord::new(public_key, ()))?
-        }
-        for _ in 0..1000 {
-            let records = buckets.find_closest(&rand::random(), 20.try_into().unwrap());
-            assert_eq!(records.len(), 20)
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn ordered_closest_100() -> anyhow::Result<()> {
-        for _ in 0..100 {
-            ordered_closest()?
-        }
-        Ok(())
-    }
 
     struct NullNet;
     impl SendMessage<IterAddr<'_, ()>, Verifiable<FindPeer<()>>> for NullNet {
@@ -812,6 +818,8 @@ mod tests {
         }
     }
 
+    // there's `thread_rng()` inside `refresh_buckets` implementation so it cannot be easily convert
+    // into property test
     #[test]
     fn refresh_buckets() -> anyhow::Result<()> {
         let secp = secp256k1::Secp256k1::signing_only();
@@ -834,30 +842,31 @@ mod verification {
         assert_eq!(distance(&id, &distance_from(&id, d)), d);
     }
 
-    #[kani::proof]
-    #[kani::unwind(1)]
-    fn ordered_closest() {
-        let origin = PeerRecord {
-            id: kani::any(),
-            key: (),
-            addr: (),
-        };
-        const BITS: usize = 8;
-        let mut buckets = Buckets::<_, _, BITS>::new(origin.clone());
-        for _ in 0..2 {
-            let record = PeerRecord {
-                id: kani::any(),
-                key: (),
-                addr: (),
-            };
-            kani::assume(record.id != origin.id);
-            kani::assume(record.id[BITS / 8..] == origin.id[BITS / 8..]);
-            let result = buckets.insert(record);
-            assert!(result.is_ok())
-        }
-        let records = buckets.find_closest(&kani::any(), 2.try_into().unwrap());
-        assert_eq!(records.len(), 2)
-    }
+    // this test cannot finish within reasonable time and memory in current form
+    // #[kani::proof]
+    // #[kani::unwind(1)]
+    // fn ordered_closest() {
+    //     let origin = PeerRecord {
+    //         id: kani::any(),
+    //         key: (),
+    //         addr: (),
+    //     };
+    //     const BITS: usize = 8;
+    //     let mut buckets = Buckets::<_, _, BITS>::new(origin.clone());
+    //     for _ in 0..2 {
+    //         let record = PeerRecord {
+    //             id: kani::any(),
+    //             key: (),
+    //             addr: (),
+    //         };
+    //         kani::assume(record.id != origin.id);
+    //         kani::assume(record.id[BITS / 8..] == origin.id[BITS / 8..]);
+    //         let result = buckets.insert(record);
+    //         assert!(result.is_ok())
+    //     }
+    //     let records = buckets.find_closest(&kani::any(), 2.try_into().unwrap());
+    //     assert_eq!(records.len(), 2)
+    // }
 
     #[kani::proof]
     fn refresh_buckets() {

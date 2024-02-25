@@ -1,4 +1,5 @@
-cargo kani --exact --harness kademlia::verification::ordered_closest \
+# cargo kani --exact --harness kademlia::verification::distance_inversion \
+cargo kani \
     --enable-unstable $@ \
     --cbmc-args \
     --unwindset memcmp.0:257 \
