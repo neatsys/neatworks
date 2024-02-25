@@ -1,3 +1,7 @@
+// notice: `App`-specific `impl Workload`s are in `app` module
+// only `App`-agnostic combinators live here
+// maybe not the most reasonable organization but makes enough sense to me
+
 use std::{
     convert::Infallible,
     fmt::{Debug, Display},
@@ -8,51 +12,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde::{Deserialize, Serialize};
-
-use crate::event::{
-    erased::{OnEvent, Timer},
-    SendEvent,
+use crate::{
+    event::{
+        erased::{OnEvent, Timer},
+        SendEvent,
+    },
+    message::Payload,
 };
-
-#[derive(
-    Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default, derive_more::Deref, Serialize, Deserialize,
-)]
-pub struct Payload(pub Vec<u8>);
-
-impl Debug for Payload {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Ok(s) = std::str::from_utf8(&self.0) {
-            write!(f, "b{s:?}")
-        } else {
-            write!(
-                f,
-                "Payload({})",
-                self.0
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<Vec<_>>()
-                    .concat()
-            )
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct Request<A> {
-    pub client_id: u32,
-    pub client_addr: A,
-    pub seq: u32,
-    pub op: Payload,
-}
-
-#[derive(Debug, Clone)]
-pub struct Invoke(pub Payload);
-
-// newtype namespace may be desired after the type erasure migration
-pub type InvokeOk = (u32, Payload);
-
-pub type SimpleTransaction = (Payload, Option<Payload>);
 
 pub trait Workload {
     type Dry;
@@ -320,6 +286,15 @@ impl<I: Iterator<Item = (Payload, Payload)>> Workload for Check<I> {
 
     fn dehydrate(self) -> Self::Dry {}
 }
+
+#[derive(Debug, Clone)]
+pub struct Invoke(pub Payload);
+
+// newtype namespace may be desired after the type erasure migration
+// the `u32` field was for client id, and becomes unused after remove multiple
+// client support on `CloseLoop`
+// too lazy to refactor it off
+pub type InvokeOk = (u32, Payload);
 
 pub struct CloseLoop<W> {
     sender: Box<dyn SendEvent<Invoke> + Send + Sync>,

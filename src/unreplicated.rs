@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     app::App,
     event::{OnEvent, SendEvent, Timer, TimerId},
+    message::{Payload, Request},
     net::{deserialize, Addr, MessageNet, SendMessage},
-    rpc::{Invoke, InvokeOk, Payload, Request},
+    workload::{Invoke, InvokeOk},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -220,8 +221,9 @@ pub mod erased {
             erased::{OnEvent, Timer},
             SendEvent,
         },
+        message::Request,
         net::{deserialize, events::Recv, Addr},
-        rpc::{Invoke, Request},
+        workload::Invoke,
     };
 
     use super::{ClientUpcall, Reply, ToClientNet, ToReplicaNet};
@@ -401,8 +403,9 @@ pub mod check {
             erased::{OnEvent, UnreachableTimer},
             SendEvent, TimerId,
         },
+        message::Request,
         net::{events::Recv, IndexNet, SendMessage},
-        rpc::{check::DryCloseLoop, CloseLoop, Invoke, InvokeOk, Request, Workload},
+        workload::{check::DryCloseLoop, CloseLoop, Invoke, InvokeOk, Workload},
     };
 
     use super::{erased, ClientInvoke, Reply};

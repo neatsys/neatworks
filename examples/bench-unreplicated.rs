@@ -6,10 +6,10 @@ use augustus::{
     app::Null,
     event::{erased, Session},
     net::{tokio::Udp, IndexNet},
-    rpc::{CloseLoop, OpLatency},
     unreplicated::{
         self, to_client_on_buf, Client, Replica, ToClientMessageNet, ToReplicaMessageNet,
     },
+    workload::{CloseLoop, OpLatency},
 };
 use tokio::{
     net::UdpSocket, runtime, signal::ctrl_c, sync::mpsc::unbounded_channel, task::JoinSet,

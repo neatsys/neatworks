@@ -3,12 +3,13 @@ pub mod blob;
 pub mod crypto;
 pub mod event;
 pub mod kademlia;
+pub mod message;
 pub mod net;
 pub mod pbft;
-pub mod rpc;
 pub mod search;
 pub mod unreplicated;
 pub mod worker;
+pub mod workload;
 
 // develop notes that does not apply to any specific code
 // (start writing dev docs usually follows by a complete code rewriting, hope

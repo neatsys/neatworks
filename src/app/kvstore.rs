@@ -3,7 +3,10 @@ use std::collections::BTreeMap;
 use rand::{distributions::Alphanumeric, rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
-use crate::rpc::{Check, Payload, Workload};
+use crate::{
+    message::Payload,
+    workload::{Check, Workload},
+};
 
 use super::App;
 

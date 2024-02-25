@@ -12,9 +12,10 @@ use crate::{
         erased::{OnEvent, Timer},
         SendEvent, TimerId,
     },
+    message::{Payload, Request},
     net::{deserialize, events::Recv, Addr, All, MessageNet, SendMessage},
-    rpc::{Invoke, InvokeOk, Payload, Request},
     worker::erased::Worker,
+    workload::{Invoke, InvokeOk},
 };
 
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]

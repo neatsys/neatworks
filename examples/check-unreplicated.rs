@@ -2,9 +2,9 @@ use std::{thread::available_parallelism, time::Duration};
 
 use augustus::{
     app::kvstore::{static_workload, InfinitePutGet, Op, Result},
-    rpc::Check,
     search::{breadth_first, random_depth_first, Settings, State as _},
     unreplicated::check::{DryState, State},
+    workload::Check,
 };
 use rand::thread_rng;
 

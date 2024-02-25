@@ -14,10 +14,9 @@ use augustus::{
         SendEvent,
     },
     net::{tokio::Udp, IndexNet},
-    pbft,
-    rpc::{CloseLoop, Invoke, InvokeOk, OpLatency},
-    unreplicated,
+    pbft, unreplicated,
     worker::erased::spawn_backend,
+    workload::{CloseLoop, Invoke, InvokeOk, OpLatency},
 };
 use axum::{
     extract::State,
