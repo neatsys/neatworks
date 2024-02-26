@@ -68,6 +68,11 @@ impl<K: DigestHash, A> PeerRecord<K, A> {
     }
 }
 
+// this is NOT a proper generalization on `BITS` because the underlying
+// `PeerRecord` always contains a fixed 256-bit `PeerId`, which cannot match
+// `BITS` easily since it permits incomplete byte
+// currently this is just a monkey patch for model checking on a reduced scale,
+// intented for internal use only
 #[derive(Debug)]
 pub struct Buckets<K, A, const BITS: usize = U256_BITS> {
     origin: PeerRecord<K, A>,
@@ -761,7 +766,7 @@ impl<
 use proptest::prelude::*;
 
 #[cfg(test)]
-proptest::proptest! {
+proptest! {
     #![proptest_config(ProptestConfig::with_cases(1000))]
 
     #[test]
@@ -868,6 +873,8 @@ mod verification {
     //     assert_eq!(records.len(), 2)
     // }
 
+    // this one does work, but must manually synchronize with the actual implementation
+    // i.e. this function vs `refresh_buckets`, `rand_distance_model` vs `rand_distance`
     #[kani::proof]
     fn refresh_buckets() {
         let origin = PeerRecord {
