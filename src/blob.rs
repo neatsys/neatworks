@@ -9,10 +9,16 @@
 //
 // for applications deployed with udp-based transportation, a reliable delivery
 // service is demanded for any message that cannot be fit into several IP
-// segments, or it would be unpractical to deliver the message eventually
-// through resending. blob transfer service provides such reliability with
-// ephemeral TCP servers and connections, and it's safe to consider blob
-// transfer failures as fatal errors without hurting robustness
+// segments, or it would be unpractical to deliver the message through repeatly
+// resending. blob transfer service provides such reliability with ephemeral TCP
+// servers and connections, and it's safe to consider blob transfer failures as
+// fatal errors without hurting robustness
+//
+// (notice that it is still possible to have receiver side totally unaware of
+// the transferring while sender consider the transferring to be
+// canceled/rejected by receiver. the reliability is only hold when the `Serve`
+// message is reliability delivered by the underlying network and both
+// participants are willing to finish the transferring)
 //
 // although tcp-based deployment does not have the reliability concren above,
 // if the transportation delivers all messages destinating same remote address
@@ -158,11 +164,13 @@ impl<T: Service<A, M, N> + ?Sized, A, M, N> ServiceExt<A, M, N> for T {
 pub struct Serve<M>(M, SocketAddr);
 
 pub async fn session<A, M, N: Send + 'static>(
-    ip: IpAddr,
+    ip: impl Into<Option<IpAddr>>,
     mut events: UnboundedReceiver<Event<A, M, N>>,
     mut net: impl SendMessage<A, Serve<M>>,
     mut upcall: impl SendEvent<RecvOffer<M>> + SendEvent<N>,
 ) -> anyhow::Result<()> {
+    let ip = ip.into().unwrap_or(IpAddr::from([0, 0, 0, 0]));
+
     let mut bind_tasks = JoinSet::<anyhow::Result<_>>::new();
     let mut send_tasks = JoinSet::new();
     let mut recv_tasks = JoinSet::new();
