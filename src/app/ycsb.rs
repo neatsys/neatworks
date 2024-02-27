@@ -1,13 +1,24 @@
 // a reduced implementation of YCSB core workload. there's no `impl App` here,
 // other modules may contain implementors that work with `Op` and `Result`
-// table name is omitted, and no support to multiple fields so field name is
-// also omitted
-// only nondeterministic value is implemented, and data integrity is always off
-// `insertstart` is not supported. the load phase is supposed to bypass the
-// evaluated protocols and directly perform on stores. use seeded RNG to build
-// store with deterministic content
-// only hashed insertion order is implemented
-// only zipfian, latest and uniform request distributions are implemented
+//
+// detailed difference with upstream
+// * table name is omitted, and no support to multiple fields so field name is
+//   also omitted
+// * deterministic and data integrity are not implemented
+// * `insertstart`/`insertcount` are removed. the load phase is supposed to
+//   bypass the evaluated protocols and directly perform on `impl App`s with
+//   `startup_ops`. use seeded RNG to build store with deterministic content
+// * key chooser distribution i.e. request distribution is based on
+//   `recordcount` rather than `insertstart`/`insertcount`. i don't understand
+//   why restrict each client to operate on nonoverlapping keys anyway
+// * `operationcount` is optional
+// * zipfian request distribution only ranges in up to `recordcount` instead of
+//   taking the inserted keys during evaluation into account. the other
+//   distributions only range up to `recordcount` (`insertstart + insertcount`
+//   in upstream) as well. this change enables optional `operationcount`
+// * only hashed insertion order is implemented
+// * only zipfian, latest and uniform request distributions are implemented
+// * zero padding length is default to 60 which correponding to 64 byte keys
 
 use std::{
     collections::HashSet,
@@ -20,7 +31,7 @@ use rand::{
     distributions::{Alphanumeric, Distribution as _, Uniform},
     Rng,
 };
-use rand_distr::Zeta;
+use rand_distr::{WeightedAliasIndex, Zeta};
 use serde::{Deserialize, Serialize};
 
 use crate::message::Payload;
@@ -55,13 +66,16 @@ pub struct Workload<R> {
     field_length: Gen,
     key_num: Gen,
     scan_len: Gen,
+    transaction: WeightedAliasIndex<f32>,
+
+    transaction_count: usize,
     rmw_update: Option<Op>,
 }
 
 #[derive(Debug)]
 pub struct WorkloadSettings {
     pub record_count: usize,
-    pub operation_count: usize,
+    pub operation_count: Option<usize>,
     pub field_length: usize,
     pub field_length_distr: SettingsDistr,
     pub read_proportion: f32,
@@ -83,6 +97,26 @@ pub enum SettingsDistr {
     Latest,
 }
 
+impl WorkloadSettings {
+    pub fn new(record_count: usize) -> Self {
+        Self {
+            record_count,
+            operation_count: None,
+            field_length: 100,
+            field_length_distr: SettingsDistr::Constant,
+            read_proportion: 0.95,
+            update_proportion: 0.05,
+            insert_proportion: 0.,
+            read_modify_write_proportion: 0.,
+            scan_proportion: 0.,
+            max_scan_length: 1000,
+            scan_length_distr: SettingsDistr::Uniform,
+            request_distr: SettingsDistr::Uniform,
+            zero_padding: 60,
+        }
+    }
+}
+
 enum Gen {
     Constant(usize),
     Uniform(Uniform<usize>),
@@ -101,7 +135,7 @@ impl Gen {
             SettingsDistr::Constant => Self::Constant(n),
             SettingsDistr::Uniform => Self::Uniform(Uniform::new(1, n)),
             SettingsDistr::Zipfian => Self::Zipf(GenZipf {
-                min: 0,
+                min: 1,
                 item_count: n,
                 zeta: Zeta::new(0.99)?,
             }),
@@ -136,7 +170,15 @@ impl<R> Workload<R> {
             field_length: Gen::new(settings.field_length_distr, settings.field_length)?,
             key_num: Gen::new(settings.request_distr, settings.record_count)?,
             scan_len: Gen::new(settings.scan_length_distr, settings.max_scan_length)?,
+            transaction: WeightedAliasIndex::new(vec![
+                settings.read_proportion,
+                settings.update_proportion,
+                settings.insert_proportion,
+                settings.scan_proportion,
+                settings.read_modify_write_proportion,
+            ])?,
             settings,
+            transaction_count: 0,
             rmw_update: None,
         })
     }
@@ -152,6 +194,9 @@ impl<R> Workload<R> {
 }
 
 impl<R: Rng> Workload<R> {
+    const TRANSACTION_FN: [fn(&mut Self) -> Op; 4] =
+        [Self::read, Self::update, Self::insert, Self::scan];
+
     fn build_value(&mut self) -> String {
         let field_len = self.field_length.gen(&mut self.rng);
         repeat_with(|| char::from(Alphanumeric.sample(&mut self.rng)))
@@ -216,29 +261,21 @@ impl<R: Rng> Workload<R> {
         Op::Insert(key_name, value)
     }
 
-    fn op(&mut self) -> Op {
+    fn op(&mut self) -> Option<Op> {
         if let Some(op) = self.rmw_update.take() {
-            return op;
+            return Some(op);
         }
-        let mut x = self.rng.gen::<f32>();
-        if x < self.settings.read_proportion {
-            return self.read();
+        if Some(self.transaction_count) == self.settings.operation_count {
+            return None;
         }
-        x -= self.settings.read_proportion;
-        if x < self.settings.update_proportion {
-            return self.update();
+        let i = self.transaction.sample(&mut self.rng);
+        if let Some(f) = Self::TRANSACTION_FN.get(i) {
+            Some(f(self))
+        } else {
+            let [op, update_op] = self.read_modify_write();
+            self.rmw_update.get_or_insert(update_op);
+            Some(op)
         }
-        x -= self.settings.update_proportion;
-        if x < self.settings.insert_proportion {
-            return self.insert();
-        }
-        x -= self.settings.insert_proportion;
-        if x < self.settings.scan_proportion {
-            return self.scan();
-        }
-        let [op, update_op] = self.read_modify_write();
-        self.rmw_update.get_or_insert(update_op);
-        op
     }
 }
 
@@ -246,7 +283,7 @@ impl<R: Rng> crate::workload::Workload for Workload<R> {
     type Attach = Option<usize>;
 
     fn next_op(&mut self) -> anyhow::Result<Option<(Payload, Self::Attach)>> {
-        let op = self.op();
+        let Some(op) = self.op() else { return Ok(None) };
         Ok(Some((
             Payload(bincode::options().serialize(&op)?),
             if matches!(op, Op::Insert(..)) {
