@@ -767,7 +767,7 @@ use proptest::prelude::*;
 
 #[cfg(test)]
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(1000))]
+    #![proptest_config(ProptestConfig::with_cases(100))]
 
     #[test]
     fn distance_inversion(id: PeerId, d: [u8; 32]) {

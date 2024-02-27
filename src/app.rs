@@ -4,6 +4,7 @@
 // `app_and_workload`)
 pub mod kvstore;
 pub mod ycsb;
+pub mod btree;
 
 pub trait App {
     // following SpexPaxos convention, this interface takes "binary in, binary out" approach, avoids
@@ -27,3 +28,4 @@ impl App for Null {
 }
 
 pub use kvstore::KVStore;
+pub use btree::BTreeMap;

@@ -19,10 +19,17 @@
 // * only hashed insertion order is implemented
 // * only zipfian, latest and uniform request distributions are implemented
 // * zero padding length is default to 60 which correponding to 64 byte keys
+// * not concurrent accessible i.e. `impl Workload` takes `&mut self`. wrap into
+//   mutex if need to share among clients. on the other hand, although upstream
+//   manage to synchronize concurrent access to one `CoreWorkload` instance, it
+//   does not provide solution of synchronization among multiple `CoreWorkload`s
+//   (that probably deployed across machines). for example, duplicated inserting
+//   will still happen among machines
+// * see below for disccusion on zipfian paramter
 
 use std::{
     collections::HashSet,
-    hash::{BuildHasher, RandomState},
+    hash::{BuildHasher, BuildHasherDefault},
     iter::repeat_with,
 };
 
@@ -31,7 +38,8 @@ use rand::{
     distributions::{Alphanumeric, Distribution as _, Uniform},
     Rng,
 };
-use rand_distr::{WeightedAliasIndex, Zeta};
+use rand_distr::{WeightedAliasIndex, Zeta, Zipf};
+use rustc_hash::FxHasher;
 use serde::{Deserialize, Serialize};
 
 use crate::message::Payload;
@@ -48,6 +56,7 @@ pub enum Op {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Result {
     ReadOk(String),
+    NotFound,
     ScanOk(Vec<String>),
     Ok,
 }
@@ -120,25 +129,37 @@ impl WorkloadSettings {
 enum Gen {
     Constant(usize),
     Uniform(Uniform<usize>),
-    Zipf(GenZipf),
+    ScrambledZipf(GenScrambledZipf),
+    Zipf(Zipf<f32>),
 }
 
-struct GenZipf {
+struct GenScrambledZipf {
     min: usize,
     item_count: usize,
     zeta: Zeta<f32>,
 }
 
 impl Gen {
-    fn new(distr: SettingsDistr, n: usize) -> anyhow::Result<Self> {
+    fn new(distr: SettingsDistr, n: usize, scrambled: bool) -> anyhow::Result<Self> {
         Ok(match distr {
             SettingsDistr::Constant => Self::Constant(n),
             SettingsDistr::Uniform => Self::Uniform(Uniform::new(1, n)),
-            SettingsDistr::Zipfian => Self::Zipf(GenZipf {
-                min: 1,
-                item_count: n,
-                zeta: Zeta::new(0.99)?,
-            }),
+            SettingsDistr::Zipfian if scrambled => {
+                Self::ScrambledZipf(GenScrambledZipf {
+                    min: 0, // only for key chooser
+                    item_count: n,
+                    // according to https://stackoverflow.com/a/41448684 upstream's
+                    // `ZipfianGenerator` effectively set this `a` parameter to 100
+                    // however during testing, that results in only `min` i.e. 1 is ever yielded
+                    // that means only single key will every be accessed, which hardly be expected
+                    // while tuning the parameter, i realize the absolute number of different values
+                    // that will be yielded is controled solely by this parameter, not by e.g. `n`
+                    // yet to investigate into this, but suspect the hopspot distribution is to
+                    // solve this issue
+                    zeta: Zeta::new(6.)?,
+                })
+            }
+            SettingsDistr::Zipfian => Self::Zipf(Zipf::new(n as _, 6.)?),
             SettingsDistr::Latest => anyhow::bail!("unimplemented"),
         })
     }
@@ -147,15 +168,23 @@ impl Gen {
         match self {
             Self::Constant(n) => *n,
             Self::Uniform(uniform) => uniform.sample(rng),
-            Self::Zipf(gen) => gen.gen(rng),
+            Self::ScrambledZipf(gen) => gen.gen(rng),
+            Self::Zipf(zipf) => zipf.sample(rng) as _,
         }
     }
 }
 
-impl GenZipf {
+impl GenScrambledZipf {
     fn gen(&self, rng: &mut impl Rng) -> usize {
-        let r = self.zeta.sample(rng) as u64;
-        self.min + RandomState::new().hash_one(r) as usize % self.item_count
+        let mut r;
+        while {
+            r = self.zeta.sample(rng);
+            r > u64::MAX as f32
+        } {}
+        // println!("{r}");
+        self.min
+            + BuildHasherDefault::<FxHasher>::default().hash_one(r as u64) as usize
+                % self.item_count
     }
 }
 
@@ -167,9 +196,9 @@ impl<R> Workload<R> {
             next_insert_num: settings.record_count,
             inserting_nums: Default::default(),
             inserted_num: settings.record_count,
-            field_length: Gen::new(settings.field_length_distr, settings.field_length)?,
-            key_num: Gen::new(settings.request_distr, settings.record_count)?,
-            scan_len: Gen::new(settings.scan_length_distr, settings.max_scan_length)?,
+            field_length: Gen::new(settings.field_length_distr, settings.field_length, false)?,
+            key_num: Gen::new(settings.request_distr, settings.record_count, true)?,
+            scan_len: Gen::new(settings.scan_length_distr, settings.max_scan_length, false)?,
             transaction: WeightedAliasIndex::new(vec![
                 settings.read_proportion,
                 settings.update_proportion,
@@ -184,7 +213,9 @@ impl<R> Workload<R> {
     }
 
     fn build_key_name(&self, key_num: usize) -> String {
-        let key = RandomState::new().hash_one(key_num).to_string();
+        let key = BuildHasherDefault::<FxHasher>::default()
+            .hash_one(key_num)
+            .to_string();
         let mut pre_key = String::from("user");
         for _ in 0..self.settings.zero_padding - key.len() {
             pre_key += &"0"
@@ -199,6 +230,7 @@ impl<R: Rng> Workload<R> {
 
     fn build_value(&mut self) -> String {
         let field_len = self.field_length.gen(&mut self.rng);
+        assert_ne!(field_len, 0);
         repeat_with(|| char::from(Alphanumeric.sample(&mut self.rng)))
             .take(field_len)
             .collect()
@@ -211,9 +243,16 @@ impl<R: Rng> Workload<R> {
         Op::Insert(key, value)
     }
 
-    pub fn startup_ops(&mut self) -> impl Iterator<Item = Op> + '_ {
+    pub fn startup_ops(&mut self) -> impl Iterator<Item = Payload> + '_ {
         let record_count = self.settings.record_count;
-        repeat_with(|| self.startup_insert()).take(record_count)
+        repeat_with(|| {
+            Payload(
+                bincode::options()
+                    .serialize(&self.startup_insert())
+                    .unwrap(),
+            )
+        })
+        .take(record_count)
     }
 
     fn key_num(&mut self) -> usize {
@@ -242,6 +281,7 @@ impl<R: Rng> Workload<R> {
         let key_num = self.key_num();
         let key_name = self.build_key_name(key_num);
         let len = self.scan_len.gen(&mut self.rng);
+        assert_ne!(len, 0);
         Op::Scan(key_name, len)
     }
 
@@ -306,6 +346,43 @@ impl<R: Rng> crate::workload::Workload for Workload<R> {
                 self.inserted_num += 1
             }
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use rand::thread_rng;
+
+    use crate::app::{App, BTreeMap};
+
+    use super::*;
+
+    #[test]
+    fn startup() -> anyhow::Result<()> {
+        let mut app = BTreeMap::new();
+        let mut workload = Workload::new(thread_rng(), WorkloadSettings::new(100))?;
+        for op in workload.startup_ops() {
+            app.execute(&op)?;
+        }
+        assert_eq!(app.0.len(), 100);
+        Ok(())
+    }
+
+    #[test]
+    fn zipf() -> anyhow::Result<()> {
+        let mut settings = WorkloadSettings::new(10_000);
+        settings.request_distr = SettingsDistr::Zipfian;
+        let mut workload = Workload::new(thread_rng(), settings)?;
+        let mut counts = HashMap::<_, usize>::new();
+        for _ in 0..1_000_000 {
+            *counts.entry(workload.key_num()).or_default() += 1;
+        }
+        let mut counts = counts.into_iter().collect::<Vec<_>>();
+        counts.sort_unstable_by_key(|(_, n)| *n);
+        assert!(counts.last().unwrap().1 > 1_000_000 / 100 * 95);
         Ok(())
     }
 }
