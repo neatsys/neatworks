@@ -1,5 +1,5 @@
 use std::{
-    fmt::Debug,
+    fmt::{Debug, Display},
     hash::{BuildHasherDefault, Hash},
     iter::{repeat, repeat_with},
     num::NonZeroUsize,
@@ -65,6 +65,29 @@ impl<S, T, E> Debug for SearchResult<S, T, E> {
             Self::GoalFound(_) => write!(f, "GoalFound"),
             Self::SpaceExhausted => write!(f, "SpaceExhausted"),
             Self::Timeout => write!(f, "Timeout"),
+        }
+    }
+}
+
+impl<S, T: Debug, E: Debug> Display for SearchResult<S, T, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Err(trace, event, err) => {
+                for (event, state) in trace {
+                    writeln!(f, "-> {event:?}")?;
+                    writeln!(f, "{state:?}")?
+                }
+                writeln!(f, "-> {event:?}")?;
+                write!(f, "{err}")
+            }
+            Self::InvariantViolation(trace, err) => {
+                for (event, state) in trace {
+                    writeln!(f, "-> {event:?}")?;
+                    writeln!(f, "{state:?}")?
+                }
+                write!(f, "{err}")
+            }
+            result => write!(f, "{result:?}"),
         }
     }
 }

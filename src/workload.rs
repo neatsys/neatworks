@@ -27,16 +27,23 @@ pub trait Workload {
     fn on_result(&mut self, result: Payload, attach: Self::Attach) -> anyhow::Result<()>;
 }
 
-impl<T: Iterator<Item = Payload>> Workload for T {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Iter<I>(pub I);
+
+impl<T: Iterator<Item = Payload>> Workload for Iter<T> {
     type Attach = ();
 
     fn next_op(&mut self) -> anyhow::Result<Option<(Payload, Self::Attach)>> {
-        Ok(self.next().map(|op| (op, ())))
+        Ok(self.0.next().map(|op| (op, ())))
     }
 
     fn on_result(&mut self, _: Payload, (): Self::Attach) -> anyhow::Result<()> {
         Ok(())
     }
+}
+
+impl<I> From<Iter<I>> for () {
+    fn from(_: Iter<I>) -> Self {}
 }
 
 #[derive(Debug, derive_more::Deref)]
@@ -71,11 +78,20 @@ impl<W: Workload> Workload for OpLatency<W> {
     }
 }
 
-#[derive(Debug, derive_more::Deref)]
+#[derive(Debug, Clone, derive_more::Deref)]
 pub struct Recorded<W> {
     #[deref]
     inner: W,
     pub invocations: Vec<(Payload, Payload)>,
+}
+
+impl<W> From<W> for Recorded<W> {
+    fn from(value: W) -> Self {
+        Self {
+            inner: value,
+            invocations: Default::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

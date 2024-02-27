@@ -16,7 +16,7 @@ use augustus::{
     net::{tokio::Udp, IndexNet},
     pbft, unreplicated,
     worker::erased::spawn_backend,
-    workload::{CloseLoop, Invoke, InvokeOk, OpLatency},
+    workload::{CloseLoop, Invoke, InvokeOk, Iter, OpLatency},
 };
 use axum::{
     extract::State,
@@ -185,7 +185,7 @@ async fn client_session<S: OnEvent<Invoke> + Send + Sync + 'static>(
         );
         let mut close_loop = CloseLoop::new(
             session.erased_sender(),
-            OpLatency::new(repeat_with(Default::default)),
+            OpLatency::new(Iter(repeat_with(Default::default))),
         );
 
         let mut sender = session.erased_sender();

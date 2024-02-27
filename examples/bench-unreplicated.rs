@@ -9,7 +9,7 @@ use augustus::{
     unreplicated::{
         self, to_client_on_buf, Client, Replica, ToClientMessageNet, ToReplicaMessageNet,
     },
-    workload::{CloseLoop, OpLatency},
+    workload::{CloseLoop, Iter, OpLatency},
 };
 use tokio::{
     net::UdpSocket, runtime, signal::ctrl_c, sync::mpsc::unbounded_channel, task::JoinSet,
@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
         );
         let mut close_loop = CloseLoop::new(
             state_session.sender(),
-            OpLatency::new(repeat_with(Default::default)),
+            OpLatency::new(Iter(repeat_with(Default::default))),
         );
         let mut state_sender = state_session.sender();
         sessions.spawn_on(
