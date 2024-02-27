@@ -105,7 +105,7 @@ fn main() -> anyhow::Result<()> {
         prune: |_: &_| false,
         max_depth: None,
     };
-    let result = breadth_first::<_, DryState<_>, _, _, _>(
+    let result = breadth_first::<_, DryState<()>, _, _, _>(
         state.duplicate()?,
         settings.clone(),
         available_parallelism()?,
@@ -114,7 +114,7 @@ fn main() -> anyhow::Result<()> {
     )?;
     println!("{result:?}");
     settings.max_depth = Some(1000.try_into().unwrap());
-    let result = random_depth_first::<_, DryState<_>, _, _, _>(
+    let result = random_depth_first::<_, DryState<()>, _, _, _>(
         state,
         settings,
         available_parallelism()?,

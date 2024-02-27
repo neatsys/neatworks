@@ -62,7 +62,7 @@ impl App for KVStore {
 
 pub fn static_workload(
     rounds: impl ExactSizeIterator<Item = (Op, Result)>,
-) -> anyhow::Result<impl Workload<Dry = ()> + Clone> {
+) -> anyhow::Result<impl Workload<Attach = ()> + Clone + Into<()>> {
     Ok(Check::new(
         rounds
             .map(|(op, result)| {
@@ -127,4 +127,8 @@ impl Iterator for InfinitePutGet {
             Payload(serde_json::to_vec(&result).unwrap()),
         ))
     }
+}
+
+impl From<InfinitePutGet> for () {
+    fn from(_: InfinitePutGet) -> Self {}
 }

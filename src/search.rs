@@ -60,7 +60,7 @@ pub enum SearchResult<S, T, E> {
 impl<S, T, E> Debug for SearchResult<S, T, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Err(_, _, err) => write!(f, "Err({err:?}"),
+            Self::Err(_, _, err) => write!(f, "Err({err:?})"),
             Self::InvariantViolation(_, err) => write!(f, "InvariantViolation({err:?})"),
             Self::GoalFound(_) => write!(f, "GoalFound"),
             Self::SpaceExhausted => write!(f, "SpaceExhausted"),

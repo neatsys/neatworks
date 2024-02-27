@@ -3,7 +3,6 @@
 // maybe not the most reasonable organization but makes enough sense to me
 
 use std::{
-    convert::Infallible,
     fmt::{Debug, Display},
     sync::{
         atomic::{AtomicU32, Ordering::SeqCst},
@@ -21,27 +20,23 @@ use crate::{
 };
 
 pub trait Workload {
-    type Dry;
+    type Attach;
 
-    fn next_op(&mut self) -> anyhow::Result<Option<Payload>>;
+    fn next_op(&mut self) -> anyhow::Result<Option<(Payload, Self::Attach)>>;
 
-    fn on_result(&mut self, result: Payload) -> anyhow::Result<()>;
-
-    fn dehydrate(self) -> Self::Dry;
+    fn on_result(&mut self, result: Payload, attach: Self::Attach) -> anyhow::Result<()>;
 }
 
 impl<T: Iterator<Item = Payload>> Workload for T {
-    type Dry = ();
+    type Attach = ();
 
-    fn next_op(&mut self) -> anyhow::Result<Option<Payload>> {
-        Ok(self.next())
+    fn next_op(&mut self) -> anyhow::Result<Option<(Payload, Self::Attach)>> {
+        Ok(self.next().map(|op| (op, ())))
     }
 
-    fn on_result(&mut self, _: Payload) -> anyhow::Result<()> {
+    fn on_result(&mut self, _: Payload, (): Self::Attach) -> anyhow::Result<()> {
         Ok(())
     }
-
-    fn dehydrate(self) -> Self::Dry {}
 }
 
 #[derive(Debug, derive_more::Deref)]
@@ -49,7 +44,6 @@ pub struct OpLatency<W> {
     #[deref]
     inner: W,
     pub latencies: Vec<Duration>,
-    start: Option<Instant>,
 }
 
 impl<W> OpLatency<W> {
@@ -57,94 +51,23 @@ impl<W> OpLatency<W> {
         Self {
             inner,
             latencies: Default::default(),
-            start: None,
         }
     }
 }
 
 impl<W: Workload> Workload for OpLatency<W> {
-    type Dry = Infallible;
+    type Attach = (Instant, W::Attach);
 
-    fn next_op(&mut self) -> anyhow::Result<Option<Payload>> {
-        let Some(op) = self.inner.next_op()? else {
+    fn next_op(&mut self) -> anyhow::Result<Option<(Payload, Self::Attach)>> {
+        let Some((op, attach)) = self.inner.next_op()? else {
             return Ok(None);
         };
-        let replaced = self.start.replace(Instant::now());
-        if replaced.is_some() {
-            anyhow::bail!("last invocation not finished")
-        }
-        Ok(Some(op))
+        Ok(Some((op, (Instant::now(), attach))))
     }
 
-    fn on_result(&mut self, result: Payload) -> anyhow::Result<()> {
-        let Some(start) = self.start.take() else {
-            anyhow::bail!("missing invocation")
-        };
+    fn on_result(&mut self, result: Payload, (start, attach): Self::Attach) -> anyhow::Result<()> {
         self.latencies.push(start.elapsed());
-        self.inner.on_result(result)
-    }
-
-    fn dehydrate(self) -> Self::Dry {
-        unimplemented!()
-    }
-}
-
-pub trait WorkloadWithSavedOp {
-    type Dry;
-
-    fn next_op(&mut self) -> anyhow::Result<Option<Payload>>;
-
-    fn on_result(&mut self, op: Payload, result: Payload) -> anyhow::Result<()>;
-
-    fn dehydrate(self) -> Self::Dry;
-}
-
-impl<T: Workload> WorkloadWithSavedOp for T {
-    type Dry = T::Dry;
-
-    fn next_op(&mut self) -> anyhow::Result<Option<Payload>> {
-        Workload::next_op(self)
-    }
-
-    fn on_result(&mut self, _: Payload, result: Payload) -> anyhow::Result<()> {
-        Workload::on_result(self, result)
-    }
-
-    fn dehydrate(self) -> Self::Dry {
-        Workload::dehydrate(self)
-    }
-}
-
-#[derive(Debug, derive_more::Deref)]
-pub struct SaveOp<W> {
-    #[deref]
-    inner: W,
-    op: Option<Payload>,
-}
-
-impl<W: WorkloadWithSavedOp> Workload for SaveOp<W> {
-    type Dry = W::Dry;
-
-    fn next_op(&mut self) -> anyhow::Result<Option<Payload>> {
-        let Some(op) = self.inner.next_op()? else {
-            return Ok(None);
-        };
-        let replaced = self.op.replace(op.clone());
-        if replaced.is_some() {
-            anyhow::bail!("last invocation not finished")
-        }
-        Ok(Some(op))
-    }
-
-    fn on_result(&mut self, result: Payload) -> anyhow::Result<()> {
-        let Some(op) = self.op.take() else {
-            anyhow::bail!("missing invocation")
-        };
-        self.inner.on_result(op, result)
-    }
-
-    fn dehydrate(self) -> Self::Dry {
-        self.inner.dehydrate()
+        self.inner.on_result(result, attach)
     }
 }
 
@@ -161,22 +84,27 @@ pub struct DryRecorded<T> {
     pub invocations: Vec<(Payload, Payload)>,
 }
 
-impl<W: Workload> WorkloadWithSavedOp for Recorded<W> {
-    type Dry = DryRecorded<W::Dry>;
+impl<W: Workload> Workload for Recorded<W> {
+    type Attach = (Payload, W::Attach);
 
-    fn next_op(&mut self) -> anyhow::Result<Option<Payload>> {
-        self.inner.next_op()
+    fn next_op(&mut self) -> anyhow::Result<Option<(Payload, Self::Attach)>> {
+        Ok(self
+            .inner
+            .next_op()?
+            .map(|(op, attach)| (op.clone(), (op, attach))))
     }
 
-    fn on_result(&mut self, op: Payload, result: Payload) -> anyhow::Result<()> {
+    fn on_result(&mut self, result: Payload, (op, attach): Self::Attach) -> anyhow::Result<()> {
         self.invocations.push((op, result.clone()));
-        self.inner.on_result(result)
+        self.inner.on_result(result, attach)
     }
+}
 
-    fn dehydrate(self) -> Self::Dry {
-        DryRecorded {
-            inner: self.inner.dehydrate(),
-            invocations: self.invocations,
+impl<W: Into<T>, T> From<Recorded<W>> for DryRecorded<T> {
+    fn from(value: Recorded<W>) -> Self {
+        Self {
+            inner: value.inner.into(),
+            invocations: value.invocations,
         }
     }
 }
@@ -197,9 +125,9 @@ impl<W> Total<W> {
 }
 
 impl<W: Workload> Workload for Total<W> {
-    type Dry = W::Dry;
+    type Attach = W::Attach;
 
-    fn next_op(&mut self) -> anyhow::Result<Option<Payload>> {
+    fn next_op(&mut self) -> anyhow::Result<Option<(Payload, Self::Attach)>> {
         let mut remain_count = self.remain_count.load(SeqCst);
         loop {
             if remain_count == 0 {
@@ -218,14 +146,16 @@ impl<W: Workload> Workload for Total<W> {
         self.inner.next_op()
     }
 
-    fn on_result(&mut self, result: Payload) -> anyhow::Result<()> {
-        self.inner.on_result(result)
-    }
-
-    fn dehydrate(self) -> Self::Dry {
-        self.inner.dehydrate()
+    fn on_result(&mut self, result: Payload, attach: Self::Attach) -> anyhow::Result<()> {
+        self.inner.on_result(result, attach)
     }
 }
+
+// impl<W: Into<T>, T> From<Total<W>> for T {
+//     fn from(value: Total<W>) -> Self {
+//         value.inner.into()
+//     }
+// }
 
 #[derive(Debug, Clone)]
 pub struct Check<I> {
@@ -257,20 +187,20 @@ impl Display for UnexpectedResult {
 impl std::error::Error for UnexpectedResult {}
 
 impl<I: Iterator<Item = (Payload, Payload)>> Workload for Check<I> {
-    type Dry = ();
+    type Attach = ();
 
-    fn next_op(&mut self) -> anyhow::Result<Option<Payload>> {
+    fn next_op(&mut self) -> anyhow::Result<Option<(Payload, Self::Attach)>> {
         let Some((op, expected_result)) = self.inner.next() else {
             return Ok(None);
         };
         let replaced = self.expected_result.replace(expected_result);
         if replaced.is_some() {
-            anyhow::bail!("last invocation not finished")
+            anyhow::bail!("only support close loop")
         }
-        Ok(Some(op))
+        Ok(Some((op, ())))
     }
 
-    fn on_result(&mut self, result: Payload) -> anyhow::Result<()> {
+    fn on_result(&mut self, result: Payload, (): Self::Attach) -> anyhow::Result<()> {
         let Some(expected_result) = self.expected_result.take() else {
             anyhow::bail!("missing invocation")
         };
@@ -283,8 +213,10 @@ impl<I: Iterator<Item = (Payload, Payload)>> Workload for Check<I> {
             })?
         }
     }
+}
 
-    fn dehydrate(self) -> Self::Dry {}
+impl<I> From<Check<I>> for () {
+    fn from(_: Check<I>) -> Self {}
 }
 
 #[derive(Debug, Clone)]
@@ -296,33 +228,38 @@ pub struct Invoke(pub Payload);
 // too lazy to refactor it off
 pub type InvokeOk = (u32, Payload);
 
-pub struct CloseLoop<W> {
+pub struct CloseLoop<W: Workload> {
     sender: Box<dyn SendEvent<Invoke> + Send + Sync>,
     pub workload: W,
+    workload_attach: Option<W::Attach>,
     pub stop: Option<CloseLoopStop>,
     pub done: bool,
 }
 
 type CloseLoopStop = Box<dyn FnOnce() -> anyhow::Result<()> + Send + Sync>;
 
-impl<W> Debug for CloseLoop<W> {
+impl<W: Workload> Debug for CloseLoop<W> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CloseLoop").finish_non_exhaustive()
     }
 }
 
-impl<W> CloseLoop<W> {
+impl<W: Workload> CloseLoop<W> {
     pub fn new(sender: impl SendEvent<Invoke> + Send + Sync + 'static, workload: W) -> Self {
         Self {
             sender: Box::new(sender),
             workload,
+            workload_attach: None,
             stop: None,
             done: false,
         }
     }
 }
 
-impl<W: Clone> CloseLoop<W> {
+impl<W: Workload + Clone> CloseLoop<W>
+where
+    W::Attach: Clone,
+{
     pub fn duplicate<E: SendEvent<Invoke> + Send + Sync + 'static>(
         &self,
         sender: E,
@@ -330,6 +267,7 @@ impl<W: Clone> CloseLoop<W> {
         Ok(Self {
             sender: Box::new(sender),
             workload: self.workload.clone(),
+            workload_attach: self.workload_attach.clone(),
             stop: None,
             done: self.done,
         })
@@ -338,18 +276,26 @@ impl<W: Clone> CloseLoop<W> {
 
 impl<W: Workload> CloseLoop<W> {
     pub fn launch(&mut self) -> anyhow::Result<()> {
-        let op = self
+        let (op, attach) = self
             .workload
             .next_op()?
             .ok_or(anyhow::anyhow!("not enough op"))?;
+        let replaced = self.workload_attach.replace(attach);
+        if replaced.is_some() {
+            anyhow::bail!("duplicated launch")
+        }
         self.sender.send(Invoke(op))
     }
 }
 
 impl<W: Workload> OnEvent<InvokeOk> for CloseLoop<W> {
     fn on_event(&mut self, (_, result): InvokeOk, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
-        self.workload.on_result(result)?;
-        if let Some(op) = self.workload.next_op()? {
+        let Some(attach) = self.workload_attach.take() else {
+            anyhow::bail!("missing workload attach")
+        };
+        self.workload.on_result(result, attach)?;
+        if let Some((op, attach)) = self.workload.next_op()? {
+            self.workload_attach.replace(attach);
             self.sender.send(Invoke(op))
         } else {
             self.done = true;
@@ -367,9 +313,9 @@ pub mod check {
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub struct DryCloseLoop<T>(T);
 
-    impl<W: Workload> From<CloseLoop<W>> for DryCloseLoop<W::Dry> {
+    impl<W: Workload + Into<T>, T> From<CloseLoop<W>> for DryCloseLoop<T> {
         fn from(value: CloseLoop<W>) -> Self {
-            Self(value.workload.dehydrate())
+            Self(value.workload.into())
         }
     }
 }

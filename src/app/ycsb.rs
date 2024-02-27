@@ -10,8 +10,7 @@
 // only zipfian, latest and uniform request distributions are implemented
 
 use std::{
-    collections::HashMap,
-    convert::Infallible,
+    collections::HashSet,
     hash::{BuildHasher, RandomState},
     iter::repeat_with,
 };
@@ -24,7 +23,7 @@ use rand::{
 use rand_distr::Zeta;
 use serde::{Deserialize, Serialize};
 
-use crate::{message::Payload, workload::WorkloadWithSavedOp};
+use crate::message::Payload;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Op {
@@ -50,7 +49,7 @@ pub struct Workload<R> {
     insert_key_num: usize,
     // `transactioninsertkeysequence`
     next_insert_num: usize,
-    inserting_names: HashMap<usize, String>,
+    inserting_nums: HashSet<usize>,
     inserted_num: usize,
 
     field_length: Gen,
@@ -132,7 +131,7 @@ impl<R> Workload<R> {
             rng,
             insert_key_num: 0,
             next_insert_num: settings.record_count,
-            inserting_names: Default::default(),
+            inserting_nums: Default::default(),
             inserted_num: settings.record_count,
             field_length: Gen::new(settings.field_length_distr, settings.field_length)?,
             key_num: Gen::new(settings.request_distr, settings.record_count)?,
@@ -209,10 +208,10 @@ impl<R: Rng> Workload<R> {
     }
 
     fn insert(&mut self) -> Op {
-        self.next_insert_num += 1;
         let key_num = self.next_insert_num;
+        self.next_insert_num += 1;
         let key_name = self.build_key_name(key_num);
-        self.inserting_names.insert(key_num, key_name.clone());
+        self.inserting_nums.insert(key_num);
         let value = self.build_value();
         Op::Insert(key_name, value)
     }
@@ -243,28 +242,29 @@ impl<R: Rng> Workload<R> {
     }
 }
 
-impl<R: Rng> WorkloadWithSavedOp for Workload<R> {
-    type Dry = Infallible; // TODO compatible with model checking
+impl<R: Rng> crate::workload::Workload for Workload<R> {
+    type Attach = Option<usize>;
 
-    fn dehydrate(self) -> Self::Dry {
-        unimplemented!()
+    fn next_op(&mut self) -> anyhow::Result<Option<(Payload, Self::Attach)>> {
+        let op = self.op();
+        Ok(Some((
+            Payload(bincode::options().serialize(&op)?),
+            if matches!(op, Op::Insert(..)) {
+                Some(self.next_insert_num - 1)
+            } else {
+                None
+            },
+        )))
     }
 
-    fn next_op(&mut self) -> anyhow::Result<Option<Payload>> {
-        Ok(Some(Payload(bincode::options().serialize(&self.op())?)))
-    }
-
-    fn on_result(&mut self, Payload(op): Payload, _: Payload) -> anyhow::Result<()> {
-        if let Op::Update(key_name, _) = bincode::options().deserialize(&op)? {
-            let key_num = *self
-                .inserting_names
-                .iter()
-                .find(|(_, name)| **name == key_name)
-                .ok_or(anyhow::anyhow!("missing key name"))?
-                .0;
-            self.inserting_names.remove(&key_num).unwrap();
+    fn on_result(&mut self, _: Payload, key_num: Self::Attach) -> anyhow::Result<()> {
+        if let Some(key_num) = key_num {
+            let removed = self.inserting_nums.remove(&key_num);
+            if !removed {
+                anyhow::bail!("missing insert key number")
+            }
             while self.inserted_num < self.next_insert_num
-                && !self.inserting_names.contains_key(&self.inserted_num)
+                && !self.inserting_nums.contains(&self.inserted_num)
             {
                 self.inserted_num += 1
             }

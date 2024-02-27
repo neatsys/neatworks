@@ -416,8 +416,8 @@ pub mod check {
         Replica,
     }
 
-    pub struct State<I> {
-        pub clients: Vec<ClientState<I>>,
+    pub struct State<W: Workload> {
+        pub clients: Vec<ClientState<W>>,
         pub replica: erased::Replica<KVStore, Addr>,
 
         message_events: BTreeSet<MessageEvent>,
@@ -427,7 +427,7 @@ pub mod check {
         transient_message_events: Receiver<MessageEvent>,
     }
 
-    pub struct ClientState<W> {
+    pub struct ClientState<W: Workload> {
         pub state: erased::Client<Addr>,
         timer_events: Vec<TimerEvent<Timer>>,
         pub close_loop: CloseLoop<W>,
@@ -489,7 +489,7 @@ pub mod check {
         app: KVStore,
     }
 
-    impl<W: Workload> From<State<W>> for DryState<W::Dry> {
+    impl<W: Workload + Into<T>, T> From<State<W>> for DryState<T> {
         fn from(value: State<W>) -> Self {
             let clients = value
                 .clients
@@ -554,13 +554,13 @@ pub mod check {
         }
     }
 
-    impl<I> Default for State<I> {
+    impl<W: Workload> Default for State<W> {
         fn default() -> Self {
             Self::new()
         }
     }
 
-    impl<W> State<W> {
+    impl<W: Workload> State<W> {
         pub fn new() -> Self {
             let (transient_event_sender, transient_event_receiver) = channel();
             let transient_net = Transient(transient_event_sender);
@@ -615,7 +615,10 @@ pub mod check {
         }
     }
 
-    impl<W: Clone + Workload> crate::search::State for State<W> {
+    impl<W: Clone + Workload> crate::search::State for State<W>
+    where
+        W::Attach: Clone,
+    {
         type Event = Event;
 
         fn events(&self) -> Vec<Self::Event> {
