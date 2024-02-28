@@ -29,6 +29,7 @@ pub struct Ycsb {
 pub struct ClientConfig {
     pub protocol: Protocol,
     pub app: App,
+    pub num_close_loop: usize,
     pub replica_addrs: Vec<SocketAddr>,
     pub num_replica: usize,
     pub num_faulty: usize,

@@ -19,20 +19,19 @@
 // * only hashed insertion order is implemented
 // * only zipfian, latest and uniform request distributions are implemented
 // * zero padding length is default to 20 which correponding to 24 byte keys,
-//   fulfill the expectation of upstream's workload comment "1KB record (...
+//   matching the expectation of upstream's workload comment "1KB record (...
 //   plus key)"
-// * not concurrent accessible i.e. `impl Workload` takes `&mut self`. wrap into
-//   mutex if need to share among clients. on the other hand, although upstream
-//   manage to synchronize concurrent access to one `CoreWorkload` instance, it
-//   does not provide solution of synchronization among multiple `CoreWorkload`s
-//   (that probably deployed across machines). for example, duplicated inserting
-//   will still happen among machines
 // * see below for disccusion on zipfian paramter
 
 use std::{
     collections::HashSet,
     hash::{BuildHasher, BuildHasherDefault},
     iter::repeat_with,
+    sync::{
+        atomic::{AtomicUsize, Ordering::SeqCst},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant},
 };
 
 use bincode::Options;
@@ -63,16 +62,13 @@ pub enum Result {
     Ok,
 }
 
+#[derive(Clone)]
 pub struct Workload<R> {
     rng: R,
     settings: WorkloadSettings,
 
-    // `keyseqence`
-    insert_key_num: usize,
-    // `transactioninsertkeysequence`
-    next_insert_num: usize,
-    inserting_nums: HashSet<usize>,
-    inserted_num: usize,
+    insert_key_num: usize,          // `keyseqence`
+    insert_state: Arc<InsertState>, // `transactioninsertkeysequence`
 
     field_length: Gen,
     key_num: Gen,
@@ -81,9 +77,39 @@ pub struct Workload<R> {
 
     transaction_count: usize,
     rmw_update: Option<Op>,
+    pub latencies: Vec<Duration>,
+    start: Option<Instant>,
 }
 
-#[derive(Debug)]
+struct InsertState {
+    next_num: AtomicUsize,
+    // possibly feasible to implement with AtomicUsize as well, but too hard for me
+    inserted_nums: Mutex<(usize, HashSet<usize>)>,
+}
+
+impl InsertState {
+    fn next_num(&self) -> usize {
+        self.next_num.fetch_add(1, SeqCst)
+    }
+
+    fn next_inserted_num(&self) -> usize {
+        self.inserted_nums.lock().unwrap().0
+    }
+
+    fn ack(&self, n: usize) {
+        let (next_inserted_num, inserted_nums) = &mut *self.inserted_nums.lock().unwrap();
+        if n != *next_inserted_num {
+            inserted_nums.insert(n);
+            return;
+        }
+        while {
+            *next_inserted_num += 1;
+            inserted_nums.remove(next_inserted_num)
+        } {}
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct WorkloadSettings {
     pub record_count: usize,
     pub operation_count: Option<usize>,
@@ -191,6 +217,7 @@ impl WorkloadSettings {
     }
 }
 
+#[derive(Clone)]
 enum Gen {
     Constant(usize),
     Uniform(Uniform<usize>),
@@ -198,6 +225,7 @@ enum Gen {
     Zipf(Zipf<f32>),
 }
 
+#[derive(Clone)]
 struct GenScrambledZipf {
     min: usize,
     item_count: usize,
@@ -253,14 +281,24 @@ impl GenScrambledZipf {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Transaction {
+    Read,
+    Update,
+    Insert,
+    Scan,
+    ReadModifyWrite,
+}
+
 impl<R> Workload<R> {
     pub fn new(rng: R, settings: WorkloadSettings) -> anyhow::Result<Self> {
         Ok(Self {
             rng,
             insert_key_num: 0,
-            next_insert_num: settings.record_count,
-            inserting_nums: Default::default(),
-            inserted_num: settings.record_count,
+            insert_state: Arc::new(InsertState {
+                next_num: AtomicUsize::new(settings.record_count),
+                inserted_nums: Mutex::new((settings.record_count, Default::default())),
+            }),
             field_length: Gen::new(settings.field_length_distr, settings.field_length, false)?,
             key_num: if matches!(settings.request_distr, SettingsDistr::Latest) {
                 Gen::new(SettingsDistr::Zipfian, settings.record_count, false)
@@ -278,8 +316,18 @@ impl<R> Workload<R> {
             settings,
             transaction_count: 0,
             rmw_update: None,
+            latencies: Default::default(),
+            start: None,
         })
     }
+
+    const TRANSACTIONS: [Transaction; 5] = [
+        Transaction::Read,
+        Transaction::Update,
+        Transaction::Insert,
+        Transaction::Scan,
+        Transaction::ReadModifyWrite,
+    ];
 
     fn build_key_name(&self, key_num: usize) -> String {
         let key = BuildHasherDefault::<FxHasher>::default()
@@ -293,10 +341,15 @@ impl<R> Workload<R> {
     }
 }
 
-impl<R: Rng> Workload<R> {
-    const TRANSACTION_FN: [fn(&mut Self) -> Op; 4] =
-        [Self::read, Self::update, Self::insert, Self::scan];
+impl<R: Clone> Workload<R> {
+    pub fn clone_reseed(&self, rng: R) -> Self {
+        let mut workload = self.clone();
+        workload.rng = rng;
+        workload
+    }
+}
 
+impl<R: Rng> Workload<R> {
     fn build_value(&mut self) -> String {
         let field_len = self.field_length.gen(&mut self.rng);
         assert_ne!(field_len, 0);
@@ -326,68 +379,15 @@ impl<R: Rng> Workload<R> {
 
     fn key_num(&mut self) -> usize {
         if matches!(self.settings.request_distr, SettingsDistr::Latest) {
-            return self.inserted_num - self.key_num.gen(&mut self.rng);
+            return self.insert_state.next_inserted_num() - self.key_num.gen(&mut self.rng);
         }
+        // probably never reiterate after the simplification i made
         let mut key_num;
         while {
             key_num = self.key_num.gen(&mut self.rng);
-            key_num >= self.inserted_num
+            key_num >= self.insert_state.next_inserted_num()
         } {}
         key_num
-    }
-
-    fn read(&mut self) -> Op {
-        let key_num = self.key_num();
-        let key_name = self.build_key_name(key_num);
-        Op::Read(key_name)
-    }
-
-    fn read_modify_write(&mut self) -> [Op; 2] {
-        let key_num = self.key_num();
-        let key_name = self.build_key_name(key_num);
-        let value = self.build_value();
-        [Op::Read(key_name.clone()), Op::Update(key_name, value)]
-    }
-
-    fn scan(&mut self) -> Op {
-        let key_num = self.key_num();
-        let key_name = self.build_key_name(key_num);
-        let len = self.scan_len.gen(&mut self.rng);
-        assert_ne!(len, 0);
-        Op::Scan(key_name, len)
-    }
-
-    fn update(&mut self) -> Op {
-        let key_num = self.key_num();
-        let key_name = self.build_key_name(key_num);
-        let value = self.build_value();
-        Op::Update(key_name, value)
-    }
-
-    fn insert(&mut self) -> Op {
-        let key_num = self.next_insert_num;
-        self.next_insert_num += 1;
-        let key_name = self.build_key_name(key_num);
-        self.inserting_nums.insert(key_num);
-        let value = self.build_value();
-        Op::Insert(key_name, value)
-    }
-
-    fn op(&mut self) -> Option<Op> {
-        if let Some(op) = self.rmw_update.take() {
-            return Some(op);
-        }
-        if Some(self.transaction_count) == self.settings.operation_count {
-            return None;
-        }
-        let i = self.transaction.sample(&mut self.rng);
-        if let Some(f) = Self::TRANSACTION_FN.get(i) {
-            Some(f(self))
-        } else {
-            let [op, update_op] = self.read_modify_write();
-            self.rmw_update.get_or_insert(update_op);
-            Some(op)
-        }
     }
 }
 
@@ -395,30 +395,68 @@ impl<R: Rng> crate::workload::Workload for Workload<R> {
     type Attach = Option<usize>;
 
     fn next_op(&mut self) -> anyhow::Result<Option<(Payload, Self::Attach)>> {
-        let Some(op) = self.op() else { return Ok(None) };
-        Ok(Some((
-            Payload(bincode::options().serialize(&op)?),
-            if matches!(op, Op::Insert(..)) {
-                Some(self.next_insert_num - 1)
+        let mut key_num = 0;
+        let op = 'op: {
+            if let Some(op) = self.rmw_update.take() {
+                break 'op Some(op);
+            }
+            if Some(self.transaction_count) == self.settings.operation_count {
+                break 'op None;
+            }
+            let transaction = Self::TRANSACTIONS[self.transaction.sample(&mut self.rng)];
+            key_num = if matches!(transaction, Transaction::Insert) {
+                self.insert_state.next_num()
             } else {
-                None
-            },
-        )))
+                self.key_num()
+            };
+            let key_name = self.build_key_name(key_num);
+            Some(match transaction {
+                Transaction::Read => Op::Read(key_name),
+                Transaction::Update => Op::Update(key_name, self.build_value()),
+                Transaction::Insert => Op::Insert(key_name, self.build_value()),
+                Transaction::Scan => Op::Scan(key_name, self.scan_len.gen(&mut self.rng)),
+                Transaction::ReadModifyWrite => {
+                    let op = Op::Read(key_name.clone());
+                    let value = self.build_value();
+                    let _ = self.rmw_update.insert(Op::Update(key_name, value));
+                    op
+                }
+            })
+        };
+        Ok(if let Some(op) = op {
+            Some((
+                Payload(bincode::options().serialize(&op)?),
+                if matches!(op, Op::Insert(..)) {
+                    Some(key_num)
+                } else {
+                    None
+                },
+            ))
+        } else {
+            None
+        })
     }
 
-    fn on_result(&mut self, _: Payload, key_num: Self::Attach) -> anyhow::Result<()> {
+    fn on_result(&mut self, result: Payload, key_num: Self::Attach) -> anyhow::Result<()> {
+        if matches!(bincode::options().deserialize(&result)?, Result::NotFound) {
+            anyhow::bail!("expected NotFound")
+        }
         if let Some(key_num) = key_num {
-            let removed = self.inserting_nums.remove(&key_num);
-            if !removed {
-                anyhow::bail!("missing insert key number")
-            }
-            while self.inserted_num < self.next_insert_num
-                && !self.inserting_nums.contains(&self.inserted_num)
-            {
-                self.inserted_num += 1
-            }
+            self.insert_state.ack(key_num)
+        }
+        if self.rmw_update.is_none() {
+            let Some(start) = self.start.take() else {
+                anyhow::bail!("missing start instant")
+            };
+            self.latencies.push(start.elapsed())
         }
         Ok(())
+    }
+}
+
+impl<R> From<Workload<R>> for Vec<Duration> {
+    fn from(value: Workload<R>) -> Self {
+        value.latencies
     }
 }
 

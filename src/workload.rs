@@ -6,7 +6,7 @@ use std::{
     fmt::{Debug, Display},
     sync::{
         atomic::{AtomicU32, Ordering::SeqCst},
-        Arc, Mutex,
+        Arc,
     },
     time::{Duration, Instant},
 };
@@ -25,22 +25,6 @@ pub trait Workload {
     fn next_op(&mut self) -> anyhow::Result<Option<(Payload, Self::Attach)>>;
 
     fn on_result(&mut self, result: Payload, attach: Self::Attach) -> anyhow::Result<()>;
-}
-
-impl<W: Workload> Workload for &'_ Mutex<W> {
-    type Attach = W::Attach;
-
-    fn next_op(&mut self) -> anyhow::Result<Option<(Payload, Self::Attach)>> {
-        self.lock()
-            .map_err(|_| anyhow::anyhow!("lock poisoned"))?
-            .next_op()
-    }
-
-    fn on_result(&mut self, result: Payload, attach: Self::Attach) -> anyhow::Result<()> {
-        self.lock()
-            .map_err(|_| anyhow::anyhow!("lock poisoned"))?
-            .on_result(result, attach)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -62,6 +46,10 @@ impl<I> From<Iter<I>> for () {
     fn from(_: Iter<I>) -> Self {}
 }
 
+// coupling workload generation and latency measurement may not be a good design
+// generally speaking, there should be a concept of "transaction" that composed from one or more
+// ops, and latency is mean to be measured against transactions
+// current the transaction concept is skipped, maybe revisit the design later
 #[derive(Debug, derive_more::Deref)]
 pub struct OpLatency<W> {
     #[deref]
@@ -75,6 +63,12 @@ impl<W> OpLatency<W> {
             inner,
             latencies: Default::default(),
         }
+    }
+}
+
+impl<W> From<OpLatency<W>> for Vec<Duration> {
+    fn from(value: OpLatency<W>) -> Self {
+        value.latencies
     }
 }
 

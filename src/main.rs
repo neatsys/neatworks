@@ -16,7 +16,7 @@ use augustus::{
     net::{tokio::Udp, IndexNet},
     pbft, unreplicated,
     worker::erased::spawn_backend,
-    workload::{CloseLoop, Invoke, InvokeOk, Iter, OpLatency},
+    workload::{CloseLoop, Invoke, InvokeOk, Iter, OpLatency, Workload},
 };
 use axum::{
     extract::State,
@@ -160,56 +160,54 @@ impl NewClient<pbft::Client<SocketAddr>> for ClientConfig {
 }
 
 async fn client_session<S: OnEvent<Invoke> + Send + Sync + 'static>(
-    config: impl NewClient<S>,
+    config: ClientConfig,
     on_buf: impl Fn(&[u8], &mut SessionSender<S>) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
     benchmark_result: Arc<Mutex<Option<BenchmarkResult>>>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    ClientConfig: NewClient<S>,
+{
     let mut sessions = JoinSet::new();
     let stop = CancellationToken::new();
     let latencies = Arc::new(Mutex::new(Vec::new()));
-    const N: usize = 1;
-    let barrier = Arc::new(Barrier::new(N + 1));
-    for client_id in repeat_with(rand::random).take(N) {
-        let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
-        let addr = socket.local_addr()?;
-        println!("Client {client_id:08x} bind to {addr}");
-        let net = Udp(socket.into());
+    let barrier = Arc::new(Barrier::new(config.num_close_loop + 1));
 
-        let mut session = Session::new();
-        let mut close_loop_session = Session::new();
-
-        let mut state = config.new_client(
-            client_id,
-            addr,
-            net.clone(),
-            close_loop_session.erased_sender(),
-        );
-        let mut close_loop = CloseLoop::new(
-            session.erased_sender(),
-            OpLatency::new(Iter(repeat_with(Default::default))),
-        );
-
-        let mut sender = session.erased_sender();
-        let on_buf = on_buf.clone();
-        sessions.spawn(async move { net.recv_session(|buf| on_buf(buf, &mut sender)).await });
-        sessions.spawn(async move { session.erased_run(&mut state).await });
-        let stop = stop.clone();
-        let latencies = latencies.clone();
-        let barrier = barrier.clone();
-        sessions.spawn(async move {
-            close_loop.launch()?;
-            tokio::select! {
-                result = close_loop_session.erased_run(&mut close_loop) => result?,
-                () = stop.cancelled() => {}
-            }
-            latencies
-                .lock()
-                .unwrap()
-                .extend(close_loop.workload.latencies);
-            barrier.wait().await;
-            Ok(())
-        });
+    use replication_control_messages::App::*;
+    match &config.app {
+        Null => {
+            spawn_client_sessions(
+                &mut sessions,
+                config,
+                on_buf,
+                || OpLatency::new(Iter(repeat_with(Default::default))),
+                stop.clone(),
+                latencies.clone(),
+                barrier.clone(),
+            )
+            .await?
+        }
+        Ycsb(ycsb_config) => {
+            let workload = ycsb::Workload::new(
+                StdRng::seed_from_u64(117418),
+                ycsb::WorkloadSettings::new_a(ycsb_config.record_count),
+            )?;
+            let mut i = 0;
+            spawn_client_sessions(
+                &mut sessions,
+                config,
+                on_buf,
+                || {
+                    i += 1;
+                    workload.clone_reseed(StdRng::seed_from_u64(117418 + i))
+                },
+                stop.clone(),
+                latencies.clone(),
+                barrier.clone(),
+            )
+            .await?
+        }
     }
+
     // TODO escape with an error indicating the root problem instead of a disconnected channel error
     // caused by the problem
     // is it (easily) possible?
@@ -230,6 +228,60 @@ async fn client_session<S: OnEvent<Invoke> + Send + Sync + 'static>(
         throughput: latencies.len() as f32,
         latency: latencies.drain(..).sum::<Duration>() / (throughput.floor() as u32 + 1),
     });
+    Ok(())
+}
+
+async fn spawn_client_sessions<
+    S: OnEvent<Invoke> + Send + Sync + 'static,
+    W: Workload + Into<Vec<Duration>> + Send + Sync + 'static,
+>(
+    sessions: &mut JoinSet<anyhow::Result<()>>,
+    config: ClientConfig,
+    on_buf: impl Fn(&[u8], &mut SessionSender<S>) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
+    mut workload: impl FnMut() -> W,
+    stop: CancellationToken,
+    latencies: Arc<Mutex<Vec<Duration>>>,
+    barrier: Arc<Barrier>,
+) -> anyhow::Result<()>
+where
+    ClientConfig: NewClient<S>,
+    W::Attach: Send + Sync,
+{
+    for client_id in repeat_with(rand::random).take(config.num_close_loop) {
+        let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+        let addr = socket.local_addr()?;
+        println!("Client {client_id:08x} bind to {addr}");
+        let net = Udp(socket.into());
+
+        let mut session = Session::new();
+        let mut close_loop_session = Session::new();
+
+        let mut state = config.new_client(
+            client_id,
+            addr,
+            net.clone(),
+            close_loop_session.erased_sender(),
+        );
+        let mut close_loop = CloseLoop::new(session.erased_sender(), workload());
+
+        let mut sender = session.erased_sender();
+        let on_buf = on_buf.clone();
+        sessions.spawn(async move { net.recv_session(|buf| on_buf(buf, &mut sender)).await });
+        sessions.spawn(async move { session.erased_run(&mut state).await });
+        let stop = stop.clone();
+        let latencies = latencies.clone();
+        let barrier = barrier.clone();
+        sessions.spawn(async move {
+            close_loop.launch()?;
+            tokio::select! {
+                result = close_loop_session.erased_run(&mut close_loop) => result?,
+                () = stop.cancelled() => {}
+            }
+            latencies.lock().unwrap().extend(close_loop.workload.into());
+            barrier.wait().await;
+            Ok(())
+        });
+    }
     Ok(())
 }
 

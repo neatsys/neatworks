@@ -98,6 +98,7 @@ async fn benchmark_session(
     let config = ClientConfig {
         protocol,
         app: App::Null,
+        num_close_loop: 1,
         replica_addrs: replica_addrs.into(),
         num_replica,
         num_faulty,
