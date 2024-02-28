@@ -1,6 +1,8 @@
 use std::{net::SocketAddr, time::Duration};
 
-use replication_control_messages::{App, BenchmarkResult, ClientConfig, Protocol, ReplicaConfig};
+use replication_control_messages::{
+    App, BenchmarkResult, ClientConfig, Protocol, ReplicaConfig, Ycsb, YcsbProfile,
+};
 use tokio::{task::JoinSet, time::sleep};
 
 #[tokio::main(flavor = "current_thread")]
@@ -8,8 +10,12 @@ async fn main() -> anyhow::Result<()> {
     let control_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(1))
         .build()?;
-    benchmark_session(control_client, Protocol::Unreplicated).await
-    // benchmark_session(control_client, Protocol::Pbft).await
+    // let app = App::Null;
+    let app = App::Ycsb(Ycsb {
+        record_count: 1000,
+        profile: YcsbProfile::A,
+    });
+    benchmark_session(control_client, Protocol::Unreplicated, app).await
 }
 
 async fn watchdog_session(control_client: reqwest::Client, url: String) -> anyhow::Result<()> {
@@ -45,6 +51,7 @@ async fn result_session(
 async fn benchmark_session(
     control_client: reqwest::Client,
     protocol: Protocol,
+    app: App,
 ) -> anyhow::Result<()> {
     let replica_urls = [
         "http://127.0.0.1:3000",
@@ -74,7 +81,7 @@ async fn benchmark_session(
             replica_id: replica_id as _,
             replica_addrs: replica_addrs.into(),
             protocol,
-            app: App::Null,
+            app: app.clone(),
             num_replica,
             num_faulty,
         };
@@ -97,8 +104,8 @@ async fn benchmark_session(
     let client_url = "http://127.0.0.101:3000";
     let config = ClientConfig {
         protocol,
-        app: App::Null,
-        num_close_loop: 1,
+        app,
+        num_close_loop: 4,
         replica_addrs: replica_addrs.into(),
         num_replica,
         num_faulty,

@@ -403,6 +403,7 @@ impl<R: Rng> crate::workload::Workload for Workload<R> {
             if Some(self.transaction_count) == self.settings.operation_count {
                 break 'op None;
             }
+            let _ = self.start.insert(Instant::now());
             let transaction = Self::TRANSACTIONS[self.transaction.sample(&mut self.rng)];
             key_num = if matches!(transaction, Transaction::Insert) {
                 self.insert_state.next_num()

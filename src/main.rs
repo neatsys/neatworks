@@ -187,9 +187,17 @@ where
             .await?
         }
         Ycsb(ycsb_config) => {
+            use replication_control_messages::YcsbProfile::*;
             let workload = ycsb::Workload::new(
                 StdRng::seed_from_u64(117418),
-                ycsb::WorkloadSettings::new_a(ycsb_config.record_count),
+                match &ycsb_config.profile {
+                    A => ycsb::WorkloadSettings::new_a,
+                    B => ycsb::WorkloadSettings::new_b,
+                    C => ycsb::WorkloadSettings::new_c,
+                    D => ycsb::WorkloadSettings::new_d,
+                    E => ycsb::WorkloadSettings::new_e,
+                    F => ycsb::WorkloadSettings::new_f,
+                }(ycsb_config.record_count),
             )?;
             let mut i = 0;
             spawn_client_sessions(
@@ -320,6 +328,7 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
                     StdRng::seed_from_u64(117418),
                     ycsb::WorkloadSettings::new_a(ycsb_config.record_count),
                 )?;
+                println!("YCSB startup");
                 for op in workload.startup_ops() {
                     app.execute(&op)?;
                 }

@@ -22,7 +22,18 @@ pub enum App {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ycsb {
+    pub profile: YcsbProfile,
     pub record_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum YcsbProfile {
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

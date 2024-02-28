@@ -31,7 +31,14 @@ impl App for BTreeMap {
             Op::Scan(key, count) => Result::ScanOk(
                 self.0
                     .range(key..)
-                    .map(|(_, value)| value.clone())
+                    // .map(|(_, value)| value.clone())
+                    // whole string is too long to be sent over UDP packets
+                    .map(|(_, value)| {
+                        use std::hash::{BuildHasher, BuildHasherDefault};
+                        BuildHasherDefault::<rustc_hash::FxHasher>::default()
+                            .hash_one(value)
+                            .to_string()
+                    })
                     .take(count)
                     .collect(),
             ),
