@@ -6,7 +6,7 @@ use tokio::{
     time::{interval, sleep},
 };
 
-use super::{OnEvent, SendEvent, Sender, Timer, TimerId};
+use super::{OnEvent, SendEvent, Timer, TimerId};
 
 #[derive(Debug)]
 enum SessionEvent<M> {
@@ -15,21 +15,21 @@ enum SessionEvent<M> {
 }
 
 #[derive(Debug)]
-pub struct SessionSender<M>(UnboundedSender<SessionEvent<M>>);
+pub struct Sender<M>(UnboundedSender<SessionEvent<M>>);
 
-impl<M> Clone for SessionSender<M> {
+impl<M> Clone for Sender<M> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
 
-impl<M> PartialEq for SessionSender<M> {
+impl<M> PartialEq for Sender<M> {
     fn eq(&self, other: &Self) -> bool {
         self.0.same_channel(&other.0)
     }
 }
 
-impl<M> Eq for SessionSender<M> {}
+impl<M> Eq for Sender<M> {}
 
 impl<N: Into<M>, M> SendEvent<N> for UnboundedSender<M> {
     fn send(&mut self, event: N) -> anyhow::Result<()> {
@@ -37,7 +37,7 @@ impl<N: Into<M>, M> SendEvent<N> for UnboundedSender<M> {
     }
 }
 
-impl<M: Into<N>, N> SendEvent<M> for SessionSender<N> {
+impl<M: Into<N>, N> SendEvent<M> for Sender<N> {
     fn send(&mut self, event: M) -> anyhow::Result<()> {
         SendEvent::send(&mut self.0, SessionEvent::Other(event.into()))
     }
@@ -81,7 +81,7 @@ impl<M> Default for Session<M> {
 
 impl<M> Session<M> {
     pub fn sender(&self) -> Sender<M> {
-        SessionSender(self.sender.clone())
+        Sender(self.sender.clone())
     }
 
     pub async fn run(&mut self, state: &mut impl OnEvent<M>) -> anyhow::Result<()>

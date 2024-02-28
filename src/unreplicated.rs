@@ -783,7 +783,15 @@ pub mod check {
     impl<F: FnMut(&dyn Any) -> anyhow::Result<M>, M, S> crate::event::erased::Timer<S>
         for AnyTimer<'_, F, M>
     {
-        fn set<N: Clone + Send + Sync + 'static>(
+        fn set_internal(
+            &mut self,
+            _: Duration,
+            _: impl FnMut() -> crate::event::erased::Event<S, Self> + Send + 'static,
+        ) -> anyhow::Result<TimerId> {
+            unimplemented!()
+        }
+
+        fn set<N: Clone + Send + 'static>(
             &mut self,
             period: Duration,
             event: N,

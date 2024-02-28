@@ -79,7 +79,6 @@ impl<M> dyn Timer<M> + '_ {
 }
 
 pub use session::Session;
-pub type Sender<M> = session::SessionSender<M>;
 
 // alternative design: type-erasure event
 // the goal here is to only wrap other code in this module, so e.g. erased session is inside this
@@ -95,36 +94,76 @@ pub mod erased {
     // this cannot be easily done, since we need the FnOnce to be object safe
     // so instead the restriction is propagated backward from receiver side to sender side, i.e.
     // the timer type `T` is fixed at the time when the universal event get sent
-    // this is controled by the `T` parameter on `Erasure` below
-    pub type Event<S, T> = Box<dyn FnOnce(&mut S, &mut T) -> anyhow::Result<()> + Send + Sync>;
+    // this corresponds to the `T` parameters on `Typed` and `Erasure` below
+    pub type Event<S, T> = Box<dyn FnOnce(&mut S, &mut T) -> anyhow::Result<()> + Send>;
+    // there was a `... + Sync` above, later get removed because feels unnecessary
+    // a tokio receiver is `Sync` as long as item is `Send`
+    // a std receiver is `!Sync` anyway
 
     pub trait Timer<S> {
-        fn set<M: Clone + Send + Sync + 'static>(
+        fn set_internal(
+            &mut self,
+            period: Duration,
+            event: impl FnMut() -> Event<S, Self> + Send + 'static,
+        ) -> anyhow::Result<TimerId>;
+
+        fn set<M: Clone + Send + 'static>(
             &mut self,
             period: Duration,
             event: M,
         ) -> anyhow::Result<TimerId>
         where
-            S: OnEvent<M>;
+            Self: Sized,
+            S: OnEvent<M>,
+        {
+            self.set_internal(period, move || {
+                let event = event.clone();
+                Box::new(move |state, timer| state.on_event(event, timer))
+            })
+        }
 
         fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()>;
+
+        fn typed(self) -> Typed<Self, S>
+        where
+            Self: Sized,
+        {
+            Typed::<Self, S>(self, Default::default())
+        }
     }
 
     // a impl<T: super::Timer<Event<S, T>>, S> Timer<S> for T may be desired
     // but currently it's not used, the session does another wrapping before working
     // guess that will be case for every future event scheduler, hope not too ugly boilerplates
 
+    pub struct Typed<T, S>(T, std::marker::PhantomData<S>);
+
+    impl<T: Timer<S>, S: OnEvent<M>, M: Send + Sync + 'static> super::Timer<M> for Typed<T, S> {
+        fn set_dyn(
+            &mut self,
+            period: Duration,
+            mut event: Box<dyn FnMut() -> M + Send>,
+        ) -> anyhow::Result<TimerId> {
+            let event = move || {
+                let event = event();
+                Box::new(move |state: &mut S, timer: &mut _| state.on_event(event, timer)) as _
+            };
+            self.0.set_internal(period, Box::new(event))
+        }
+
+        fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()> {
+            Timer::unset(&mut self.0, timer_id)
+        }
+    }
+
     pub struct UnreachableTimer;
 
-    impl<T> Timer<T> for UnreachableTimer {
-        fn set<M: Clone + Send + Sync + 'static>(
+    impl<S> Timer<S> for UnreachableTimer {
+        fn set_internal(
             &mut self,
-            _: std::time::Duration,
-            _: M,
-        ) -> anyhow::Result<TimerId>
-        where
-            T: OnEvent<M>,
-        {
+            _: Duration,
+            _: impl FnMut() -> Event<S, Self> + Send + 'static,
+        ) -> anyhow::Result<TimerId> {
             unreachable!()
         }
 
@@ -180,24 +219,13 @@ pub mod erased {
         }
     }
 
-    // this implementation for super::Session<SessionEvent<S>> has been generalized into a blanket
-    // impl on T, but yet to be generalized over SessionEvent<S> (into
-    // `F where Event<S, T>: Into<F>`)
-    // that would require a newtype to tag the impl, and i don't bother
-    impl<T: super::Timer<SessionEvent<S>>, S: 'static> Timer<S> for T {
-        fn set<M: Clone + Send + Sync + 'static>(
+    impl<S: 'static> Timer<S> for super::Session<SessionEvent<S>> {
+        fn set_internal(
             &mut self,
             period: Duration,
-            event: M,
-        ) -> anyhow::Result<TimerId>
-        where
-            S: OnEvent<M>,
-        {
-            super::Timer::set(self, period, move || {
-                let event = event.clone();
-                let event = move |state: &mut S, timer: &mut _| state.on_event(event, timer);
-                SessionEvent(Box::new(event))
-            })
+            mut event: impl FnMut() -> Event<S, Self> + Send + 'static,
+        ) -> anyhow::Result<TimerId> {
+            super::Timer::set(self, period, move || SessionEvent(event()))
         }
 
         fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()> {
@@ -206,7 +234,8 @@ pub mod erased {
     }
 
     pub type Session<S> = super::Session<SessionEvent<S>>;
-    pub type SessionSender<S> = Erasure<super::Sender<SessionEvent<S>>, S, Session<S>>;
+    // could do a `pub mod seesion { type Sender = ... }` but that's too silly
+    pub type SessionSender<S> = Erasure<super::session::Sender<SessionEvent<S>>, S, Session<S>>;
 
     impl<S> Session<S> {
         pub fn erased_sender(&self) -> SessionSender<S> {
