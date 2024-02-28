@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, time::Duration};
 
-use replication_control_messages::{BenchmarkResult, ClientConfig, Protocol, ReplicaConfig};
+use replication_control_messages::{App, BenchmarkResult, ClientConfig, Protocol, ReplicaConfig};
 use tokio::{task::JoinSet, time::sleep};
 
 #[tokio::main(flavor = "current_thread")]
@@ -74,6 +74,7 @@ async fn benchmark_session(
             replica_id: replica_id as _,
             replica_addrs: replica_addrs.into(),
             protocol,
+            app: App::Null,
             num_replica,
             num_faulty,
         };
@@ -96,6 +97,7 @@ async fn benchmark_session(
     let client_url = "http://127.0.0.101:3000";
     let config = ClientConfig {
         protocol,
+        app: App::Null,
         replica_addrs: replica_addrs.into(),
         num_replica,
         num_faulty,

@@ -151,17 +151,20 @@ pub mod workload;
 // for different reasons. for panic it theoretially should not happen, and for
 // unstructured error it does not happen if the outer world is going as expect.
 // the reason to use panic is to save some code that i assert will never be
-// executed, and if my assertion is incorrect and the program does panic, then
-// i should replace the panic with the code that previously saved e.g. return
-// an error instead. on the other hand, unstructured error defines "under what
-// condition this code suppose to work". if the conidition is just temporarily
-// unsatisfied, i can safely ignore the transient error; otherwise, i should
-// think about how to improve the implementation to make it workable in more
-// situations.
-// 
+// executed, so it's ok to have false positive error-returning code: that just
+// some unreachable code that is too hard to be proved to be dead code. however,
+// if my assertion on unreachability is incorrect and the program does panic,
+// then i should replace the panic with the code that previously saved e.g.
+// return an error instead.
+//
+// on the other hand, unstructured error defines "under what condition this code
+// suppose to work". if the conidition is just temporarily unsatisfied, i can
+// safely ignore this transient error; otherwise, i should think about how to
+// improve the implementation to make it workable in more situations.
+//
 // in evaluation artifact it's not trivial to crash the server by propagating
 // errors. the current solution is to log the error on server side and returns
 // 500 to client to reliably crash the client. client should report which
-// server goes wrong, so i know where to find the relevant log later. 
+// server goes wrong, so i know where to find the relevant log later.
 // propagating complete error context may be desirable if servers cannot be
 // accessed easily, but that's not my case for now

@@ -18,7 +18,9 @@
 //   in upstream) as well. this change enables optional `operationcount`
 // * only hashed insertion order is implemented
 // * only zipfian, latest and uniform request distributions are implemented
-// * zero padding length is default to 60 which correponding to 64 byte keys
+// * zero padding length is default to 20 which correponding to 24 byte keys,
+//   fulfill the expectation of upstream's workload comment "1KB record (...
+//   plus key)"
 // * not concurrent accessible i.e. `impl Workload` takes `&mut self`. wrap into
 //   mutex if need to share among clients. on the other hand, although upstream
 //   manage to synchronize concurrent access to one `CoreWorkload` instance, it
@@ -111,7 +113,7 @@ impl WorkloadSettings {
         Self {
             record_count,
             operation_count: None,
-            field_length: 100,
+            field_length: 1000, // default to `fieldlength * fieldcount` in upstream
             field_length_distr: SettingsDistr::Constant,
             read_proportion: 0.95,
             update_proportion: 0.05,
@@ -121,8 +123,71 @@ impl WorkloadSettings {
             max_scan_length: 1000,
             scan_length_distr: SettingsDistr::Uniform,
             request_distr: SettingsDistr::Uniform,
-            zero_padding: 60,
+            zero_padding: 20,
         }
+    }
+
+    pub fn new_a(record_count: usize) -> Self {
+        let mut settings = Self::new(record_count);
+        settings.read_proportion = 0.5;
+        settings.update_proportion = 0.5;
+        settings.scan_proportion = 0.;
+        settings.insert_proportion = 0.;
+        settings.request_distr = SettingsDistr::Zipfian;
+        settings
+    }
+
+    pub fn new_b(record_count: usize) -> Self {
+        let mut settings = Self::new(record_count);
+        settings.read_proportion = 0.95;
+        settings.update_proportion = 0.05;
+        settings.scan_proportion = 0.;
+        settings.insert_proportion = 0.;
+        settings.request_distr = SettingsDistr::Zipfian;
+        settings
+    }
+
+    pub fn new_c(record_count: usize) -> Self {
+        let mut settings = Self::new(record_count);
+        settings.read_proportion = 1.;
+        settings.update_proportion = 0.;
+        settings.scan_proportion = 0.;
+        settings.insert_proportion = 0.;
+        settings.request_distr = SettingsDistr::Zipfian;
+        settings
+    }
+
+    pub fn new_d(record_count: usize) -> Self {
+        let mut settings = Self::new(record_count);
+        settings.read_proportion = 0.95;
+        settings.update_proportion = 0.;
+        settings.scan_proportion = 0.;
+        settings.insert_proportion = 0.05;
+        settings.request_distr = SettingsDistr::Latest;
+        settings
+    }
+
+    pub fn new_e(record_count: usize) -> Self {
+        let mut settings = Self::new(record_count);
+        settings.read_proportion = 0.;
+        settings.update_proportion = 0.;
+        settings.scan_proportion = 0.95;
+        settings.insert_proportion = 0.05;
+        settings.request_distr = SettingsDistr::Zipfian;
+        settings.max_scan_length = 100;
+        settings.scan_length_distr = SettingsDistr::Uniform;
+        settings
+    }
+
+    pub fn new_f(record_count: usize) -> Self {
+        let mut settings = Self::new(record_count);
+        settings.read_proportion = 0.5;
+        settings.update_proportion = 0.;
+        settings.scan_proportion = 0.;
+        settings.insert_proportion = 0.;
+        settings.read_modify_write_proportion = 0.5;
+        settings.request_distr = SettingsDistr::Zipfian;
+        settings
     }
 }
 
@@ -197,7 +262,11 @@ impl<R> Workload<R> {
             inserting_nums: Default::default(),
             inserted_num: settings.record_count,
             field_length: Gen::new(settings.field_length_distr, settings.field_length, false)?,
-            key_num: Gen::new(settings.request_distr, settings.record_count, true)?,
+            key_num: if matches!(settings.request_distr, SettingsDistr::Latest) {
+                Gen::new(SettingsDistr::Zipfian, settings.record_count, false)
+            } else {
+                Gen::new(settings.request_distr, settings.record_count, true)
+            }?,
             scan_len: Gen::new(settings.scan_length_distr, settings.max_scan_length, false)?,
             transaction: WeightedAliasIndex::new(vec![
                 settings.read_proportion,
@@ -256,6 +325,9 @@ impl<R: Rng> Workload<R> {
     }
 
     fn key_num(&mut self) -> usize {
+        if matches!(self.settings.request_distr, SettingsDistr::Latest) {
+            return self.inserted_num - self.key_num.gen(&mut self.rng);
+        }
         let mut key_num;
         while {
             key_num = self.key_num.gen(&mut self.rng);
@@ -378,7 +450,7 @@ mod tests {
         let mut workload = Workload::new(thread_rng(), settings)?;
         let mut counts = HashMap::<_, usize>::new();
         for _ in 0..1_000_000 {
-            *counts.entry(workload.key_num()).or_default() += 1;
+            *counts.entry(workload.key_num()).or_default() += 1
         }
         let mut counts = counts.into_iter().collect::<Vec<_>>();
         counts.sort_unstable_by_key(|(_, n)| *n);

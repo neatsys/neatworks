@@ -2,9 +2,9 @@
 // applications and workloads are tighly coupled, so it should be desirable to
 // keep them together (and i don't want their modules to be named
 // `app_and_workload`)
+pub mod btree;
 pub mod kvstore;
 pub mod ycsb;
-pub mod btree;
 
 pub trait App {
     // following SpexPaxos convention, this interface takes "binary in, binary out" approach, avoids
@@ -18,6 +18,12 @@ pub trait App {
     fn execute(&mut self, op: &[u8]) -> anyhow::Result<Vec<u8>>;
 }
 
+impl<T: ?Sized + App> App for Box<T> {
+    fn execute(&mut self, op: &[u8]) -> anyhow::Result<Vec<u8>> {
+        T::execute(self, op)
+    }
+}
+
 #[derive(Debug)]
 pub struct Null;
 
@@ -27,5 +33,5 @@ impl App for Null {
     }
 }
 
-pub use kvstore::KVStore;
 pub use btree::BTreeMap;
+pub use kvstore::KVStore;

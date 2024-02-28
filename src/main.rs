@@ -7,7 +7,7 @@ use std::{
 };
 
 use augustus::{
-    app::Null,
+    app::{ycsb, App},
     crypto::Crypto,
     event::{
         erased::{OnEvent, Session, SessionSender},
@@ -23,6 +23,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use rand::{rngs::StdRng, SeedableRng};
 use replication_control_messages::{BenchmarkResult, ClientConfig, Protocol, ReplicaConfig};
 use tokio::{
     runtime,
@@ -253,12 +254,32 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
             socket.local_addr()
         );
         let net = Udp(socket.into());
+
         let crypto = Crypto::new_hardcoded_replication(config.num_replica, config.replica_id)?;
+        let (crypto_worker, mut crypto_executor) = spawn_backend(crypto);
+
+        use augustus::app::BTreeMap;
+        use replication_control_messages::App::*;
+        let app = match config.app {
+            Null => Box::new(augustus::app::Null) as Box<dyn App + Send + Sync>,
+            Ycsb(ycsb_config) => {
+                let mut app = BTreeMap::new();
+                let mut workload = ycsb::Workload::new(
+                    StdRng::seed_from_u64(117418),
+                    ycsb::WorkloadSettings::new_a(ycsb_config.record_count),
+                )?;
+                for op in workload.startup_ops() {
+                    app.execute(&op)?;
+                }
+                Box::new(app) as _
+            }
+        };
+
         match config.protocol {
             Protocol::Unreplicated => {
                 assert_eq!(config.replica_id, 0);
                 let state = unreplicated::erased::Replica::new(
-                    Null,
+                    app,
                     Box::new(unreplicated::ToClientMessageNet::new(net.clone())),
                 );
                 runtime.block_on(replica_session(
@@ -270,10 +291,9 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
                 ))
             }
             Protocol::Pbft => {
-                let (crypto_worker, mut crypto_executor) = spawn_backend(crypto);
                 let state = pbft::Replica::<_, SocketAddr>::new(
                     config.replica_id,
-                    Null,
+                    app,
                     pbft::ToReplicaMessageNet::new(IndexNet::new(
                         net.clone(),
                         config.replica_addrs,

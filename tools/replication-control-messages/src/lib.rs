@@ -15,8 +15,20 @@ pub enum Protocol {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum App {
+    Null,
+    Ycsb(Ycsb),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Ycsb {
+    pub record_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientConfig {
     pub protocol: Protocol,
+    pub app: App,
     pub replica_addrs: Vec<SocketAddr>,
     pub num_replica: usize,
     pub num_faulty: usize,
@@ -25,6 +37,7 @@ pub struct ClientConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicaConfig {
     pub protocol: Protocol,
+    pub app: App,
     pub replica_id: u8,
     pub replica_addrs: Vec<SocketAddr>,
     pub num_replica: usize,
