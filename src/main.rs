@@ -294,7 +294,12 @@ where
 }
 
 async fn take_benchmark_result(State(state): State<AppState>) -> Json<Option<BenchmarkResult>> {
-    Json(state.benchmark_result.lock().unwrap().take())
+    let result = state.benchmark_result.lock().unwrap().take();
+    if result.is_some() {
+        let session = { state.session.lock().unwrap().take().unwrap() };
+        session.0.await.unwrap().unwrap()
+    }
+    Json(result)
 }
 
 async fn start_replica(State(state): State<AppState>, Json(config): Json<ReplicaConfig>) {

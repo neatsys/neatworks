@@ -11,11 +11,27 @@ async fn main() -> anyhow::Result<()> {
         .timeout(Duration::from_secs(1))
         .build()?;
     // let app = App::Null;
-    let app = App::Ycsb(Ycsb {
-        record_count: 1000,
-        profile: YcsbProfile::A,
-    });
-    benchmark_session(control_client, Protocol::Unreplicated, app).await
+    // let app = App::Ycsb(Ycsb {
+    //     record_count: 1000,
+    //     profile: YcsbProfile::A,
+    // });
+    // benchmark_session(control_client, Protocol::Unreplicated, app).await
+    for profile in [
+        YcsbProfile::A,
+        YcsbProfile::B,
+        YcsbProfile::C,
+        YcsbProfile::D,
+        YcsbProfile::E,
+        YcsbProfile::F,
+    ] {
+        let app = App::Ycsb(Ycsb {
+            record_count: 1000,
+            profile,
+        });
+        benchmark_session(control_client.clone(), Protocol::Unreplicated, app).await?
+        // sleep(Duration::from_millis(1500)).await
+    }
+    Ok(())
 }
 
 async fn watchdog_session(control_client: reqwest::Client, url: String) -> anyhow::Result<()> {

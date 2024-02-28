@@ -2,8 +2,8 @@
 // other modules may contain implementors that work with `Op` and `Result`
 //
 // detailed difference with upstream
-// * table name is omitted, and no support to multiple fields so field name is
-//   also omitted
+// * table name is omitted
+// * only default field policy i.e. read/scan all field and update single field
 // * deterministic and data integrity are not implemented
 // * `insertstart`/`insertcount` are removed. the load phase is supposed to
 //   bypass the evaluated protocols and directly perform on `impl App`s with
@@ -48,15 +48,15 @@ use crate::message::Payload;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Op {
     Read(String),
-    Scan(String, usize),
-    Update(String, String),
-    Insert(String, String),
+    Scan(String, usize, usize), // field index, max count
+    Update(String, usize, String),
+    Insert(String, Vec<String>),
     Delete(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Result {
-    ReadOk(String),
+    ReadOk(Vec<String>),
     NotFound,
     ScanOk(Vec<String>),
     Ok,
@@ -115,6 +115,7 @@ pub struct WorkloadSettings {
     pub operation_count: Option<usize>,
     pub field_length: usize,
     pub field_length_distr: SettingsDistr,
+    pub field_count: usize,
     pub read_proportion: f32,
     pub update_proportion: f32,
     pub insert_proportion: f32,
@@ -139,7 +140,8 @@ impl WorkloadSettings {
         Self {
             record_count,
             operation_count: None,
-            field_length: 1000, // default to `fieldlength * fieldcount` in upstream
+            field_length: 100,
+            field_count: 10,
             field_length_distr: SettingsDistr::Constant,
             read_proportion: 0.95,
             update_proportion: 0.05,
@@ -361,7 +363,7 @@ impl<R: Rng> Workload<R> {
     fn startup_insert(&mut self) -> Op {
         self.insert_key_num += 1;
         let key = self.build_key_name(self.insert_key_num);
-        let value = self.build_value();
+        let value = vec![self.build_value(); self.settings.field_count];
         Op::Insert(key, value)
     }
 
@@ -405,6 +407,11 @@ impl<R: Rng> crate::workload::Workload for Workload<R> {
             }
             let _ = self.start.insert(Instant::now());
             let transaction = Self::TRANSACTIONS[self.transaction.sample(&mut self.rng)];
+            let field = if !matches!(transaction, Transaction::Insert | Transaction::Read) {
+                self.rng.gen_range(0..self.settings.field_count)
+            } else {
+                0
+            };
             key_num = if matches!(transaction, Transaction::Insert) {
                 self.insert_state.next_num()
             } else {
@@ -413,13 +420,16 @@ impl<R: Rng> crate::workload::Workload for Workload<R> {
             let key_name = self.build_key_name(key_num);
             Some(match transaction {
                 Transaction::Read => Op::Read(key_name),
-                Transaction::Update => Op::Update(key_name, self.build_value()),
-                Transaction::Insert => Op::Insert(key_name, self.build_value()),
-                Transaction::Scan => Op::Scan(key_name, self.scan_len.gen(&mut self.rng)),
+                Transaction::Update => Op::Update(key_name, field, self.build_value()),
+                Transaction::Insert => Op::Insert(
+                    key_name,
+                    vec![self.build_value(); self.settings.field_count],
+                ),
+                Transaction::Scan => Op::Scan(key_name, field, self.scan_len.gen(&mut self.rng)),
                 Transaction::ReadModifyWrite => {
                     let op = Op::Read(key_name.clone());
                     let value = self.build_value();
-                    let _ = self.rmw_update.insert(Op::Update(key_name, value));
+                    let _ = self.rmw_update.insert(Op::Update(key_name, field, value));
                     op
                 }
             })
