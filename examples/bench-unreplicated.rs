@@ -4,17 +4,14 @@ use std::{
 
 use augustus::{
     app::Null,
-    event::exp::{
+    event::{
         erased::{self, FixTimer},
         Session,
     },
     net::{tokio::Udp, IndexNet},
     unreplicated::{
-        self,
-        exp::{
-            to_client_on_buf, to_replica_on_buf, Client, Replica, ToClientMessageNet,
-            ToReplicaMessageNet,
-        },
+        self, to_client_on_buf, to_replica_on_buf, Client, Replica, ToClientMessageNet,
+        ToReplicaMessageNet,
     },
     workload::{CloseLoop, Iter, OpLatency},
 };
@@ -44,17 +41,17 @@ async fn main() -> anyhow::Result<()> {
         let recv_session;
         let state_session = if mode.as_deref() == Some("boxed") {
             println!("Starting replica with boxed events and net");
-            let mut state = FixTimer(Replica::<_, _, SocketAddr>::new(Null, Box::new(net)));
+            let mut state = FixTimer(Replica::new(Null, Box::new(net)));
             let mut state_session = erased::Session::new();
             let mut state_sender = state_session.erased_sender();
             recv_session = Box::pin(raw_net.recv_session(move |buf| {
-                unreplicated::exp::erased::to_replica_on_buf(buf, &mut state_sender)
+                unreplicated::erased::to_replica_on_buf(buf, &mut state_sender)
             })) as Pin<Box<dyn Future<Output = anyhow::Result<()>>>>;
             Box::pin(async move { state_session.erased_run(&mut state).await })
                 as Pin<Box<dyn Future<Output = anyhow::Result<()>>>>
         } else {
-            let mut state = Replica::<_, _, SocketAddr>::new(Null, net);
-            let mut state_session = Session::<unreplicated::exp::ReplicaEvent<_>>::new();
+            let mut state = Replica::new(Null, net);
+            let mut state_session = Session::<unreplicated::ReplicaEvent<_>>::new();
             let mut state_sender = state_session.sender();
             recv_session = Box::pin(
                 raw_net.recv_session(move |buf| to_replica_on_buf(buf, &mut state_sender)),
@@ -82,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
         let addr = SocketAddr::new([127, 0, 0, 101].into(), socket.local_addr()?.port());
         let raw_net = Udp(socket.into());
 
-        let mut state_session = Session::<unreplicated::exp::ClientEvent>::new();
+        let mut state_session = Session::<unreplicated::ClientEvent>::new();
         let mut close_loop_session = erased::Session::new();
 
         let mut state = Client::new(

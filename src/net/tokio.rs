@@ -12,7 +12,7 @@ use tokio::{
 use tracing::warn;
 
 use crate::event::{
-    erased::{OnEvent, Timer},
+    erased::{OnEventRichTimer, RichTimer},
     SendEvent, TimerId,
 };
 
@@ -117,11 +117,11 @@ impl<B> TcpControl<B> {
 
 const MAX_TCP_BUF_LEN: usize = 1 << 20;
 
-impl<B: Buf> OnEvent<(SocketAddr, B)> for TcpControl<B> {
+impl<B: Buf> OnEventRichTimer<(SocketAddr, B)> for TcpControl<B> {
     fn on_event(
         &mut self,
         (dest, buf): (SocketAddr, B),
-        timer: &mut impl Timer<Self>,
+        timer: &mut impl RichTimer<Self>,
     ) -> anyhow::Result<()> {
         if buf.as_ref().len() >= MAX_TCP_BUF_LEN {
             anyhow::bail!("TCP buf too large: {}", buf.as_ref().len())
@@ -175,11 +175,11 @@ impl<B: Buf> OnEvent<(SocketAddr, B)> for TcpControl<B> {
 #[derive(Debug, Clone)]
 struct CheckIdleConnection(SocketAddr);
 
-impl<B> OnEvent<CheckIdleConnection> for TcpControl<B> {
+impl<B> OnEventRichTimer<CheckIdleConnection> for TcpControl<B> {
     fn on_event(
         &mut self,
         CheckIdleConnection(dest): CheckIdleConnection,
-        timer: &mut impl Timer<Self>,
+        timer: &mut impl RichTimer<Self>,
     ) -> anyhow::Result<()> {
         let connection = self
             .connections

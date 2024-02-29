@@ -12,7 +12,7 @@ use std::{
 };
 
 use crate::{
-    event::exp::{OnEvent, OnTimer, SendEvent, Timer},
+    event::{OnEvent, OnTimer, SendEvent, Timer},
     message::Payload,
 };
 
@@ -331,11 +331,7 @@ impl<W: Workload> OnEvent<InvokeOk> for CloseLoop<W> {
 }
 
 impl<W: Workload> OnTimer for CloseLoop<W> {
-    fn on_timer(
-        &mut self,
-        _: crate::event::exp::TimerId,
-        _: &mut impl Timer,
-    ) -> anyhow::Result<()> {
+    fn on_timer(&mut self, _: crate::event::TimerId, _: &mut impl Timer) -> anyhow::Result<()> {
         unreachable!()
     }
 }
