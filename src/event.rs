@@ -100,6 +100,19 @@ pub mod erased {
     // a tokio receiver is `Sync` as long as item is `Send`
     // a std receiver is `!Sync` anyway
 
+    // inventing new trait for
+    // * not making Event into a newtype
+    // * confliting impl From<M> for Event<..> when M is Event<..>
+    pub trait IntoEvent<S, T> {
+        fn into_event(self) -> Event<S, T>;
+    }
+
+    impl<S: OnEvent<M>, T: Timer<S>, M: Send + 'static> IntoEvent<S, T> for M {
+        fn into_event(self) -> Event<S, T> {
+            Box::new(move |state, timer| state.on_event(self, timer))
+        }
+    }
+
     pub trait Timer<S> {
         fn set_internal(
             &mut self,

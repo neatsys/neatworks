@@ -87,6 +87,7 @@ impl App for Sqlite {
                 while let Some(row) = rows.next()? {
                     let record = (0..self.field_count)
                         // .map(|i| row.get(i))
+                        // ration explained in `btree`
                         .map(|i| {
                             use std::hash::{BuildHasher, BuildHasherDefault};
                             Ok(format!(

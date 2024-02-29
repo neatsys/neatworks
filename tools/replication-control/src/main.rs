@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, time::Duration};
 
 use replication_control_messages::{
-    App, BenchmarkResult, ClientConfig, Protocol, ReplicaConfig, Ycsb, YcsbProfile,
+    App, BenchmarkResult, ClientConfig, Protocol, ReplicaConfig, Ycsb, YcsbBackend, YcsbProfile,
 };
 use tokio::{task::JoinSet, time::sleep};
 
@@ -26,6 +26,7 @@ async fn main() -> anyhow::Result<()> {
     ] {
         let app = App::Ycsb(Ycsb {
             record_count: 1000,
+            backend: YcsbBackend::Sqlite,
             profile,
         });
         benchmark_session(control_client.clone(), Protocol::Unreplicated, app).await?
