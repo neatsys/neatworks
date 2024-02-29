@@ -4,6 +4,7 @@
 // `app_and_workload`)
 pub mod btree;
 pub mod kvstore;
+pub mod sqlite;
 pub mod ycsb;
 
 pub trait App {
@@ -35,3 +36,4 @@ impl App for Null {
 
 pub use btree::BTreeMap;
 pub use kvstore::KVStore;
+pub use sqlite::Sqlite;

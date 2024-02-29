@@ -34,27 +34,41 @@ impl App for BTreeMap {
                     Result::NotFound
                 }
             }
-            Op::Insert(key, value) => {
-                self.0.insert(key, value);
+            Op::Insert(key, values) => {
+                self.0.insert(key, values);
                 Result::Ok
             }
-            Op::Scan(key, field, count) => Result::ScanOk(
+            Op::Scan(key, count) => Result::ScanOk(
                 self.0
                     .range(key..)
-                    // .map(|(_, value)| value[field].clone())
-                    // whole string is too long to be sent over UDP packets
-                    .map(|(_, value)| {
-                        use std::hash::{BuildHasher, BuildHasherDefault};
-                        BuildHasherDefault::<rustc_hash::FxHasher>::default()
-                            .hash_one(&value[field])
-                            .to_string()
+                    // .map(|(_, values)| values.clone())
+                    // whole string is too long to be sent over UDP packets, so reduce each field
+                    // into single checksum letter
+                    // 1000 max scan length * (10 field * 1 byte per field + 1 byte length) = 11K
+                    // roughly 7 * MTU, probably acceptable
+                    .map(|(_, values)| {
+                        values
+                            .iter()
+                            .map(|value| {
+                                use std::hash::{BuildHasher, BuildHasherDefault};
+                                format!(
+                                    "{:x}",
+                                    BuildHasherDefault::<rustc_hash::FxHasher>::default()
+                                        .hash_one(value)
+                                        & 0xf
+                                )
+                            })
+                            .collect()
                     })
                     .take(count)
                     .collect(),
             ),
             Op::Delete(key) => {
-                self.0.remove(&key);
-                Result::Ok // NotFound when key not present?
+                if self.0.remove(&key).is_some() {
+                    Result::Ok
+                } else {
+                    Result::NotFound
+                }
             }
         };
         Ok(bincode::options().serialize(&result)?)

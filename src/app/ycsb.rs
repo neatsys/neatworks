@@ -48,7 +48,7 @@ use crate::message::Payload;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Op {
     Read(String),
-    Scan(String, usize, usize), // field index, max count
+    Scan(String, usize), // field index, max count
     Update(String, usize, String),
     Insert(String, Vec<String>),
     Delete(String),
@@ -58,7 +58,7 @@ pub enum Op {
 pub enum Result {
     ReadOk(Vec<String>),
     NotFound,
-    ScanOk(Vec<String>),
+    ScanOk(Vec<Vec<String>>),
     Ok,
 }
 
@@ -425,7 +425,7 @@ impl<R: Rng> crate::workload::Workload for Workload<R> {
                     key_name,
                     vec![self.build_value(); self.settings.field_count],
                 ),
-                Transaction::Scan => Op::Scan(key_name, field, self.scan_len.gen(&mut self.rng)),
+                Transaction::Scan => Op::Scan(key_name, self.scan_len.gen(&mut self.rng)),
                 Transaction::ReadModifyWrite => {
                     let op = Op::Read(key_name.clone());
                     let value = self.build_value();

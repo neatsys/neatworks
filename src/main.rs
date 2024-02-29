@@ -304,6 +304,29 @@ async fn take_benchmark_result(State(state): State<AppState>) -> Json<Option<Ben
 
 async fn start_replica(State(state): State<AppState>, Json(config): Json<ReplicaConfig>) {
     let mut session = state.session.lock().unwrap();
+
+    // 1. earlier crash in case of any failure during app initialization
+    // 2. block control plane client until initialization is done, prevent it to start clients too
+    //    soon
+    use augustus::app::BTreeMap;
+    use replication_control_messages::App::*;
+    let app = match config.app {
+        Null => Box::new(augustus::app::Null) as Box<dyn App + Send + Sync>,
+        Ycsb(ycsb_config) => {
+            let mut app = BTreeMap::new();
+            let mut workload = ycsb::Workload::new(
+                StdRng::seed_from_u64(117418),
+                ycsb::WorkloadSettings::new_a(ycsb_config.record_count),
+            )
+            .unwrap();
+            println!("YCSB startup");
+            for op in workload.startup_ops() {
+                app.execute(&op).unwrap();
+            }
+            Box::new(app) as _
+        }
+    };
+
     let cancel = CancellationToken::new();
     let session_cancel = cancel.clone();
     let handle = spawn_blocking(move || {
@@ -322,24 +345,6 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
 
         let crypto = Crypto::new_hardcoded_replication(config.num_replica, config.replica_id)?;
         let (crypto_worker, mut crypto_executor) = spawn_backend(crypto);
-
-        use augustus::app::BTreeMap;
-        use replication_control_messages::App::*;
-        let app = match config.app {
-            Null => Box::new(augustus::app::Null) as Box<dyn App + Send + Sync>,
-            Ycsb(ycsb_config) => {
-                let mut app = BTreeMap::new();
-                let mut workload = ycsb::Workload::new(
-                    StdRng::seed_from_u64(117418),
-                    ycsb::WorkloadSettings::new_a(ycsb_config.record_count),
-                )?;
-                println!("YCSB startup");
-                for op in workload.startup_ops() {
-                    app.execute(&op)?;
-                }
-                Box::new(app) as _
-            }
-        };
 
         match config.protocol {
             Protocol::Unreplicated => {
