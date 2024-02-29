@@ -385,26 +385,12 @@ pub mod exp {
 
         pub type Event<S, T> = Box<dyn FnOnce(&mut S, &mut T) -> anyhow::Result<()> + Send>;
 
-        pub trait OnEvent<M, T> {
+        trait OnEvent<M, T> {
             fn on_event(&mut self, event: M, timer: &mut T) -> anyhow::Result<()>;
         }
 
         pub trait OnTimer<T> {
             fn on_timer(&mut self, timer_id: TimerId, timer: &mut T) -> anyhow::Result<()>;
-        }
-
-        pub struct FixTimer<S, T>(S, std::marker::PhantomData<T>);
-
-        impl<S: super::OnEvent<M>, M, T: Timer> OnEvent<M, T> for FixTimer<S, T> {
-            fn on_event(&mut self, event: M, timer: &mut T) -> anyhow::Result<()> {
-                self.0.on_event(event, timer)
-            }
-        }
-
-        impl<S: super::OnTimer, T: Timer> OnTimer<T> for FixTimer<S, T> {
-            fn on_timer(&mut self, timer_id: TimerId, timer: &mut T) -> anyhow::Result<()> {
-                self.0.on_timer(timer_id, timer)
-            }
         }
 
         pub trait RichTimer<S> {
@@ -556,6 +542,28 @@ pub mod exp {
                     OnTimer::on_timer,
                 )
                 .await
+            }
+        }
+
+        // if brings phantom T and blanket impl for T: Timer, the impl does not get picked up
+        // because the exact T will become a infinite recursive type
+        // the error reporting is really confusing in this case
+        #[derive(derive_more::From, derive_more::Deref, derive_more::DerefMut)]
+        pub struct FixTimer<S>(pub S);
+
+        impl<S: super::OnEvent<M> + 'static, M> OnEvent<M, Session<Self>> for FixTimer<S> {
+            fn on_event(&mut self, event: M, timer: &mut Session<Self>) -> anyhow::Result<()> {
+                self.0.on_event(event, timer)
+            }
+        }
+
+        impl<S: super::OnTimer + 'static> OnTimer<Session<Self>> for FixTimer<S> {
+            fn on_timer(
+                &mut self,
+                timer_id: TimerId,
+                timer: &mut Session<Self>,
+            ) -> anyhow::Result<()> {
+                self.0.on_timer(timer_id, timer)
             }
         }
     }

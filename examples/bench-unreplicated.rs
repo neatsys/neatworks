@@ -4,10 +4,17 @@ use std::{
 
 use augustus::{
     app::Null,
-    event::{erased, Session},
+    event::exp::{
+        erased::{self, FixTimer},
+        Session,
+    },
     net::{tokio::Udp, IndexNet},
     unreplicated::{
-        self, to_client_on_buf, Client, Replica, ToClientMessageNet, ToReplicaMessageNet,
+        self,
+        exp::{
+            to_client_on_buf, to_replica_on_buf, Client, Replica, ToClientMessageNet,
+            ToReplicaMessageNet,
+        },
     },
     workload::{CloseLoop, Iter, OpLatency},
 };
@@ -35,24 +42,23 @@ async fn main() -> anyhow::Result<()> {
 
         let mode = args().nth(2);
         let recv_session;
-        let state_session = if mode.as_deref() == Some("erased") {
-            println!("Starting replica in erased mode");
-            let mut state = unreplicated::erased::Replica::new(Null, Box::new(net));
+        let state_session = if mode.as_deref() == Some("boxed") {
+            println!("Starting replica with boxed events and net");
+            let mut state = FixTimer(Replica::<_, _, SocketAddr>::new(Null, Box::new(net)));
             let mut state_session = erased::Session::new();
             let mut state_sender = state_session.erased_sender();
             recv_session = Box::pin(raw_net.recv_session(move |buf| {
-                unreplicated::erased::to_replica_on_buf(buf, &mut state_sender)
+                unreplicated::exp::erased::to_replica_on_buf(buf, &mut state_sender)
             })) as Pin<Box<dyn Future<Output = anyhow::Result<()>>>>;
             Box::pin(async move { state_session.erased_run(&mut state).await })
                 as Pin<Box<dyn Future<Output = anyhow::Result<()>>>>
         } else {
-            let mut state = Replica::new(Null, net);
-            let mut state_session = Session::new();
+            let mut state = Replica::<_, _, SocketAddr>::new(Null, net);
+            let mut state_session = Session::<unreplicated::exp::ReplicaEvent<_>>::new();
             let mut state_sender = state_session.sender();
-            recv_session =
-                Box::pin(raw_net.recv_session(move |buf| {
-                    unreplicated::to_replica_on_buf(buf, &mut state_sender)
-                }));
+            recv_session = Box::pin(
+                raw_net.recv_session(move |buf| to_replica_on_buf(buf, &mut state_sender)),
+            );
             Box::pin(async move { state_session.run(&mut state).await })
         };
         'select: {
@@ -66,17 +72,17 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
 
-    let replica_addrs = vec![SocketAddr::new([10, 0, 0, 7].into(), 4000)];
+    let replica_addrs = vec![SocketAddr::new([127, 0, 0, 1].into(), 4000)];
     let mut sessions = JoinSet::new();
     let runtime = runtime::Builder::new_multi_thread().enable_all().build()?;
     let (count_sender, mut count_receiver) = unbounded_channel();
     let cancel = CancellationToken::new();
     for id in repeat_with(rand::random).take(40) {
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
-        let addr = SocketAddr::new([10, 0, 0, 8].into(), socket.local_addr()?.port());
+        let addr = SocketAddr::new([127, 0, 0, 101].into(), socket.local_addr()?.port());
         let raw_net = Udp(socket.into());
 
-        let mut state_session = Session::new();
+        let mut state_session = Session::<unreplicated::exp::ClientEvent>::new();
         let mut close_loop_session = erased::Session::new();
 
         let mut state = Client::new(
@@ -85,10 +91,10 @@ async fn main() -> anyhow::Result<()> {
             ToReplicaMessageNet::new(IndexNet::new(raw_net.clone(), replica_addrs.clone(), None)),
             close_loop_session.erased_sender(),
         );
-        let mut close_loop = CloseLoop::new(
+        let mut close_loop = FixTimer(CloseLoop::new(
             state_session.sender(),
             OpLatency::new(Iter(repeat_with(Default::default))),
-        );
+        ));
         let mut state_sender = state_session.sender();
         sessions.spawn_on(
             async move {

@@ -12,10 +12,7 @@ use std::{
 };
 
 use crate::{
-    event::{
-        erased::{OnEvent, Timer},
-        SendEvent,
-    },
+    event::exp::{OnEvent, OnTimer, SendEvent, Timer},
     message::Payload,
 };
 
@@ -315,7 +312,7 @@ impl<W: Workload> CloseLoop<W> {
 }
 
 impl<W: Workload> OnEvent<InvokeOk> for CloseLoop<W> {
-    fn on_event(&mut self, (_, result): InvokeOk, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
+    fn on_event(&mut self, (_, result): InvokeOk, _: &mut impl Timer) -> anyhow::Result<()> {
         let Some(attach) = self.workload_attach.take() else {
             anyhow::bail!("missing workload attach")
         };
@@ -330,6 +327,16 @@ impl<W: Workload> OnEvent<InvokeOk> for CloseLoop<W> {
             }
             Ok(())
         }
+    }
+}
+
+impl<W: Workload> OnTimer for CloseLoop<W> {
+    fn on_timer(
+        &mut self,
+        _: crate::event::exp::TimerId,
+        _: &mut impl Timer,
+    ) -> anyhow::Result<()> {
+        unreachable!()
     }
 }
 
