@@ -10,7 +10,7 @@ use augustus::{
     blob::{self, RecvOffer, ServiceExt as _},
     crypto::{Crypto, PublicKey, Verifiable, H256},
     event::{
-        erased::{OnEvent, Timer},
+        erased::{OnEventRichTimer as OnEvent, RichTimer as Timer},
         SendEvent,
     },
     kademlia::{self, FindPeer, FindPeerOk, PeerId, Target},

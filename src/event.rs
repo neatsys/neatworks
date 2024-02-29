@@ -58,7 +58,7 @@ pub trait RichTimer<M> {
     fn set(
         &mut self,
         period: Duration,
-        event: impl FnMut() -> M + Send + 'static,
+        event: impl FnMut() -> M + Send + Sync + 'static,
     ) -> anyhow::Result<TimerId>;
 
     fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()>;
@@ -66,19 +66,19 @@ pub trait RichTimer<M> {
 
 pub struct Buffered<S, M> {
     pub inner: S,
-    attched: HashMap<TimerId, Box<dyn FnMut() -> M + Send>>,
+    attched: HashMap<TimerId, Box<dyn FnMut() -> M + Send + Sync>>,
 }
 
 struct BufferedTimer<'a, T, M> {
     inner: &'a mut T,
-    attched: &'a mut HashMap<TimerId, Box<dyn FnMut() -> M + Send>>,
+    attched: &'a mut HashMap<TimerId, Box<dyn FnMut() -> M + Send + Sync>>,
 }
 
 impl<T: Timer, M> RichTimer<M> for BufferedTimer<'_, T, M> {
     fn set(
         &mut self,
         period: Duration,
-        event: impl FnMut() -> M + Send + 'static,
+        event: impl FnMut() -> M + Send + Sync + 'static,
     ) -> anyhow::Result<TimerId> {
         let TimerId(timer_id) = self.inner.set(period)?;
         let replaced = self.attched.insert(TimerId(timer_id), Box::new(event));
@@ -139,7 +139,7 @@ pub mod erased {
     }
 
     pub trait RichTimer<S> {
-        fn set<M: Clone + Send + 'static>(
+        fn set<M: Clone + Send + Sync + 'static>(
             &mut self,
             period: Duration,
             event: M,
@@ -160,28 +160,40 @@ pub mod erased {
             Self: Sized;
     }
 
+    #[derive(derive_more::Deref, derive_more::DerefMut)]
     pub struct Buffered<S, T> {
+        #[deref]
+        #[deref_mut]
         inner: S,
-        attached: HashMap<
-            TimerId,
-            Box<dyn FnMut() -> Box<dyn FnOnce(&mut Self, &mut T) -> anyhow::Result<()> + Send>>,
-        >,
+        attached: Attached<S, T>,
     }
+
+    impl<S, T> From<S> for Buffered<S, T> {
+        fn from(value: S) -> Self {
+            Self {
+                inner: value,
+                attached: Default::default(),
+            }
+        }
+    }
+
+    type Attached<S, T> = HashMap<
+        TimerId,
+        // not FnMut() -> Event<S, BufferedTimer<'???, T, S>> because cannot write lifetime out
+        Box<
+            dyn FnMut() -> Box<dyn FnOnce(&mut Buffered<S, T>, &mut T) -> anyhow::Result<()>>
+                + Send
+                + Sync,
+        >,
+    >;
 
     struct BufferedTimer<'a, T, S> {
         inner: &'a mut T,
-        attached: &'a mut HashMap<
-            TimerId,
-            Box<
-                dyn FnMut() -> Box<
-                    dyn FnOnce(&mut Buffered<S, T>, &mut T) -> anyhow::Result<()> + Send,
-                >,
-            >,
-        >,
+        attached: &'a mut Attached<S, T>,
     }
 
     impl<T: Timer, S> RichTimer<S> for BufferedTimer<'_, T, S> {
-        fn set<M: Clone + Send + 'static>(
+        fn set<M: Clone + Send + Sync + 'static>(
             &mut self,
             period: Duration,
             event: M,
@@ -192,8 +204,8 @@ pub mod erased {
             let TimerId(timer_id) = self.inner.set(period)?;
             let action = move || {
                 let event = event.clone();
-                Box::new(move |buffered: &mut Buffered<_, _>, timer: &mut _| {
-                    buffered.on_event(event, timer)
+                Box::new(move |buffered: &mut _, timer: &mut _| {
+                    Buffered::on_event(buffered, event, timer)
                 }) as _
             };
             let replaced = self.attached.insert(TimerId(timer_id), Box::new(action));
@@ -280,6 +292,29 @@ pub mod erased {
                 OnTimer::on_timer,
             )
             .await
+        }
+    }
+
+    #[derive(derive_more::Deref, derive_more::DerefMut)]
+    pub struct BufferedWithSessionTimer<S>(Buffered<S, Session<Self>>);
+
+    impl<S> From<S> for BufferedWithSessionTimer<S> {
+        fn from(value: S) -> Self {
+            Self(Buffered::from(value))
+        }
+    }
+
+    impl<S: OnEventRichTimer<M> + 'static, M> OnEvent<M, Session<Self>>
+        for BufferedWithSessionTimer<S>
+    {
+        fn on_event(&mut self, event: M, timer: &mut Session<Self>) -> anyhow::Result<()> {
+            self.0.on_event(event, timer)
+        }
+    }
+
+    impl<S: 'static> OnTimer<Session<Self>> for BufferedWithSessionTimer<S> {
+        fn on_timer(&mut self, timer_id: TimerId, timer: &mut Session<Self>) -> anyhow::Result<()> {
+            self.0.on_timer(timer_id, timer)
         }
     }
 

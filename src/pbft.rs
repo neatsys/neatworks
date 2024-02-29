@@ -9,7 +9,7 @@ use crate::{
         Crypto, DigestHash as _, Verifiable,
     },
     event::{
-        erased::{OnEvent, Timer},
+        erased::{OnEventRichTimer as OnEvent, RichTimer as Timer},
         SendEvent, TimerId,
     },
     message::{Payload, Request},

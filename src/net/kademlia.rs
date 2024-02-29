@@ -5,7 +5,7 @@ use primitive_types::H256;
 
 use crate::{
     event::{
-        erased::{OnEvent, Timer},
+        erased::{OnEventRichTimer as OnEvent, RichTimer as Timer},
         SendEvent, TimerId,
     },
     kademlia::{PeerId, Query, QueryResult, QueryStatus, Target},

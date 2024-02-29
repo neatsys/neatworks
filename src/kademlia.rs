@@ -16,7 +16,7 @@ use crate::{
         Crypto, DigestHash, Verifiable,
     },
     event::{
-        erased::{OnEvent, Timer},
+        erased::{OnEventRichTimer as OnEvent, RichTimer as Timer},
         SendEvent, TimerId,
     },
     net::{events::Recv, Addr, SendMessage, SendMessageToEach, SendMessageToEachExt as _},
