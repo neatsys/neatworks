@@ -332,7 +332,10 @@ pub mod exp {
     }
 
     impl<M: Send + 'static> Timer for Session<M> {
-        fn set(&mut self, period: Duration) -> anyhow::Result<TimerId> {
+        fn set(
+            &mut self,
+            period: Duration,
+        ) -> anyhow::Result<TimerId> {
             self.timer_id += 1;
             let timer_id = self.timer_id;
             let mut sender = self.sender.clone();
