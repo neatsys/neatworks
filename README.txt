@@ -11,8 +11,12 @@ Bridge the gaps between the abstracted protocols and wrapping layers with combin
 Finally, for the cases that the boilerblate cannot be modeled into combinators, e.g. consolidating multiple `impl OnEvent`s into systems for benchmarking or testing, provide showcases for reference and templating.
 
 The codebase contains selected dependencies that are verified to work well with each other, and demonstrates best practice of constructing software for various purpose, including:
-* `tokio` as concurrency manager and IO/timer provider
+* concurrency manager based on `tokio` 
+* IO provider: `tokio`
+* timer service provider: `tokio` and a baseline implementation
 * `anyhow` as error solution
+* `bincode` as (de)serialization solution (with occasionally used `serde_json`)
+* std `Hash`-based digest solution and `sha2` as digest library
 * `secp256k1` as cryptographic library
 * `axum`-based HTTP server as standalone, command line argument free evaluation artifact
 * `reqwest`-based control plane
