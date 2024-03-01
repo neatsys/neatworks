@@ -125,7 +125,7 @@ pub use session::Session;
 
 // alternative interface that performs type erasure on event types
 pub mod erased {
-    use std::{collections::HashMap, time::Duration};
+    use std::{collections::HashMap, fmt::Debug, time::Duration};
 
     use super::{SendEvent, Timer, TimerId};
 
@@ -145,7 +145,7 @@ pub mod erased {
     // which results in e.g. leaking internal details of `Session::run`
     pub type Event<S, T> = Box<dyn FnOnce(&mut S, &mut T) -> anyhow::Result<()> + Send>;
 
-    trait OnEvent<M, T> {
+    pub trait OnEvent<M, T> {
         fn on_event(&mut self, event: M, timer: &mut T) -> anyhow::Result<()>;
     }
 
@@ -196,6 +196,14 @@ pub mod erased {
         #[deref_mut]
         inner: S,
         attached: Attached<S, T>,
+    }
+
+    impl<S: Debug, T> Debug for Buffered<S, T> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Buffered")
+                .field("inner", &self.inner)
+                .finish_non_exhaustive()
+        }
     }
 
     impl<S, T> From<S> for Buffered<S, T> {
@@ -340,7 +348,7 @@ pub mod erased {
             }
         }
 
-        #[derive(derive_more::Deref, derive_more::DerefMut)]
+        #[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
         pub struct Buffered<S>(super::Buffered<S, Session<Self>>);
 
         impl<S> From<S> for Buffered<S> {

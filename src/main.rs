@@ -10,7 +10,10 @@ use augustus::{
     app::{ycsb, App},
     crypto::Crypto,
     event::{
-        erased::{OnEvent, Session, SessionSender},
+        erased::{
+            session::{Buffered, Sender},
+            Blanket, OnEvent, OnTimer, Session,
+        },
         SendEvent,
     },
     net::{tokio::Udp, IndexNet},
@@ -92,13 +95,13 @@ async fn start_client(State(state): State<AppState>, Json(config): Json<ClientCo
             .build()?;
         match config.protocol {
             Protocol::Unreplicated => {
-                runtime.block_on(client_session::<unreplicated::erased::Client<_>>(
+                runtime.block_on(client_session::<Blanket<unreplicated::Client<_, _, _>>>(
                     config,
                     unreplicated::erased::to_client_on_buf,
                     benchmark_result,
                 ))
             }
-            Protocol::Pbft => runtime.block_on(client_session::<pbft::Client<_>>(
+            Protocol::Pbft => runtime.block_on(client_session::<Buffered<pbft::Client<_>>>(
                 config,
                 pbft::to_client_on_buf,
                 benchmark_result,
@@ -119,15 +122,31 @@ trait NewClient<S> {
     ) -> S;
 }
 
-impl NewClient<unreplicated::erased::Client<SocketAddr>> for ClientConfig {
+impl
+    NewClient<
+        Blanket<
+            unreplicated::Client<
+                Box<dyn unreplicated::ToReplicaNet<SocketAddr> + Send + Sync>,
+                Box<dyn unreplicated::ClientUpcall + Send + Sync>,
+                SocketAddr,
+            >,
+        >,
+    > for ClientConfig
+{
     fn new_client(
         &self,
         id: u32,
         addr: SocketAddr,
         net: Udp,
         upcall: impl SendEvent<InvokeOk> + Send + Sync + 'static,
-    ) -> unreplicated::erased::Client<SocketAddr> {
-        unreplicated::erased::Client::new(
+    ) -> Blanket<
+        unreplicated::Client<
+            Box<dyn unreplicated::ToReplicaNet<SocketAddr> + Send + Sync>,
+            Box<dyn unreplicated::ClientUpcall + Send + Sync>,
+            SocketAddr,
+        >,
+    > {
+        Blanket(unreplicated::Client::new(
             id,
             addr,
             Box::new(unreplicated::ToReplicaMessageNet::new(IndexNet::new(
@@ -136,32 +155,34 @@ impl NewClient<unreplicated::erased::Client<SocketAddr>> for ClientConfig {
                 None,
             ))),
             Box::new(upcall),
-        )
+        ))
     }
 }
 
-impl NewClient<pbft::Client<SocketAddr>> for ClientConfig {
+impl NewClient<Buffered<pbft::Client<SocketAddr>>> for ClientConfig {
     fn new_client(
         &self,
         id: u32,
         addr: SocketAddr,
         net: Udp,
         upcall: impl SendEvent<InvokeOk> + Send + Sync + 'static,
-    ) -> pbft::Client<SocketAddr> {
-        pbft::Client::new(
+    ) -> Buffered<pbft::Client<SocketAddr>> {
+        Buffered::from(pbft::Client::new(
             id,
             addr,
             pbft::ToReplicaMessageNet::new(IndexNet::new(net, self.replica_addrs.clone(), None)),
             upcall,
             self.num_replica,
             self.num_faulty,
-        )
+        ))
     }
 }
 
-async fn client_session<S: OnEvent<Invoke> + Send + Sync + 'static>(
+async fn client_session<
+    S: OnEvent<Invoke, Session<S>> + OnTimer<Session<S>> + Send + Sync + 'static,
+>(
     config: ClientConfig,
-    on_buf: impl Fn(&[u8], &mut SessionSender<S>) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
+    on_buf: impl Fn(&[u8], &mut Sender<S>) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
     benchmark_result: Arc<Mutex<Option<BenchmarkResult>>>,
 ) -> anyhow::Result<()>
 where
@@ -240,12 +261,12 @@ where
 }
 
 async fn spawn_client_sessions<
-    S: OnEvent<Invoke> + Send + Sync + 'static,
+    S: OnEvent<Invoke, Session<S>> + OnTimer<Session<S>> + Send + Sync + 'static,
     W: Workload + Into<Vec<Duration>> + Send + Sync + 'static,
 >(
     sessions: &mut JoinSet<anyhow::Result<()>>,
     config: ClientConfig,
-    on_buf: impl Fn(&[u8], &mut SessionSender<S>) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
+    on_buf: impl Fn(&[u8], &mut Sender<S>) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
     mut workload: impl FnMut() -> W,
     stop: CancellationToken,
     latencies: Arc<Mutex<Vec<Duration>>>,
@@ -270,7 +291,7 @@ where
             net.clone(),
             close_loop_session.erased_sender(),
         );
-        let mut close_loop = CloseLoop::new(session.erased_sender(), workload());
+        let mut close_loop = Blanket(CloseLoop::new(session.erased_sender(), workload()));
 
         let mut sender = session.erased_sender();
         let on_buf = on_buf.clone();
@@ -285,7 +306,10 @@ where
                 result = close_loop_session.erased_run(&mut close_loop) => result?,
                 () = stop.cancelled() => {}
             }
-            latencies.lock().unwrap().extend(close_loop.workload.into());
+            latencies
+                .lock()
+                .unwrap()
+                .extend(close_loop.0.workload.into());
             barrier.wait().await;
             Ok(())
         });
@@ -349,10 +373,10 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
         match config.protocol {
             Protocol::Unreplicated => {
                 assert_eq!(config.replica_id, 0);
-                let state = unreplicated::erased::Replica::new(
+                let state = Blanket(unreplicated::Replica::new(
                     app,
                     Box::new(unreplicated::ToClientMessageNet::new(net.clone())),
-                );
+                ));
                 runtime.block_on(replica_session(
                     state,
                     unreplicated::erased::to_replica_on_buf,
@@ -362,7 +386,7 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
                 ))
             }
             Protocol::Pbft => {
-                let state = pbft::Replica::<_, SocketAddr>::new(
+                let state = Buffered::from(pbft::Replica::<_, SocketAddr>::new(
                     config.replica_id,
                     app,
                     pbft::ToReplicaMessageNet::new(IndexNet::new(
@@ -374,7 +398,7 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
                     crypto_worker,
                     config.num_replica,
                     config.num_faulty,
-                );
+                ));
                 runtime.block_on(replica_session(
                     state,
                     pbft::to_replica_on_buf,
@@ -390,13 +414,13 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
 }
 
 async fn replica_session<
-    S: Send + 'static,
+    S: OnTimer<Session<S>> + Send + 'static,
     F: Future<Output = anyhow::Result<()>> + Send + 'static,
 >(
     mut state: S,
-    on_buf: impl Fn(&[u8], &mut SessionSender<S>) -> anyhow::Result<()> + Send + Sync + 'static,
+    on_buf: impl Fn(&[u8], &mut Sender<S>) -> anyhow::Result<()> + Send + Sync + 'static,
     net: Udp,
-    crypto_session: impl FnOnce(SessionSender<S>) -> F,
+    crypto_session: impl FnOnce(Sender<S>) -> F,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let mut session = Session::new();

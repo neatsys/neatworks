@@ -15,7 +15,10 @@ use augustus::{
     blob,
     crypto::{Crypto, DigestHash, PublicKey, H256},
     event::{
-        erased::{Session, SessionSender},
+        erased::{
+            session::{Buffered, Sender},
+            Session,
+        },
         SendEvent,
     },
     kademlia::{self, Buckets, PeerId, PeerRecord},
@@ -164,7 +167,7 @@ struct AppState {
 #[derive(Debug, Default)]
 struct PeersState {
     sessions: JoinSet<anyhow::Result<()>>,
-    senders: Vec<SessionSender<Peer<[u8; 32]>>>,
+    senders: Vec<Sender<Buffered<Peer<[u8; 32]>>>>,
     // cancel
 }
 
@@ -230,7 +233,7 @@ async fn start_peer(
     crypto: Crypto<PeerId>,
     mut rng: StdRng,
     mut records: Vec<PeerRecord<PublicKey, SocketAddr>>,
-    mut peer_session: Session<Peer<[u8; 32]>>,
+    mut peer_session: Session<Buffered<Peer<[u8; 32]>>>,
     upcall_sender: UnboundedSender<Upcall>,
     config: StartPeersConfig,
 ) -> anyhow::Result<()> {
@@ -267,19 +270,19 @@ async fn start_peer(
     let (fs_sender, fs_receiver) = unbounded_channel();
     let mut tcp_control_session = Session::new();
 
-    let mut kademlia_peer = kademlia::Peer::new(
+    let mut kademlia_peer = Buffered::from(kademlia::Peer::new(
         buckets,
         // MessageNet::new(socket_net.clone()),
         MessageNet::new(Tcp(tcp_control_session.erased_sender())),
         kademlia_control_session.erased_sender(),
         Worker::new_inline(crypto.clone(), Box::new(kademlia_session.erased_sender())),
-    );
-    let mut kademlia_control = Control::new(
+    ));
+    let mut kademlia_control = Buffered::from(Control::new(
         // socket_net.clone(),
         Tcp(tcp_control_session.erased_sender()),
         kademlia_session.erased_sender(),
-    );
-    let mut peer = Peer::new(
+    ));
+    let mut peer = Buffered::from(Peer::new(
         peer_id,
         crypto,
         config.fragment_len,
@@ -291,8 +294,8 @@ async fn start_peer(
         upcall_sender,
         Worker::new_inline((), Box::new(peer_session.erased_sender())),
         fs_sender,
-    );
-    let mut tcp_control = TcpControl::new();
+    ));
+    let mut tcp_control = Buffered::from(TcpControl::new());
 
     // let socket_session = socket_net.recv_session({
     let socket_session = tcp_listen_session(listener, {
