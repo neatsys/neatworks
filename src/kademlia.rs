@@ -68,7 +68,7 @@ impl<K: DigestHash, A> PeerRecord<K, A> {
     }
 }
 
-// this is NOT a proper generalization on `BITS` because the underlying
+// this is NOT a proper generalization over `BITS` because the underlying
 // `PeerRecord` always contains a fixed 256-bit `PeerId`, which cannot match
 // `BITS` easily since it permits incomplete byte
 // currently this is just a monkey patch for model checking on a reduced scale,
@@ -105,10 +105,13 @@ impl<K, A, const BITS: usize> Buckets<K, A, BITS> {
         }
     }
 
+    // let i = index(t)
+    // assert t.bit(i) == 1
+    // assert t.bit(j) == 0, for all j > i
     fn index(&self, target: &Target) -> usize {
-        let rev_log = distance(&self.origin.id, target).leading_zeros() as usize;
-        assert!(rev_log < U256_BITS);
-        U256_BITS - 1 - rev_log
+        let zeros = distance(&self.origin.id, target).leading_zeros() as usize;
+        assert!(zeros < U256_BITS);
+        U256_BITS - 1 - zeros
     }
 
     pub fn insert(&mut self, record: PeerRecord<K, A>) -> anyhow::Result<()> {
@@ -170,18 +173,23 @@ impl<K: Clone, A: Addr, const BITS: usize> Buckets<K, A, BITS> {
 
     fn find_closest(&self, target: &Target, count: NonZeroUsize) -> Vec<PeerRecord<K, A>> {
         let mut records = Vec::new();
-        let index = self.index(target);
+        let index = if *target == self.origin.id {
+            0
+        } else {
+            self.index(target)
+        };
         let origin_distance = distance(&self.origin.id, target);
         // look up order derived from libp2p::kad, personally i don't understand why this works
         // anyway the result is asserted before returning
-        for index in (index..BITS)
+        for index in (0..=index)
+            .rev()
             .filter(|i| origin_distance.bit(*i))
-            .chain((0..BITS).rev().filter(|i| !origin_distance.bit(*i)))
+            .chain((0..BITS).filter(|i| !origin_distance.bit(*i)))
         {
             let mut index_records = self.distances[index].records.clone();
             // ensure origin peer is included if it is indeed close enough
             // can it be more elegant?
-            if index == BITS - 1 {
+            if index == 0 {
                 index_records.push(self.origin.clone())
             }
             index_records.sort_unstable_by_key(|record| distance(&record.id, target));
@@ -193,7 +201,7 @@ impl<K: Clone, A: Addr, const BITS: usize> Buckets<K, A, BITS> {
         }
         assert!(records
             .windows(2)
-            .all(|records| distance(&records[0].id, target) < distance(&records[1].id, target)));
+            .all(|records| distance(&records[0].id, target) <= distance(&records[1].id, target)));
         records
     }
 }
@@ -766,9 +774,32 @@ impl<
 use proptest::prelude::*;
 
 #[cfg(test)]
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(100))]
+fn ordered_closest<const N: usize>(id: PeerId, insert_ids: [PeerId; N], targets: [Target; 100]) {
+    let origin = PeerRecord {
+        id,
+        key: (),
+        addr: (),
+    };
+    let mut buckets = Buckets::<_, _>::new(origin);
+    for insert_id in insert_ids {
+        if insert_id == id {
+            continue;
+        }
+        let record = PeerRecord {
+            id: insert_id,
+            key: (),
+            addr: (),
+        };
+        buckets.insert(record).unwrap()
+    }
+    for target in targets {
+        let records = buckets.find_closest(&target, 20.try_into().unwrap());
+        assert_eq!(records.len(), 20.min(N + 1)) // plus `origin`
+    }
+}
 
+#[cfg(test)]
+proptest! {
     #[test]
     fn distance_inversion(id: PeerId, d: [u8; 32]) {
         let d = U256::from_little_endian(&d);
@@ -776,26 +807,31 @@ proptest! {
     }
 
     #[test]
-    fn ordered_closest(id: PeerId, insert_ids: [PeerId; 1000], targets: [Target; 100]) {
+    fn bucket_index(id: PeerId, target: Target) {
         let origin = PeerRecord {
             id,
             key: (),
             addr: (),
         };
-        let mut buckets = Buckets::<_, _>::new(origin);
-        for insert_id in insert_ids {
-            let record = PeerRecord {
-                id: insert_id,
-                key: (),
-                addr: (),
-            };
-            // not 100% safe, but only crash by chance 1/(2^256)
-            buckets.insert(record).unwrap()
+        let buckets = Buckets::<_, _>::new(origin);
+        if target != id {
+            let d = distance(&id, &target);
+            let index = buckets.index(&target);
+            assert!(d.bit(index));
+            for i in index + 1..U256_BITS {
+                assert!(!d.bit(i))
+            }
         }
-        for target in targets {
-            let records = buckets.find_closest(&target, 20.try_into().unwrap());
-            assert_eq!(records.len(), 20)
-        }
+    }
+
+    #[test]
+    fn ordered_closest_sufficient(id: PeerId, insert_ids: [PeerId; 1000], targets: [Target; 100]) {
+        ordered_closest(id, insert_ids, targets)
+    }
+
+    #[test]
+    fn ordered_closest_insufficient(id: PeerId, insert_ids: [PeerId; 10], targets: [Target; 100]) {
+        ordered_closest(id, insert_ids, targets)
     }
 }
 

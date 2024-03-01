@@ -5,7 +5,7 @@ use std::{
 use augustus::{
     app::Null,
     event::{
-        erased::{self, FixTimer},
+        erased::{self, Blanket},
         Session,
     },
     net::{tokio::Udp, IndexNet},
@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
         let recv_session;
         let state_session = if mode.as_deref() == Some("boxed") {
             println!("Starting replica with boxed events and net");
-            let mut state = FixTimer(Replica::new(Null, Box::new(net)));
+            let mut state = Blanket(Replica::new(Null, Box::new(net)));
             let mut state_session = erased::Session::new();
             let mut state_sender = state_session.erased_sender();
             recv_session = Box::pin(raw_net.recv_session(move |buf| {
@@ -88,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
             ToReplicaMessageNet::new(IndexNet::new(raw_net.clone(), replica_addrs.clone(), None)),
             close_loop_session.erased_sender(),
         );
-        let mut close_loop = FixTimer(CloseLoop::new(
+        let mut close_loop = Blanket(CloseLoop::new(
             state_session.sender(),
             OpLatency::new(Iter(repeat_with(Default::default))),
         ));

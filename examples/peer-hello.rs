@@ -3,7 +3,7 @@ use std::{env::args, net::SocketAddr};
 use augustus::{
     crypto::{Crypto, Verifiable},
     event::{
-        erased::{BufferedWithSessionTimer, Session},
+        erased::{session::Buffered, Session},
         SendEvent as _,
     },
     kademlia::{Buckets, FindPeer, FindPeerOk, Peer, PeerId, PeerRecord},
@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
         let seed_peer = PeerRecord::new(seed_crypto.public_key(), seed_addr.parse()?);
         send_hello = Some(seed_peer.id);
         buckets.insert(seed_peer)?;
-        peer = BufferedWithSessionTimer::from(Peer::new(
+        peer = Buffered::from(Peer::new(
             buckets,
             MessageNet::new(socket_net.clone()),
             control_session.erased_sender(),
@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
         println!("SEED PeerId {}", H256(peer_id));
 
         let buckets = Buckets::new(peer_record);
-        peer = BufferedWithSessionTimer::from(Peer::new(
+        peer = Buffered::from(Peer::new(
             buckets,
             MessageNet::new(socket_net.clone()),
             control_session.erased_sender(),
@@ -125,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
         Ok(())
     });
 
-    let mut control = BufferedWithSessionTimer::from(Control::new(
+    let mut control = Buffered::from(Control::new(
         augustus::net::MessageNet::<_, Message>::new(socket_net.clone()),
         peer_session.erased_sender(),
     ));

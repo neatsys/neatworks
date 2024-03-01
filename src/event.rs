@@ -123,11 +123,26 @@ impl<S: OnEventRichTimer<M>, M> OnTimer for Buffered<S, M> {
 
 pub use session::Session;
 
+// alternative interface that performs type erasure on event types
 pub mod erased {
     use std::{collections::HashMap, time::Duration};
 
     use super::{SendEvent, Timer, TimerId};
 
+    // the universal event type: every `M` that state `impl OnEvent<M>` (and also `Send`) can be
+    // turned into this form
+    // this is weaker than it would be, which can be illustrated as
+    //   FnOnce(&mut S, &mut impl Timer), or for<T: Timer> FnOnce(&mut S, &mut T)
+    // the "real" higher rank trait bound (that works on general types instead of lifetimes) will
+    // take really long to enter the language (if ever happens), and even if we have that in hand we
+    // probably cannot use it here due to object safety, so i instead take this form that fixes the
+    // timer type ahead of the time i.e. on producing instead of on consuming the event
+    // this fact causes a few headaches, like the Buffered below has to fix the `impl Timer` type
+    // as well, duplicated `OnEvent` and `OnTimer` trait to the ones in the super module below, and
+    // the boilerplates dealing with infinite recusive types
+    // it also prevent us to write down obivous facts like
+    //   impl<S> OnEvent<Event<S, ???>> { ... }
+    // which results in e.g. leaking internal details of `Session::run`
     pub type Event<S, T> = Box<dyn FnOnce(&mut S, &mut T) -> anyhow::Result<()> + Send>;
 
     trait OnEvent<M, T> {
@@ -136,6 +151,25 @@ pub mod erased {
 
     pub trait OnTimer<T> {
         fn on_timer(&mut self, timer_id: TimerId, timer: &mut T) -> anyhow::Result<()>;
+    }
+
+    // ideally the following impl should directly apply to S
+    // however that will be conflicted with the following impl on Buffered
+    // TODO try to apply this wrapper when necessary internally, instead of asking user to wrap
+    // the states on their side
+    #[derive(derive_more::Deref, derive_more::DerefMut)]
+    pub struct Blanket<S>(pub S);
+
+    impl<S: super::OnEvent<M>, M, T: Timer> OnEvent<M, T> for Blanket<S> {
+        fn on_event(&mut self, event: M, timer: &mut T) -> anyhow::Result<()> {
+            self.0.on_event(event, timer)
+        }
+    }
+
+    impl<S: super::OnTimer, T: Timer> OnTimer<T> for Blanket<S> {
+        fn on_timer(&mut self, timer_id: TimerId, timer: &mut T) -> anyhow::Result<()> {
+            self.0.on_timer(timer_id, timer)
+        }
     }
 
     pub trait RichTimer<S> {
@@ -149,10 +183,6 @@ pub mod erased {
 
         fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()>;
     }
-
-    // a impl<T: super::Timer<Event<S, T>>, S> Timer<S> for T may be desired
-    // but currently it's not used, the session does another wrapping before working
-    // guess that will be case for every future event scheduler, hope not too ugly boilerplates
 
     pub trait OnEventRichTimer<M> {
         fn on_event(&mut self, event: M, timer: &mut impl RichTimer<Self>) -> anyhow::Result<()>
@@ -179,7 +209,7 @@ pub mod erased {
 
     type Attached<S, T> = HashMap<
         TimerId,
-        // not FnMut() -> Event<S, BufferedTimer<'???, T, S>> because cannot write lifetime out
+        // not FnMut() -> Event<S, BufferedTimer<'???, T, S>> because cannot write out the lifetime
         Box<
             dyn FnMut() -> Box<dyn FnOnce(&mut Buffered<S, T>, &mut T) -> anyhow::Result<()>>
                 + Send
@@ -263,76 +293,80 @@ pub mod erased {
         }
     }
 
-    // Session-specific code onward
-    // a must-have newtype to allow us talk about Self type in super::Session's event position
-    #[derive(derive_more::From)]
-    pub struct SessionEvent<S>(Event<S, super::Session<Self>>);
+    // boilerplates for type check
+    // types like Event<S, T> and Buffered<S, T> mentions the fixed timer type `T`
+    // the `impl Timer` type that fills this `T` e.g. `super::Session<_>` probably mentions the
+    // event type which is `Event<S, T>` itself, causes a inifite recursion
+    //   super::Session<Event<S, super::Session<...
+    // on the `T` position
+    // (the error reporting is really confusing in this case)
+    // so unfortunately they have to be adapted for every `impl Timer` to be usable, each adaption
+    // comes with a distinct newtype that mentions `Self` in T position, and I hardly see any option
+    // to reduce this boilerplate except using macros
 
-    impl<S> std::fmt::Debug for SessionEvent<S> {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("SessionEvent").finish_non_exhaustive()
+    pub use session::Session;
+
+    pub mod session {
+        use crate::event::TimerId;
+
+        use super::{Erasure, OnEvent, OnEventRichTimer, OnTimer};
+
+        #[derive(derive_more::From)]
+        pub struct Event<S>(super::Event<S, crate::event::Session<Self>>);
+
+        impl<S> std::fmt::Debug for Event<S> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("SessionEvent").finish_non_exhaustive()
+            }
         }
-    }
 
-    pub type Session<S> = super::Session<SessionEvent<S>>;
-    // could do a `pub mod seesion { type Sender = ... }` but that's too silly
-    pub type SessionSender<S> = Erasure<super::session::Sender<SessionEvent<S>>, S, Session<S>>;
+        pub type Session<S> = crate::event::Session<Event<S>>;
+        pub type Sender<S> = Erasure<crate::event::session::Sender<Event<S>>, S, Session<S>>;
 
-    impl<S> Session<S> {
-        pub fn erased_sender(&self) -> SessionSender<S> {
-            Erasure(self.sender(), Default::default())
+        impl<S> Session<S> {
+            pub fn erased_sender(&self) -> Sender<S> {
+                Erasure(self.sender(), Default::default())
+            }
         }
-    }
 
-    impl<S: OnTimer<Self> + 'static> Session<S> {
-        pub async fn erased_run(&mut self, state: &mut S) -> anyhow::Result<()> {
-            self.run_internal(
-                state,
-                |state, SessionEvent(event), timer| event(state, timer),
-                OnTimer::on_timer,
-            )
-            .await
+        impl<S: OnTimer<Self> + 'static> Session<S> {
+            pub async fn erased_run(&mut self, state: &mut S) -> anyhow::Result<()> {
+                self.run_internal(
+                    state,
+                    |state, Event(event), timer| event(state, timer),
+                    OnTimer::on_timer,
+                )
+                .await
+            }
         }
-    }
 
-    #[derive(derive_more::Deref, derive_more::DerefMut)]
-    pub struct BufferedWithSessionTimer<S>(Buffered<S, Session<Self>>);
+        #[derive(derive_more::Deref, derive_more::DerefMut)]
+        pub struct Buffered<S>(super::Buffered<S, Session<Self>>);
 
-    impl<S> From<S> for BufferedWithSessionTimer<S> {
-        fn from(value: S) -> Self {
-            Self(Buffered::from(value))
+        impl<S> From<S> for Buffered<S> {
+            fn from(value: S) -> Self {
+                Self(super::Buffered::from(value))
+            }
         }
-    }
 
-    impl<S: OnEventRichTimer<M> + 'static, M> OnEvent<M, Session<Self>>
-        for BufferedWithSessionTimer<S>
-    {
-        fn on_event(&mut self, event: M, timer: &mut Session<Self>) -> anyhow::Result<()> {
-            self.0.on_event(event, timer)
+        impl<S: OnEventRichTimer<M> + 'static, M> OnEvent<M, Session<Buffered<S>>> for Buffered<S> {
+            fn on_event(
+                &mut self,
+                event: M,
+                timer: &mut Session<Buffered<S>>,
+            ) -> anyhow::Result<()> {
+                self.0.on_event(event, timer)
+            }
         }
-    }
 
-    impl<S: 'static> OnTimer<Session<Self>> for BufferedWithSessionTimer<S> {
-        fn on_timer(&mut self, timer_id: TimerId, timer: &mut Session<Self>) -> anyhow::Result<()> {
-            self.0.on_timer(timer_id, timer)
-        }
-    }
-
-    // if brings phantom T and blanket impl for T: Timer, the impl does not get picked up
-    // because the exact T will become a infinite recursive type
-    // the error reporting is really confusing in this case
-    #[derive(derive_more::From, derive_more::Deref, derive_more::DerefMut)]
-    pub struct FixTimer<S>(pub S);
-
-    impl<S: super::OnEvent<M> + 'static, M> OnEvent<M, Session<Self>> for FixTimer<S> {
-        fn on_event(&mut self, event: M, timer: &mut Session<Self>) -> anyhow::Result<()> {
-            self.0.on_event(event, timer)
-        }
-    }
-
-    impl<S: super::OnTimer + 'static> OnTimer<Session<Self>> for FixTimer<S> {
-        fn on_timer(&mut self, timer_id: TimerId, timer: &mut Session<Self>) -> anyhow::Result<()> {
-            self.0.on_timer(timer_id, timer)
+        impl<S: 'static> OnTimer<Session<Buffered<S>>> for Buffered<S> {
+            fn on_timer(
+                &mut self,
+                timer_id: TimerId,
+                timer: &mut Session<Buffered<S>>,
+            ) -> anyhow::Result<()> {
+                self.0.on_timer(timer_id, timer)
+            }
         }
     }
 }
