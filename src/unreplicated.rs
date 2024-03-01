@@ -366,12 +366,11 @@ pub mod check {
         pub clients: Vec<ClientState<W>>,
         pub replica: Replica,
         message_events: BTreeSet<MessageEvent>,
-        timer_id: u32,
     }
 
     pub struct ClientState<W: Workload> {
         pub state: Client,
-        timer_events: Vec<TimerEvent>, // remove the redundent `client_index`?
+        timer: LinearTimer,
         pub close_loop: CloseLoop<W, Transient<Invoke>>,
     }
 
@@ -386,13 +385,12 @@ pub mod check {
                     .iter()
                     .map(|client| ClientState {
                         state: client.state.clone(),
-                        timer_events: client.timer_events.clone(),
+                        timer: client.timer.clone(),
                         close_loop: client.close_loop.clone(),
                     })
                     .collect(),
                 replica: self.replica.clone(),
                 message_events: self.message_events.clone(),
-                timer_id: self.timer_id,
             }
         }
     }
@@ -409,7 +407,7 @@ pub mod check {
         message: Message,
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, derive_more::From)]
     enum Message {
         Request(Request<Addr>),
         Reply(Reply),
@@ -418,7 +416,6 @@ pub mod check {
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub struct TimerEvent {
         timer_id: u32,
-        period: Duration,
         client_index: usize,
     }
 
@@ -431,13 +428,12 @@ pub mod check {
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub struct DryClientState<T> {
+        // inlining `state` here to avoid a `DryClientStateState` struct
         id: u32,
         addr: Addr,
         seq: u32,
         invoke: Option<ClientInvoke>,
-
         close_loop: DryCloseLoop<T>,
-        timer_events: Vec<TimerEvent>,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -457,7 +453,6 @@ pub mod check {
                     seq: client.state.seq,
                     invoke: client.state.invoke,
                     close_loop: client.close_loop.into(),
-                    timer_events: client.timer_events,
                 })
                 .collect();
             let replica = DryReplica {
@@ -488,21 +483,11 @@ pub mod check {
         }
     }
 
-    impl SendMessage<Addr, Request<Addr>> for Transient<MessageEvent> {
-        fn send(&mut self, dest: Addr, message: Request<Addr>) -> anyhow::Result<()> {
+    impl<M: Into<Message>> SendMessage<Addr, M> for Transient<MessageEvent> {
+        fn send(&mut self, dest: Addr, message: M) -> anyhow::Result<()> {
             self.0.push(MessageEvent {
                 dest,
-                message: Message::Request(message),
-            });
-            Ok(())
-        }
-    }
-
-    impl SendMessage<Addr, Reply> for Transient<MessageEvent> {
-        fn send(&mut self, dest: Addr, message: Reply) -> anyhow::Result<()> {
-            self.0.push(MessageEvent {
-                dest,
-                message: Message::Reply(message),
+                message: message.into(),
             });
             Ok(())
         }
@@ -520,7 +505,6 @@ pub mod check {
                 replica: Replica::new(KVStore::new(), Transient::default()),
                 clients: Default::default(),
                 message_events: Default::default(),
-                timer_id: 0,
             }
         }
 
@@ -533,7 +517,7 @@ pub mod check {
                     IndexNet::new(Transient::default(), vec![Addr::Replica], None),
                     Transient::default(),
                 ),
-                timer_events: Default::default(),
+                timer: LinearTimer::default(),
                 close_loop: CloseLoop::new(Transient::<Invoke>::default(), workload),
             });
             Ok(())
@@ -553,16 +537,20 @@ pub mod check {
                 .cloned()
                 .map(Event::Message)
                 .collect::<Vec<_>>();
-            for client in &self.clients {
+            for (index, client) in self.clients.iter().enumerate() {
                 let mut prev_period = None;
-                for event in &client.timer_events {
+                // TODO extract into a method on `LinearTimer`
+                for &(id, period) in &client.timer.events {
                     if let Some(prev_period) = prev_period {
-                        if event.period >= prev_period {
+                        if period >= prev_period {
                             break;
                         }
                     }
-                    events.push(Event::Timer(event.clone()));
-                    prev_period = Some(event.period)
+                    events.push(Event::Timer(TimerEvent {
+                        timer_id: id,
+                        client_index: index,
+                    }));
+                    prev_period = Some(period)
                 }
             }
             events
@@ -581,32 +569,26 @@ pub mod check {
                     message: Message::Reply(message),
                 }) => {
                     let client = &mut self.clients[index];
-                    let mut timer = ClientTimer {
-                        timer_events: &mut client.timer_events,
-                        timer_id: &mut self.timer_id,
-                        client_index: index,
-                    };
-                    client.state.on_event(Recv(message), &mut timer)?
+                    client.state.on_event(Recv(message), &mut client.timer)?
                 }
                 Event::Timer(TimerEvent {
                     timer_id,
-                    period: _,
                     client_index: index,
                 }) => {
                     let client = &mut self.clients[index];
+                    // TODO extract into a method on `LinearTimer`
                     let i = client
-                        .timer_events
+                        .timer
+                        .events
                         .iter()
-                        .position(|event| event.timer_id == timer_id)
+                        .position(|(id, _)| *id == timer_id)
                         .ok_or(anyhow::anyhow!("timer not found"))?;
-                    let event = client.timer_events.remove(i);
-                    client.timer_events.push(event);
-                    let mut timer = ClientTimer {
-                        timer_events: &mut client.timer_events,
-                        timer_id: &mut self.timer_id,
-                        client_index: index,
-                    };
-                    client.state.on_timer(TimerId(timer_id), &mut timer)?
+                    let event = client.timer.events.remove(i);
+                    client.timer.events.push(event);
+
+                    client
+                        .state
+                        .on_timer(TimerId(timer_id), &mut client.timer)?
                 }
                 _ => anyhow::bail!("unexpected event"),
             }
@@ -624,18 +606,13 @@ pub mod check {
 
         fn flush(&mut self) -> anyhow::Result<()> {
             self.message_events.extend(self.replica.net.0.drain(..));
-            for (index, client) in self.clients.iter_mut().enumerate() {
+            for client in &mut self.clients {
                 self.message_events.extend(client.state.net.0.drain(..));
                 let mut rerun = true;
                 while replace(&mut rerun, false) {
                     for invoke in client.close_loop.sender.0.drain(..) {
                         rerun = true;
-                        let mut timer = ClientTimer {
-                            timer_events: &mut client.timer_events,
-                            timer_id: &mut self.timer_id,
-                            client_index: index,
-                        };
-                        client.state.on_event(invoke, &mut timer)?
+                        client.state.on_event(invoke, &mut client.timer)?
                     }
                     for upcall in client.state.upcall.0.drain(..) {
                         rerun = true;
@@ -647,31 +624,27 @@ pub mod check {
         }
     }
 
-    struct ClientTimer<'a> {
-        timer_events: &'a mut Vec<TimerEvent>, // generalize the data structure?
-        timer_id: &'a mut u32,
-        client_index: usize,
+    #[derive(Clone, Default)]
+    struct LinearTimer {
+        events: Vec<(u32, Duration)>,
+        timer_id: u32,
     }
 
-    impl crate::event::Timer for ClientTimer<'_> {
+    impl crate::event::Timer for LinearTimer {
         fn set(&mut self, period: Duration) -> anyhow::Result<TimerId> {
-            *self.timer_id += 1;
-            let timer_id = *self.timer_id;
-            self.timer_events.push(TimerEvent {
-                timer_id,
-                period,
-                client_index: self.client_index,
-            });
+            self.timer_id += 1;
+            let timer_id = self.timer_id;
+            self.events.push((timer_id, period));
             Ok(TimerId(timer_id))
         }
 
         fn unset(&mut self, TimerId(timer_id): TimerId) -> anyhow::Result<()> {
             let i = self
-                .timer_events
+                .events
                 .iter()
-                .position(|event| event.timer_id == timer_id)
+                .position(|(id, _)| *id == timer_id)
                 .ok_or(anyhow::anyhow!("timer not found"))?;
-            self.timer_events.remove(i);
+            self.events.remove(i);
             Ok(())
         }
     }
