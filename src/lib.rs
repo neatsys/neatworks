@@ -22,6 +22,15 @@ pub mod workload;
 // (i.e. emitter), `A`/`B` for addresses
 // (yeah, i also just realized the unfortunate reusing of `M`/`N`)
 //
+// out of personal preference, code working in asynchronous context e.g.
+// `async fn` are named "session". those code are mostly backed by Tokio if it
+// is not reactor-agnostic. i will probably never introduce a second
+// asynchronous reactor library, so "session" = asynchronous = Tokio in this
+// codebase
+//
+// by the way, the synchronous counterpart is under modules named "blocking".
+// no particular reason, just a "std" module causes unnecessary problems
+//
 // although does not look like so, but the codebase does not have a tendency of
 // using generic/trait ploymophism everywhere. enum polymophism is used as long
 // as the case is simple enough to be supported by it, e.g. crypto, worker, etc.

@@ -243,6 +243,7 @@ pub mod erased {
 // extracted into a reusable module that generally supports model checking of
 // various protocols in latter days, but the code that matters for this
 // discussion will probably stay here
+// (add: the extraction has been done. everything still here will remain here)
 //
 // although trying out searching in state space is more as a jourey out of
 // curious, the `impl State` that aggreates node states and network state and
@@ -260,39 +261,40 @@ pub mod erased {
 //
 // the `impl OnEvent` owns `impl SendEvent` in this codebase. it's a tradeoff
 // on interface and code organization that so far seems good in other part of
-// the current codebase. it does expose some difficulties for model checking
+// the current codebase. it does expose some retrictions for model checking
 // though
-//
-// the senders are probably not `Eq + Hash` which is required by BFS. so i
-// introduce the concept of "dry state" that is `Eq + Hash` and fulfills BFS's
-// demand: two states with identical dry state will have identical succesor
-// state space. interestingly DSLabs also has an "equal and hash wrapper" thing
-// for BFS and similarly "dehydrates" timers stuff from the state. i don't know
-// why that is necessary for DSLabs though
 //
 // there are almost only two choices for implementing simulation sender: either
 // channel sender, or shared mutable data structure which in Rust must be
-// guarded by `Mutex` or similar. Both SpecPaxos and DSLabs go with the second
-// choice (with unsafe bare metal data structure that carefully used). currently
-// i choose the first one but that doesn't matter. both of them look ugly.
-// i don't like the idea that stepping a state must always come with creating
-// (potentially a bunch of) mutexes or channels. as far as i know the common
-// choice of model checking is to send the events by returning them from event
-// handlers (as the "side effect" of event handling), instead of by invoking on
-// some owned internal objects. that approach comes with its own performance and
-// engineering overhead and i like it even less
+// guarded by `Mutex` or similar. both SpecPaxos and DSLabs go with the second
+// choice (with unsafe bare metal data structure that carefully used).
 //
-// another concern is about cloning. the cloning semantic on `impl OnEvent`s
-// is already funny. for example if it owns channel-based `impl SendEvent`, then
-// both the original object and the cloned one will send event to the same
-// receiver, which may or may not be expected. even if they impl Clone in this
-// way, `State` cannot be cloned by recursively cloning underlying
-// `impl OnEvent`s, because it must not share channels/shared data structure
-// with the original `State`. this is why the `State` trait does not subtyping
-// `Clone`, but has its own `duplicate` defined, hopefulling avoid some
-// pitfalls. the `impl State`s like the one below probably cannot derive
-// `Clone`, and even if it can, model checking probably should not make use of
-// its `Clone::clone`
+// as far as i know the common choice of model checking is to send the events by
+// returning them from event handlers (as the "side effect" of event handling),
+// instead of by invoking on some owned internal objects. that approach comes
+// with its own performance and engineering overhead so i did not take it
+// neither
+
+// i instead take a (rather clever) alternative approach based on the second
+// choice. the `impl SendEvent` is simple buffer that owns events. while
+// `impl OnEvent` owns `impl SendEvent`, `impl State` owns `impl OnEvent`, so
+// when necessary it just inspect all the way down to the buffer and take the
+// events out. so far the most significant downside is that the `impl SendEvent`
+// type must be in clear text i.e. cannot be `dyn SendEvent`. so more verbose
+// type parameters is the cost of model checking. anyway there's alternative
+// approach to add a optional method on `SendEvent` trait which takes all
+// buffered events out and dedicate to model checking usage
+//
+// after several reiterations, the whole `impl State` is almost `Eq + Hash`.
+// but there's still `impl Workload` out there for now. besides, it's a good
+// timing to trim the redundent states when turns it into `impl Eq + Hash`, to
+// reduce the `Eq` and `Hash` overhead (at the cost of `Into` overhead). so i
+// introduce the concept of "dry state" that is `Eq + Hash` and fulfills BFS's
+// demand: two states with identical dry state will have identical succesor
+// state space. a `impl State` should implement "dyhydration" process i.e.
+// `impl Into` the dry state. interestingly DSLabs also has an "equal and hash
+// wrapper" thing for BFS and similarly "dehydrates" timers stuff from the
+// state. i don't know why that is necessary for DSLabs though
 //
 // the codebase intentially be flexible on event types. indeed, it does not
 // perform model checking for networking apps, but perform model checking for
@@ -312,40 +314,41 @@ pub mod erased {
 // actually, it's even worse than the artifact boilerplate. here we must unify
 // every event type down to single representation, in order to have one "model"
 // that has full control of what's happening first and what's happening later.
-// protocols usually have no interest in helping on this, especially the ones
-// work with type erased style event. as the result, we have to polyfill a lot
-// of event hierarchy, and adaptions into/out of it. we must have the "into"
-// adapter on `impl SendEvent` and `impl Timer` side (and the latter one is
-// awfully based on `dyn Any`), and have the "out of" adapter on `State::step`
-// (and `State::flush` below, which is tentatively decided as the conventional
-// method for consuming internal events without consulting model checker). what
-// makes it a problem is that all these boilerplates have to be protocol
-// specific. there's hardly any code to be reused across protocols
+// (type erased interfaces, while perform this unification automatically, also
+// turn every event into a universal blackbox that is highly undesirable for
+// testing.)
 //
-// that's it. the `impl Into<DryState>` boilerplate. the `State::duplicate`
-// boilerplate. the explicit event hierarchy, with the boilerplate to unify/
-// dispatch events. all these probably have interior complexity and can only be
-// abstracted at least at derivable macros level, that is, we cannot write a
-// bunch of trait and let compiler to generate them automatically. i guess this
-// is the cost we have to pay to perform model checking
+// as the result, we have to polyfill a lot of event hierarchy, and adaptions
+// into/out of it. we must have the "into" adapter on `impl SendEvent` and
+// `impl Timer` side, and have the "out of" adapter on `State::step` (and
+// `State::flush` below, which is tentatively decided as the conventional method
+// for consuming internal events without consulting model checker). what makes
+// it a problem is that all these boilerplates have to be protocol specific.
+// there's hardly any code to be reused across protocols
+//
+// that's it. the `impl Into<DryState>` boilerplate. the explicit event
+// hierarchy, with the boilerplate to unify/dispatch events. all these probably
+// have interior complexity and can only be abstracted at least at derivable
+// macros level, that is, we cannot write a bunch of trait and let compiler to
+// generate them automatically. i guess this is the cost we have to pay to
+// perform model checking
 // * in a static-typed language
 // * which happens to lack runtime reflection
-// * and we do not have a strict model of how protocols we are/will be writing
-//   looks in mind
+// * and we do not have a clear expectation on how protocols we are/will be
+//   writing looks in mind
 // fortunately the performance speedup kind of pays off. however, when things
 // come to unit testing, a less-effort approach is very desirable
 pub mod check {
     use std::{
         collections::{BTreeMap, BTreeSet},
         mem::replace,
-        time::Duration,
     };
 
     use serde::{Deserialize, Serialize};
 
     use crate::{
         app::KVStore,
-        event::{OnEvent, OnTimer as _, SendEvent, TimerId, UnreachableTimer},
+        event::{LinearTimer, OnEvent, OnTimer as _, TimerId, Transient, UnreachableTimer},
         message::Request,
         net::{events::Recv, IndexNet, SendMessage},
         workload::{check::DryCloseLoop, CloseLoop, Invoke, InvokeOk, Workload},
@@ -415,7 +418,7 @@ pub mod check {
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub struct TimerEvent {
-        timer_id: u32,
+        timer_id: TimerId,
         client_index: usize,
     }
 
@@ -467,25 +470,9 @@ pub mod check {
         }
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-    pub struct Transient<M>(Vec<M>);
-
-    impl<M> Default for Transient<M> {
-        fn default() -> Self {
-            Self(Default::default())
-        }
-    }
-
-    impl<N: Into<M>, M> SendEvent<N> for Transient<M> {
-        fn send(&mut self, event: N) -> anyhow::Result<()> {
-            self.0.push(event.into());
-            Ok(())
-        }
-    }
-
     impl<M: Into<Message>> SendMessage<Addr, M> for Transient<MessageEvent> {
         fn send(&mut self, dest: Addr, message: M) -> anyhow::Result<()> {
-            self.0.push(MessageEvent {
+            self.push(MessageEvent {
                 dest,
                 message: message.into(),
             });
@@ -538,20 +525,12 @@ pub mod check {
                 .map(Event::Message)
                 .collect::<Vec<_>>();
             for (index, client) in self.clients.iter().enumerate() {
-                let mut prev_period = None;
-                // TODO extract into a method on `LinearTimer`
-                for &(id, period) in &client.timer.events {
-                    if let Some(prev_period) = prev_period {
-                        if period >= prev_period {
-                            break;
-                        }
-                    }
-                    events.push(Event::Timer(TimerEvent {
-                        timer_id: id,
+                events.extend(client.timer.events().into_iter().map(|timer_id| {
+                    Event::Timer(TimerEvent {
+                        timer_id,
                         client_index: index,
-                    }));
-                    prev_period = Some(period)
-                }
+                    })
+                }));
             }
             events
         }
@@ -572,23 +551,12 @@ pub mod check {
                     client.state.on_event(Recv(message), &mut client.timer)?
                 }
                 Event::Timer(TimerEvent {
-                    timer_id,
+                    timer_id: TimerId(id),
                     client_index: index,
                 }) => {
                     let client = &mut self.clients[index];
-                    // TODO extract into a method on `LinearTimer`
-                    let i = client
-                        .timer
-                        .events
-                        .iter()
-                        .position(|(id, _)| *id == timer_id)
-                        .ok_or(anyhow::anyhow!("timer not found"))?;
-                    let event = client.timer.events.remove(i);
-                    client.timer.events.push(event);
-
-                    client
-                        .state
-                        .on_timer(TimerId(timer_id), &mut client.timer)?
+                    client.timer.step_timer(TimerId(id))?;
+                    client.state.on_timer(TimerId(id), &mut client.timer)?
                 }
                 _ => anyhow::bail!("unexpected event"),
             }
@@ -605,46 +573,21 @@ pub mod check {
         }
 
         fn flush(&mut self) -> anyhow::Result<()> {
-            self.message_events.extend(self.replica.net.0.drain(..));
+            self.message_events.extend(self.replica.net.drain(..));
             for client in &mut self.clients {
-                self.message_events.extend(client.state.net.0.drain(..));
+                self.message_events.extend(client.state.net.drain(..));
                 let mut rerun = true;
                 while replace(&mut rerun, false) {
-                    for invoke in client.close_loop.sender.0.drain(..) {
+                    for invoke in client.close_loop.sender.drain(..) {
                         rerun = true;
                         client.state.on_event(invoke, &mut client.timer)?
                     }
-                    for upcall in client.state.upcall.0.drain(..) {
+                    for upcall in client.state.upcall.drain(..) {
                         rerun = true;
                         client.close_loop.on_event(upcall, &mut UnreachableTimer)?
                     }
                 }
             }
-            Ok(())
-        }
-    }
-
-    #[derive(Clone, Default)]
-    struct LinearTimer {
-        events: Vec<(u32, Duration)>,
-        timer_id: u32,
-    }
-
-    impl crate::event::Timer for LinearTimer {
-        fn set(&mut self, period: Duration) -> anyhow::Result<TimerId> {
-            self.timer_id += 1;
-            let timer_id = self.timer_id;
-            self.events.push((timer_id, period));
-            Ok(TimerId(timer_id))
-        }
-
-        fn unset(&mut self, TimerId(timer_id): TimerId) -> anyhow::Result<()> {
-            let i = self
-                .events
-                .iter()
-                .position(|(id, _)| *id == timer_id)
-                .ok_or(anyhow::anyhow!("timer not found"))?;
-            self.events.remove(i);
             Ok(())
         }
     }

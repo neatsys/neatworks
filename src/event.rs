@@ -40,6 +40,58 @@ impl Timer for UnreachableTimer {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct LinearTimer {
+    events: Vec<(u32, Duration)>,
+    timer_id: u32,
+}
+
+impl LinearTimer {
+    pub fn events(&self) -> Vec<TimerId> {
+        let mut events = Vec::new();
+        let mut prev_period = None;
+        for &(id, period) in &self.events {
+            if let Some(prev_period) = prev_period {
+                if period >= prev_period {
+                    break;
+                }
+            }
+            events.push(TimerId(id));
+            prev_period = Some(period)
+        }
+        events
+    }
+
+    fn unset(&mut self, TimerId(id): TimerId) -> anyhow::Result<(u32, Duration)> {
+        let i = self
+            .events
+            .iter()
+            .position(|(timer_id, _)| *timer_id == id)
+            .ok_or(anyhow::anyhow!("timer not found"))?;
+        Ok(self.events.remove(i))
+    }
+
+    pub fn step_timer(&mut self, timer_id: TimerId) -> anyhow::Result<()> {
+        let event = self.unset(timer_id)?;
+        self.events.push(event);
+        Ok(())
+    }
+}
+
+impl Timer for LinearTimer {
+    fn set(&mut self, period: Duration) -> anyhow::Result<TimerId> {
+        self.timer_id += 1;
+        let timer_id = self.timer_id;
+        self.events.push((timer_id, period));
+        Ok(TimerId(timer_id))
+    }
+
+    fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()> {
+        LinearTimer::unset(self, timer_id)?;
+        Ok(())
+    }
+}
+
 pub trait OnEvent<M> {
     fn on_event(&mut self, event: M, timer: &mut impl Timer) -> anyhow::Result<()>;
 }
@@ -52,6 +104,22 @@ pub struct Void; // for testing
 
 impl<M> SendEvent<M> for Void {
     fn send(&mut self, _: M) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, derive_more::Deref, derive_more::DerefMut)]
+pub struct Transient<M>(Vec<M>);
+
+impl<M> Default for Transient<M> {
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
+
+impl<N: Into<M>, M> SendEvent<N> for Transient<M> {
+    fn send(&mut self, event: N) -> anyhow::Result<()> {
+        self.0.push(event.into());
         Ok(())
     }
 }
