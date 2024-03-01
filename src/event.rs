@@ -140,8 +140,7 @@ pub mod erased {
     // probably cannot use it here due to object safety, so i instead take this form that fixes the
     // timer type ahead of the time i.e. on producing instead of on consuming the event
     // this fact causes a few headaches, like the Buffered below has to fix the `impl Timer` type
-    // as well, duplicated `OnEvent` and `OnTimer` trait to the ones in the super module below, and
-    // the boilerplates dealing with infinite recusive types
+    // as well, and duplicated `OnEvent` and `OnTimer` traits to the ones in the super module below
     // it also prevent us to write down obivous facts like
     //   impl<S> OnEvent<Event<S, ???>> { ... }
     // which results in e.g. leaking internal details of `Session::run`
@@ -303,35 +302,20 @@ pub mod erased {
         }
     }
 
-    // boilerplates for type check
-    // types like Event<S, T> and Buffered<S, T> mentions the fixed timer type `T`
-    // the `impl Timer` type that fills this `T` e.g. `super::Session<_>` probably mentions the
-    // event type which is `Event<S, T>` itself, causes a inifite recursion
-    //   super::Session<Event<S, super::Session<...
-    // on the `T` position
-    // (the error reporting is really confusing in this case)
-    // so unfortunately they have to be adapted for every `impl Timer` to be usable, each adaption
-    // comes with a distinct newtype that mentions `Self` in T position, and I hardly see any option
-    // to reduce this boilerplate except using macros
-
     pub use session::Session;
 
     pub mod session {
-        use crate::event::TimerId;
+        use crate::event::session::SessionTimer;
 
-        use super::{Erasure, OnEvent, OnEventRichTimer, OnTimer};
+        use super::{Erasure, OnTimer};
 
-        #[derive(derive_more::From)]
-        pub struct Event<S>(super::Event<S, crate::event::Session<Self>>);
+        // some historical snippet when `Timer` was still implemented by `Session<_>` itself
+        // #[derive(derive_more::From)]
+        // pub struct Event<S>(super::Event<S, crate::event::Session<Self>>);
 
-        impl<S> std::fmt::Debug for Event<S> {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.debug_struct("SessionEvent").finish_non_exhaustive()
-            }
-        }
-
+        pub type Event<S> = super::Event<S, SessionTimer>;
         pub type Session<S> = crate::event::Session<Event<S>>;
-        pub type Sender<S> = Erasure<crate::event::session::Sender<Event<S>>, S, Session<S>>;
+        pub type Sender<S> = Erasure<crate::event::session::Sender<Event<S>>, S, SessionTimer>;
 
         impl<S> Session<S> {
             pub fn erased_sender(&self) -> Sender<S> {
@@ -339,45 +323,18 @@ pub mod erased {
             }
         }
 
-        impl<S: OnTimer<Self> + 'static> Session<S> {
+        impl<S: OnTimer<SessionTimer> + 'static> Session<S> {
             pub async fn erased_run(&mut self, state: &mut S) -> anyhow::Result<()> {
                 self.run_internal(
                     state,
-                    |state, Event(event), timer| event(state, timer),
+                    |state, event, timer| event(state, timer),
                     OnTimer::on_timer,
                 )
                 .await
             }
         }
 
-        #[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
-        pub struct Buffered<S>(super::Buffered<S, Session<Self>>);
-
-        impl<S> From<S> for Buffered<S> {
-            fn from(value: S) -> Self {
-                Self(super::Buffered::from(value))
-            }
-        }
-
-        impl<S: OnEventRichTimer<M> + 'static, M> OnEvent<M, Session<Buffered<S>>> for Buffered<S> {
-            fn on_event(
-                &mut self,
-                event: M,
-                timer: &mut Session<Buffered<S>>,
-            ) -> anyhow::Result<()> {
-                self.0.on_event(event, timer)
-            }
-        }
-
-        impl<S: 'static> OnTimer<Session<Buffered<S>>> for Buffered<S> {
-            fn on_timer(
-                &mut self,
-                timer_id: TimerId,
-                timer: &mut Session<Buffered<S>>,
-            ) -> anyhow::Result<()> {
-                self.0.on_timer(timer_id, timer)
-            }
-        }
+        pub type Buffered<S> = super::Buffered<S, SessionTimer>;
     }
 
     pub mod blocking {

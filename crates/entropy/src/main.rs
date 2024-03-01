@@ -150,7 +150,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct AppState {
     peers: Arc<Mutex<PeersState>>,
     // runtime: Arc<Runtime>,
@@ -164,7 +164,7 @@ struct AppState {
     benchmark_gets: Arc<Mutex<HashMap<u32, JoinHandle<anyhow::Result<GetResult>>>>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct PeersState {
     sessions: JoinSet<anyhow::Result<()>>,
     senders: Vec<Sender<Buffered<Peer<[u8; 32]>>>>,

@@ -35,37 +35,61 @@ impl<M: Into<N>, N> SendEvent<M> for Sender<N> {
     }
 }
 
+#[derive(Debug)]
 pub struct Session<M> {
     sender: UnboundedSender<Event<M>>,
     receiver: UnboundedReceiver<Event<M>>,
-    timer_id: u32,
-    timer_sessions: JoinSet<anyhow::Result<()>>,
-    timer_handles: HashMap<u32, AbortHandle>,
+    timer: SessionTimer,
 }
 
-impl<M> Debug for Session<M> {
+trait SendTimerId {
+    fn send(&mut self, timer_id: u32) -> anyhow::Result<()>;
+
+    fn boxed_clone(&self) -> Box<dyn SendTimerId + Send + Sync>;
+}
+
+impl<M: Send + 'static> SendTimerId for UnboundedSender<Event<M>> {
+    fn send(&mut self, timer_id: u32) -> anyhow::Result<()> {
+        SendEvent::send(self, Event::Timer(timer_id))
+    }
+
+    fn boxed_clone(&self) -> Box<dyn SendTimerId + Send + Sync> {
+        Box::new(self.clone())
+    }
+}
+
+pub struct SessionTimer {
+    sender: Box<dyn SendTimerId + Send + Sync>,
+    id: u32,
+    sessions: JoinSet<anyhow::Result<()>>,
+    handles: HashMap<u32, AbortHandle>,
+}
+
+impl Debug for SessionTimer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Session")
-            .field("timer_id", &self.timer_id)
-            .field("timers", &self.timer_handles)
+        f.debug_struct("SessionTimer")
+            .field("id", &self.id)
             .finish_non_exhaustive()
     }
 }
 
-impl<M> Session<M> {
+impl<M: Send + 'static> Session<M> {
     pub fn new() -> Self {
         let (sender, receiver) = unbounded_channel();
         Self {
-            sender,
+            sender: sender.clone(),
             receiver,
-            timer_id: 0,
-            timer_sessions: JoinSet::new(),
-            timer_handles: Default::default(),
+            timer: SessionTimer {
+                sender: Box::new(sender),
+                id: 0,
+                sessions: Default::default(),
+                handles: Default::default(),
+            },
         }
     }
 }
 
-impl<M> Default for Session<M> {
+impl<M: Send + 'static> Default for Session<M> {
     fn default() -> Self {
         Self::new()
     }
@@ -87,8 +111,8 @@ impl<M> Session<M> {
     pub async fn run_internal<S>(
         &mut self,
         state: &mut S,
-        mut on_event: impl FnMut(&mut S, M, &mut Self) -> anyhow::Result<()>,
-        mut on_timer: impl FnMut(&mut S, TimerId, &mut Self) -> anyhow::Result<()>,
+        mut on_event: impl FnMut(&mut S, M, &mut SessionTimer) -> anyhow::Result<()>,
+        mut on_timer: impl FnMut(&mut S, TimerId, &mut SessionTimer) -> anyhow::Result<()>,
     ) -> anyhow::Result<()>
     where
         M: Send + 'static,
@@ -99,7 +123,7 @@ impl<M> Session<M> {
                 Recv(Option<Event<M>>),
             }
             let event = match tokio::select! {
-                Some(result) = self.timer_sessions.join_next() => Select::JoinNext(result),
+                Some(result) = self.timer.sessions.join_next() => Select::JoinNext(result),
                 recv = self.receiver.recv() => Select::Recv(recv)
             } {
                 Select::JoinNext(Err(err)) if err.is_cancelled() => continue,
@@ -111,7 +135,7 @@ impl<M> Session<M> {
             };
             match event {
                 Event::Timer(timer_id) => {
-                    if !self.timer_handles.contains_key(&timer_id) {
+                    if !self.timer.handles.contains_key(&timer_id) {
                         // unset/timeout contention, force to skip timer as long as it has been
                         // unset
                         // this could happen because of stalled timers in event waiting list
@@ -133,33 +157,33 @@ impl<M> Session<M> {
                         // (so wish i have direct access to the timer wheel...)
                         continue;
                     }
-                    on_timer(state, TimerId(timer_id), self)?
+                    on_timer(state, TimerId(timer_id), &mut self.timer)?
                 }
-                Event::Other(event) => on_event(state, event, self)?,
+                Event::Other(event) => on_event(state, event, &mut self.timer)?,
             }
         }
     }
 }
 
-impl<M: Send + 'static> Timer for Session<M> {
+impl Timer for SessionTimer {
     fn set(&mut self, period: Duration) -> anyhow::Result<TimerId> {
-        self.timer_id += 1;
-        let timer_id = self.timer_id;
-        let mut sender = self.sender.clone();
-        let handle = self.timer_sessions.spawn(async move {
+        self.id += 1;
+        let timer_id = self.id;
+        let mut sender = self.sender.boxed_clone();
+        let handle = self.sessions.spawn(async move {
             sleep(period).await;
             let mut interval = interval(period);
             loop {
                 interval.tick().await;
-                SendEvent::send(&mut sender, Event::Timer(timer_id))?
+                sender.send(timer_id)?
             }
         });
-        self.timer_handles.insert(timer_id, handle);
+        self.handles.insert(timer_id, handle);
         Ok(TimerId(timer_id))
     }
 
     fn unset(&mut self, TimerId(timer_id): TimerId) -> anyhow::Result<()> {
-        self.timer_handles
+        self.handles
             .remove(&timer_id)
             .ok_or(anyhow::anyhow!("timer not exists"))?
             .abort();
