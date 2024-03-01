@@ -1,3 +1,4 @@
+pub mod blocking;
 pub mod ordered;
 pub mod session;
 
@@ -377,5 +378,35 @@ pub mod erased {
                 self.0.on_timer(timer_id, timer)
             }
         }
+    }
+
+    pub mod blocking {
+        use std::sync::mpsc::Receiver;
+
+        use crate::event::{blocking::run_internal, ordered::Timer};
+
+        use super::{Erasure, OnTimer};
+
+        pub type Event<S> = super::Event<S, Timer>;
+        pub type Sender<S> = Erasure<crate::event::blocking::Sender<Event<S>>, S, Timer>;
+
+        pub fn channel<S>() -> (Sender<S>, Receiver<Event<S>>) {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            (Erasure::from(sender), receiver)
+        }
+
+        pub fn run<S: OnTimer<Timer>>(
+            receiver: Receiver<Event<S>>,
+            state: &mut S,
+        ) -> anyhow::Result<()> {
+            run_internal(
+                receiver,
+                state,
+                |state, event, timer| event(state, timer),
+                OnTimer::on_timer,
+            )
+        }
+
+        pub type Buffered<S> = super::Buffered<S, Timer>;
     }
 }

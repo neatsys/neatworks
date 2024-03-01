@@ -55,7 +55,7 @@ impl Timer {
         self.deadlines.first().map(|(deadline, _)| *deadline)
     }
 
-    pub fn on_deadline(&mut self) -> anyhow::Result<TimerId> {
+    pub fn advance(&mut self) -> anyhow::Result<TimerId> {
         let (_, id) = self
             .deadlines
             .pop_first()

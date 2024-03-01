@@ -1,8 +1,8 @@
+pub mod blocking;
 pub mod kademlia;
 pub mod session;
-pub mod std;
 
-use ::std::{fmt::Debug, hash::Hash, marker::PhantomData};
+use std::{fmt::Debug, hash::Hash, marker::PhantomData};
 
 use bincode::Options as _;
 use bytes::Bytes;

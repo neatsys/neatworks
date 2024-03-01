@@ -9,27 +9,19 @@ use tokio::{
 use crate::event::{OnEvent, OnTimer, SendEvent, Timer, TimerId};
 
 #[derive(Debug)]
-enum SessionEvent<M> {
+enum Event<M> {
     Timer(u32),
     Other(M),
 }
 
 #[derive(Debug)]
-pub struct Sender<M>(UnboundedSender<SessionEvent<M>>);
+pub struct Sender<M>(UnboundedSender<Event<M>>);
 
 impl<M> Clone for Sender<M> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
-
-impl<M> PartialEq for Sender<M> {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.same_channel(&other.0)
-    }
-}
-
-impl<M> Eq for Sender<M> {}
 
 impl<N: Into<M>, M> SendEvent<N> for UnboundedSender<M> {
     fn send(&mut self, event: N) -> anyhow::Result<()> {
@@ -39,13 +31,13 @@ impl<N: Into<M>, M> SendEvent<N> for UnboundedSender<M> {
 
 impl<M: Into<N>, N> SendEvent<M> for Sender<N> {
     fn send(&mut self, event: M) -> anyhow::Result<()> {
-        SendEvent::send(&mut self.0, SessionEvent::Other(event.into()))
+        SendEvent::send(&mut self.0, Event::Other(event.into()))
     }
 }
 
 pub struct Session<M> {
-    sender: UnboundedSender<SessionEvent<M>>,
-    receiver: UnboundedReceiver<SessionEvent<M>>,
+    sender: UnboundedSender<Event<M>>,
+    receiver: UnboundedReceiver<Event<M>>,
     timer_id: u32,
     timer_sessions: JoinSet<anyhow::Result<()>>,
     timer_handles: HashMap<u32, AbortHandle>,
@@ -104,7 +96,7 @@ impl<M> Session<M> {
         loop {
             enum Select<M> {
                 JoinNext(Result<anyhow::Result<()>, JoinError>),
-                Recv(Option<SessionEvent<M>>),
+                Recv(Option<Event<M>>),
             }
             let event = match tokio::select! {
                 Some(result) = self.timer_sessions.join_next() => Select::JoinNext(result),
@@ -118,7 +110,7 @@ impl<M> Session<M> {
                 Select::Recv(event) => event.ok_or(anyhow::anyhow!("channel closed"))?,
             };
             match event {
-                SessionEvent::Timer(timer_id) => {
+                Event::Timer(timer_id) => {
                     if !self.timer_handles.contains_key(&timer_id) {
                         // unset/timeout contention, force to skip timer as long as it has been
                         // unset
@@ -143,7 +135,7 @@ impl<M> Session<M> {
                     }
                     on_timer(state, TimerId(timer_id), self)?
                 }
-                SessionEvent::Other(event) => on_event(state, event, self)?,
+                Event::Other(event) => on_event(state, event, self)?,
             }
         }
     }
@@ -159,7 +151,7 @@ impl<M: Send + 'static> Timer for Session<M> {
             let mut interval = interval(period);
             loop {
                 interval.tick().await;
-                SendEvent::send(&mut sender, SessionEvent::Timer(timer_id))?
+                SendEvent::send(&mut sender, Event::Timer(timer_id))?
             }
         });
         self.timer_handles.insert(timer_id, handle);
