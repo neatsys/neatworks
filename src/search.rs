@@ -254,19 +254,19 @@ where
     let result = search_finished
         .0
         .lock()
-        .map_err(|_| anyhow::anyhow!("posioned"))?;
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     let result = if let Some(max_duration) = max_duration {
         search_finished
             .1
             .wait_timeout_while(result, max_duration, |result| result.is_none())
-            .map_err(|_| anyhow::anyhow!("posioned"))?
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?
             .0
             .take()
     } else {
         search_finished
             .1
             .wait_while(result, |result| result.is_none())
-            .map_err(|_| anyhow::anyhow!("posioned"))?
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?
             .take()
     };
     std::thread::sleep(Duration::from_millis(20));
@@ -274,13 +274,22 @@ where
     search_finished.1.notify_all();
     // println!("search finished");
     for worker in worker_tasks {
-        worker.join().map_err(|_| anyhow::anyhow!("worker panic"))?
+        worker.join().map_err(|err| {
+            if let Ok(err) = err.downcast::<anyhow::Error>() {
+                *err
+            } else {
+                anyhow::anyhow!("unknown join error")
+            }
+        })?;
     }
     // println!("worker joined");
-    status_worker
-        .join()
-        .map_err(|_| anyhow::anyhow!("status worker panic"))?;
-    // println!("status worker joined");
+    status_worker.join().map_err(|err| {
+        if let Ok(err) = err.downcast::<anyhow::Error>() {
+            *err
+        } else {
+            anyhow::anyhow!("unknown join error")
+        }
+    })?; // println!("status worker joined");
     Ok(result)
 }
 

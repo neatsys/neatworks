@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
     //     public_dns: "localhost".into(),
     // }];
 
-    if category.ends_with("latency") {
+    if !category.ends_with("stress") {
         let mut out = OpenOptions::new()
             .create(true)
             .read(true)
@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
             control_client.clone(),
             &instances,
             &category,
-            1 << 21,
+            1 << 22,
             NonZeroUsize::new(32).unwrap(),
             NonZeroUsize::new(80).unwrap(),
             NonZeroUsize::new(88).unwrap(),
@@ -305,8 +305,8 @@ async fn benchmark(
         .collect::<Vec<_>>();
 
     if num_concurrency == 1 {
-        let num_total = (20 - count) / 2 + 1;
-        // let num_total = 1;
+        // let num_total = (20 - count) / 2 + 1;
+        let num_total = 1;
         close_loop_session(
             control_client.clone(),
             peer_urls.clone(),

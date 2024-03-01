@@ -111,9 +111,13 @@ pub mod erased {
 
     impl<S, E: ?Sized> SpawnWorker<S, E> {
         fn submit(&self, work: Work<S, E>) -> anyhow::Result<()> {
+            // requires S: 'static and E: 'static, which in turn requires many things 'static
+            // allow they probably happen to 'static, feels too tricky when later reasoning about
+            // the bound
+            // self.0.send(work).map_err(|err| anyhow::anyhow!(err))
             self.0
                 .send(work)
-                .map_err(|_| anyhow::anyhow!("receiver closed"))
+                .map_err(|err| anyhow::anyhow!(err.to_string()))
         }
     }
 

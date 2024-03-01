@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 use bincode::Options;
 use rusqlite::{params_from_iter, Connection, OptionalExtension as _};
 
@@ -7,7 +9,7 @@ use super::{
 };
 
 pub struct Sqlite {
-    connection: Connection,
+    connection: Mutex<Connection>, // hope there's better way to be `Sync`
     field_count: usize,
 }
 
@@ -23,7 +25,7 @@ impl Sqlite {
         );
         connection.execute(&statement, ())?;
         Ok(Self {
-            connection,
+            connection: Mutex::new(connection),
             field_count,
         })
     }
@@ -35,6 +37,8 @@ impl App for Sqlite {
             Op::Read(key) => {
                 if let Some(values) = self
                     .connection
+                    .lock()
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?
                     .prepare_cached("SELECT * FROM users WHERE ycsb_key = ?1")?
                     .query_row((key,), |row| {
                         (0..self.field_count)
@@ -51,6 +55,8 @@ impl App for Sqlite {
             Op::Update(key, field, value) => {
                 if self
                     .connection
+                    .lock()
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?
                     .prepare_cached(&format!(
                         "UPDATE users SET field{field} = ?2 WHERE ycsb_key = ?1"
                     ))?
@@ -64,6 +70,8 @@ impl App for Sqlite {
             }
             Op::Insert(key, values) => {
                 self.connection
+                    .lock()
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?
                     .prepare_cached(&format!(
                         "INSERT INTO users (ycsb_key, {}) VALUES({})",
                         (0..self.field_count)
@@ -79,7 +87,11 @@ impl App for Sqlite {
                 Result::Ok
             }
             Op::Scan(key, count) => {
-                let statement = &mut self.connection.prepare_cached(
+                let connection = self
+                    .connection
+                    .lock()
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                let mut statement = connection.prepare_cached(
                     "SELECT * FROM users WHERE ycsb_key >= ?1 ORDER BY ycsb_key LIMIT ?2",
                 )?;
                 let mut rows = statement.query((key, count))?;
@@ -105,6 +117,8 @@ impl App for Sqlite {
             Op::Delete(key) => {
                 if self
                     .connection
+                    .lock()
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?
                     .prepare_cached("DELETE FROM users WHERE ycsb_key = ?1")?
                     .execute((key,))?
                     == 0

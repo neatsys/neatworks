@@ -157,9 +157,7 @@ impl<B: Buf> OnEventRichTimer<(SocketAddr, B)> for TcpControl<B> {
                 warn!("{dest} {err}")
             }
         });
-        sender
-            .send(buf)
-            .map_err(|_| anyhow::anyhow!("connection closed"))?;
+        sender.send(buf).map_err(|err| anyhow::anyhow!(err))?;
         self.connections.insert(
             dest,
             Connection {
@@ -232,9 +230,7 @@ pub async fn tcp_listen_session(
                             warn!("{:?} {err}", stream.peer_addr());
                             return Ok(());
                         }
-                        sender
-                            .send(buf)
-                            .map_err(|_| anyhow::anyhow!("channel closed"))?
+                        sender.send(buf).map_err(|err| anyhow::anyhow!(err))?
                     }
                 });
             }

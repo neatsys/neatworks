@@ -33,7 +33,7 @@ impl<M> Eq for Sender<M> {}
 
 impl<N: Into<M>, M> SendEvent<N> for UnboundedSender<M> {
     fn send(&mut self, event: N) -> anyhow::Result<()> {
-        UnboundedSender::send(self, event.into()).map_err(|_| anyhow::anyhow!("channel closed"))
+        UnboundedSender::send(self, event.into()).map_err(|err| anyhow::anyhow!(err.to_string()))
     }
 }
 
