@@ -1,23 +1,28 @@
 use std::{
-    collections::HashSet, env::args, future::Future, iter::repeat_with, net::SocketAddr, pin::Pin,
+    collections::HashSet, env::args, future::Future, iter::repeat_with, net::SocketAddr,
     time::Duration,
 };
 
 use augustus::{
     app::Null,
     event::{
+        blocking,
         erased::{self, Blanket},
         Session,
     },
     net::{session::Udp, IndexNet},
     unreplicated::{
-        self, to_client_on_buf, to_replica_on_buf, Client, Replica, ToClientMessageNet,
-        ToReplicaMessageNet,
+        self, to_client_on_buf, to_replica_on_buf, Client, Replica, ReplicaEvent,
+        ToClientMessageNet, ToReplicaMessageNet,
     },
     workload::{CloseLoop, Iter, OpLatency},
 };
 use tokio::{
-    net::UdpSocket, runtime, signal::ctrl_c, sync::mpsc::unbounded_channel, task::JoinSet,
+    net::UdpSocket,
+    runtime,
+    signal::ctrl_c,
+    sync::mpsc::unbounded_channel,
+    task::{spawn_blocking, JoinSet},
     time::sleep,
 };
 use tokio_util::sync::CancellationToken;
@@ -34,6 +39,7 @@ async fn main() -> anyhow::Result<()> {
     let mut args = args().skip(1).collect::<HashSet<_>>();
     let flag_client = args.remove("client");
     let flag_boxed = args.remove("boxed");
+    let flag_blocking = args.remove("blocking");
     if !args.is_empty() {
         anyhow::bail!("unknown arguments {args:?}")
     }
@@ -112,37 +118,55 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
 
-    // replica mode
+    if flag_blocking {
+        let socket = std::net::UdpSocket::bind("0.0.0.0:4000")?;
+        let raw_net = augustus::net::blocking::Udp(socket.into());
+        let net = ToClientMessageNet::new(raw_net.clone());
+
+        let mut state = Replica::new(Null, net);
+        let (mut state_sender, state_receiver) = std::sync::mpsc::channel::<ReplicaEvent<_>>();
+        let recv_session = spawn_blocking(move || {
+            raw_net.recv(move |buf| to_replica_on_buf(buf, &mut state_sender))
+        });
+        let state_session = spawn_blocking(move || blocking::run(state_receiver, &mut state));
+        return run(async { recv_session.await? }, async {
+            state_session.await?
+        })
+        .await;
+    }
+
     let socket = UdpSocket::bind("0.0.0.0:4000").await?;
     let raw_net = Udp(socket.into());
     let net = ToClientMessageNet::new(raw_net.clone());
-
-    let recv_session;
-    let state_session = if flag_boxed {
+    if flag_boxed {
         println!("Starting replica with boxed events and net");
         let mut state = Blanket(Replica::new(Null, Box::new(net)));
         let mut state_session = erased::Session::new();
         let mut state_sender = state_session.erased_sender();
-        recv_session = Box::pin(raw_net.recv_session(move |buf| {
+        let recv_session = raw_net.recv_session(move |buf| {
             unreplicated::erased::to_replica_on_buf(buf, &mut state_sender)
-        })) as Pin<Box<dyn Future<Output = anyhow::Result<()>>>>;
-        Box::pin(async move { state_session.erased_run(&mut state).await })
-            as Pin<Box<dyn Future<Output = anyhow::Result<()>>>>
+        });
+        let state_session = state_session.erased_run(&mut state);
+        run(recv_session, state_session).await
     } else {
         let mut state = Replica::new(Null, net);
         let mut state_session = Session::<unreplicated::ReplicaEvent<_>>::new();
         let mut state_sender = state_session.sender();
-        recv_session =
-            Box::pin(raw_net.recv_session(move |buf| to_replica_on_buf(buf, &mut state_sender)));
-        Box::pin(async move { state_session.run(&mut state).await })
-    };
-    'select: {
-        tokio::select! {
-            result = recv_session => result?,
-            result = state_session => result?,
-            result = ctrl_c() => break 'select result?,
-        }
-        anyhow::bail!("unexpected exit")
+        let recv_session =
+            raw_net.recv_session(move |buf| to_replica_on_buf(buf, &mut state_sender));
+        let state_session = state_session.run(&mut state);
+        run(recv_session, state_session).await
     }
-    Ok(())
+}
+
+async fn run(
+    recv_session: impl Future<Output = anyhow::Result<()>>,
+    state_session: impl Future<Output = anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    tokio::select! {
+        result = recv_session => result?,
+        result = state_session => result?,
+        result = ctrl_c() => return Ok(result?),
+    }
+    anyhow::bail!("unexpected exit")
 }

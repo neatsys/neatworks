@@ -9,7 +9,7 @@ use super::{Buf, IterAddr, SendMessage};
 pub struct Udp(pub Arc<UdpSocket>);
 
 impl Udp {
-    pub fn recv_session(
+    pub fn recv(
         &self,
         mut on_buf: impl FnMut(&[u8]) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {

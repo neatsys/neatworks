@@ -20,6 +20,8 @@ pub fn run<M>(
     run_internal(receiver, state, OnEvent::on_event, OnTimer::on_timer)
 }
 
+// there's no way to cancel a blocking run, so it should be fine to create timer in the function
+// scope. not absolutely sure though
 pub fn run_internal<S, M>(
     receiver: Receiver<M>,
     state: &mut S,
