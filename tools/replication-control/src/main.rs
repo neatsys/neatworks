@@ -26,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
     ] {
         let app = App::Ycsb(Ycsb {
             record_count: 1000,
-            backend: YcsbBackend::Sqlite,
+            backend: YcsbBackend::BTree,
             profile,
         });
         benchmark_session(control_client.clone(), Protocol::Unreplicated, app).await?

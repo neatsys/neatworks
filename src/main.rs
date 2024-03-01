@@ -7,7 +7,7 @@ use std::{
 };
 
 use augustus::{
-    app::{ycsb, App},
+    app::{ycsb, App, Sqlite},
     crypto::Crypto,
     event::{
         erased::{
@@ -27,7 +27,9 @@ use axum::{
     Json, Router,
 };
 use rand::{rngs::StdRng, SeedableRng};
-use replication_control_messages::{BenchmarkResult, ClientConfig, Protocol, ReplicaConfig};
+use replication_control_messages::{
+    BenchmarkResult, ClientConfig, Protocol, ReplicaConfig, YcsbBackend,
+};
 use tokio::{
     runtime,
     signal::ctrl_c,
@@ -337,17 +339,18 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
     let app = match config.app {
         Null => Box::new(augustus::app::Null) as Box<dyn App + Send + Sync>,
         Ycsb(ycsb_config) => {
-            let mut app = BTreeMap::new();
-            let mut workload = ycsb::Workload::new(
-                StdRng::seed_from_u64(117418),
-                ycsb::WorkloadSettings::new_a(ycsb_config.record_count),
-            )
-            .unwrap();
+            let settings = ycsb::WorkloadSettings::new(ycsb_config.record_count);
+            let mut app = match ycsb_config.backend {
+                YcsbBackend::BTree => Box::new(BTreeMap::new()) as Box<dyn App + Send + Sync>,
+                YcsbBackend::Sqlite => Box::new(Sqlite::new(settings.field_count).unwrap()),
+            };
+            let mut workload =
+                ycsb::Workload::new(StdRng::seed_from_u64(117418), settings).unwrap();
             println!("YCSB startup");
             for op in workload.startup_ops() {
                 app.execute(&op).unwrap();
             }
-            Box::new(app) as _
+            app
         }
     };
 
