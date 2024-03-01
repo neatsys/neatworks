@@ -16,7 +16,7 @@ use augustus::{
         },
         SendEvent,
     },
-    net::{tokio::Udp, IndexNet},
+    net::{session::Udp, IndexNet},
     pbft, unreplicated,
     worker::erased::spawn_backend,
     workload::{CloseLoop, Invoke, InvokeOk, Iter, OpLatency, Workload},

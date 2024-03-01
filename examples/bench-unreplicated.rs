@@ -9,7 +9,7 @@ use augustus::{
         erased::{self, Blanket},
         Session,
     },
-    net::{tokio::Udp, IndexNet},
+    net::{session::Udp, IndexNet},
     unreplicated::{
         self, to_client_on_buf, to_replica_on_buf, Client, Replica, ToClientMessageNet,
         ToReplicaMessageNet,
@@ -35,10 +35,7 @@ async fn main() -> anyhow::Result<()> {
     let flag_client = args.remove("client");
     let flag_boxed = args.remove("boxed");
     if !args.is_empty() {
-        anyhow::bail!("unknown flags {args:?}")
-    }
-    if flag_client && flag_boxed {
-        anyhow::bail!("invalid flag combination")
+        anyhow::bail!("unknown arguments {args:?}")
     }
 
     if flag_client {

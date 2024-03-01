@@ -1,7 +1,8 @@
 pub mod kademlia;
-pub mod tokio;
+pub mod session;
+pub mod std;
 
-use std::{fmt::Debug, hash::Hash};
+use ::std::{fmt::Debug, hash::Hash, marker::PhantomData};
 
 use bincode::Options as _;
 use bytes::Bytes;
@@ -110,7 +111,7 @@ pub mod events {
 pub struct SendAddr<T>(pub T);
 
 #[derive(Debug)]
-pub struct Auto<A>(std::marker::PhantomData<A>); // TODO better name
+pub struct Auto<A>(PhantomData<A>); // TODO better name
 
 impl<T: SendEvent<M>, M> SendMessage<SendAddr<T>, M> for Auto<SendAddr<T>> {
     fn send(&mut self, mut dest: SendAddr<T>, message: M) -> anyhow::Result<()> {
@@ -119,7 +120,7 @@ impl<T: SendEvent<M>, M> SendMessage<SendAddr<T>, M> for Auto<SendAddr<T>> {
 }
 
 #[derive(Debug)]
-pub struct MessageNet<T, M>(pub T, std::marker::PhantomData<M>);
+pub struct MessageNet<T, M>(pub T, PhantomData<M>);
 
 impl<T, M> MessageNet<T, M> {
     pub fn new(raw_net: T) -> Self {

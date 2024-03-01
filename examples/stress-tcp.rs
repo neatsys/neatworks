@@ -11,7 +11,7 @@ use std::{
 use augustus::{
     event::erased::{session::Buffered, Session},
     net::{
-        tokio::{tcp_listen_session, Tcp, TcpControl},
+        session::{tcp_listen_session, Tcp, TcpControl},
         SendMessage,
     },
 };

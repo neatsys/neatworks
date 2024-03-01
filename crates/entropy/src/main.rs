@@ -24,7 +24,7 @@ use augustus::{
     kademlia::{self, Buckets, PeerId, PeerRecord},
     net::{
         kademlia::{Control, PeerNet},
-        tokio::{tcp_listen_session, Tcp, TcpControl},
+        session::{tcp_listen_session, Tcp, TcpControl},
     },
     worker::erased::Worker,
 };
