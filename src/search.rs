@@ -1,7 +1,7 @@
 use std::{
     fmt::{Debug, Display},
     hash::{BuildHasherDefault, Hash},
-    iter::{repeat, repeat_with},
+    iter::repeat,
     num::NonZeroUsize,
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::SeqCst},
@@ -15,14 +15,10 @@ use dashmap::DashMap;
 use rand::{seq::SliceRandom, thread_rng};
 use rustc_hash::FxHasher;
 
-pub trait State {
+pub trait State: Clone {
     type Event;
 
     fn events(&self) -> Vec<Self::Event>;
-
-    fn duplicate(&self) -> anyhow::Result<Self>
-    where
-        Self: Sized;
 
     fn step(&mut self, event: Self::Event) -> anyhow::Result<()>;
 
@@ -33,7 +29,7 @@ pub trait State {
         self.events()
             .into_iter()
             .map(|event| {
-                let mut system = self.duplicate()?;
+                let mut system = self.clone();
                 system.step(event)?;
                 Ok(system)
             })
@@ -115,7 +111,7 @@ where
     let depth_barrier = Arc::new(Barrier::new(num_worker.get()));
     let search_finished = Arc::new((Mutex::new(None), Condvar::new(), AtomicBool::new(false)));
 
-    let initial_dry_state = Arc::new(initial_state.duplicate()?.into());
+    let initial_dry_state = Arc::new(initial_state.clone().into());
     queue.push((initial_state, initial_dry_state.clone()));
     discovered.insert(
         initial_dry_state,
@@ -193,28 +189,22 @@ where
     let num_state = Arc::new(AtomicU32::new(0));
     let search_finished = Arc::new((Mutex::new(None), Condvar::new(), AtomicBool::new(false)));
 
-    let initial_state = initial_state.duplicate()?;
     let result = search_internal(
         max_duration,
         {
             let num_probe = num_probe.clone();
             let num_state = num_state.clone();
             let search_finished = search_finished.clone();
-            repeat_with(move || {
-                let settings = settings.clone();
-                let initial_state = initial_state.duplicate().unwrap();
-                let num_probe = num_probe.clone();
-                let num_state = num_state.clone();
-                let search_finished = search_finished.clone();
-                move || {
-                    random_depth_first_worker(
-                        settings,
-                        initial_state,
-                        num_probe,
-                        num_state,
-                        search_finished,
-                    )
-                }
+            let settings = settings.clone();
+            let initial_state = initial_state.clone();
+            repeat(move || {
+                random_depth_first_worker(
+                    settings,
+                    initial_state,
+                    num_probe,
+                    num_state,
+                    search_finished,
+                )
             })
             .take(num_worker.get())
         },
@@ -369,13 +359,13 @@ fn breath_first_worker<S: State, T, I, G, P>(
             for event in state.events() {
                 // these duplication will probably never panic, since initial state duplication
                 // already success
-                let mut next_state = state.duplicate().unwrap();
+                let mut next_state = state.clone();
                 // println!("step {event:?}");
                 if let Err(err) = next_state.step(event.clone()) {
                     search_finish(SearchWorkerResult::Error(state, event, err));
                     break 'depth;
                 }
-                let next_dry_state = Arc::new(next_state.duplicate().unwrap().into());
+                let next_dry_state = Arc::new(next_state.clone().into());
                 // do not replace a previously-found state, which may be reached with a shorter
                 // trace from initial state
                 let mut inserted = false;
@@ -461,7 +451,7 @@ fn random_depth_first_worker<S: State, T, I, G, P>(
     };
     while !search_finished.2.load(SeqCst) {
         num_probe.fetch_add(1, SeqCst);
-        let mut state = initial_state.duplicate().unwrap();
+        let mut state = initial_state.clone();
         let mut trace = Vec::new();
         // TODO check initial state
         for depth in 0.. {
@@ -474,7 +464,7 @@ fn random_depth_first_worker<S: State, T, I, G, P>(
                 break;
             }
             num_state.fetch_add(1, SeqCst);
-            trace.push((event, state.duplicate().unwrap().into()));
+            trace.push((event, state.clone().into()));
             if let Err(err) = (settings.invariant)(&state) {
                 search_finish(SearchResult::InvariantViolation(trace, err));
                 break;

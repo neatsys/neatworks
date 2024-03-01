@@ -251,8 +251,8 @@ pub struct Invoke(pub Payload);
 // too lazy to refactor it off
 pub type InvokeOk = (u32, Payload);
 
-pub struct CloseLoop<W: Workload> {
-    sender: Box<dyn SendEvent<Invoke> + Send + Sync>,
+pub struct CloseLoop<W: Workload, E> {
+    pub sender: E,
     pub workload: W,
     workload_attach: Option<W::Attach>,
     pub stop: Option<CloseLoopStop>,
@@ -261,16 +261,16 @@ pub struct CloseLoop<W: Workload> {
 
 type CloseLoopStop = Box<dyn FnOnce() -> anyhow::Result<()> + Send + Sync>;
 
-impl<W: Workload> Debug for CloseLoop<W> {
+impl<W: Workload, E> Debug for CloseLoop<W, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CloseLoop").finish_non_exhaustive()
     }
 }
 
-impl<W: Workload> CloseLoop<W> {
-    pub fn new(sender: impl SendEvent<Invoke> + Send + Sync + 'static, workload: W) -> Self {
+impl<W: Workload, E> CloseLoop<W, E> {
+    pub fn new(sender: E, workload: W) -> Self {
         Self {
-            sender: Box::new(sender),
+            sender,
             workload,
             workload_attach: None,
             stop: None,
@@ -279,25 +279,25 @@ impl<W: Workload> CloseLoop<W> {
     }
 }
 
-impl<W: Workload + Clone> CloseLoop<W>
+impl<W: Workload + Clone, E: Clone> Clone for CloseLoop<W, E>
 where
     W::Attach: Clone,
 {
-    pub fn duplicate<E: SendEvent<Invoke> + Send + Sync + 'static>(
-        &self,
-        sender: E,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
-            sender: Box::new(sender),
+    fn clone(&self) -> Self {
+        if self.stop.is_some() {
+            panic!("cannot clone CloseLoop with some `stop`")
+        }
+        Self {
+            sender: self.sender.clone(),
             workload: self.workload.clone(),
             workload_attach: self.workload_attach.clone(),
             stop: None,
             done: self.done,
-        })
+        }
     }
 }
 
-impl<W: Workload> CloseLoop<W> {
+impl<W: Workload, E: SendEvent<Invoke>> CloseLoop<W, E> {
     pub fn launch(&mut self) -> anyhow::Result<()> {
         let (op, attach) = self
             .workload
@@ -311,7 +311,7 @@ impl<W: Workload> CloseLoop<W> {
     }
 }
 
-impl<W: Workload> OnEvent<InvokeOk> for CloseLoop<W> {
+impl<W: Workload, E: SendEvent<Invoke>> OnEvent<InvokeOk> for CloseLoop<W, E> {
     fn on_event(&mut self, (_, result): InvokeOk, _: &mut impl Timer) -> anyhow::Result<()> {
         let Some(attach) = self.workload_attach.take() else {
             anyhow::bail!("missing workload attach")
@@ -330,7 +330,7 @@ impl<W: Workload> OnEvent<InvokeOk> for CloseLoop<W> {
     }
 }
 
-impl<W: Workload> OnTimer for CloseLoop<W> {
+impl<W: Workload, E> OnTimer for CloseLoop<W, E> {
     fn on_timer(&mut self, _: crate::event::TimerId, _: &mut impl Timer) -> anyhow::Result<()> {
         unreachable!()
     }
@@ -342,8 +342,8 @@ pub mod check {
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub struct DryCloseLoop<T>(T);
 
-    impl<W: Workload + Into<T>, T> From<CloseLoop<W>> for DryCloseLoop<T> {
-        fn from(value: CloseLoop<W>) -> Self {
+    impl<W: Workload + Into<T>, T, E> From<CloseLoop<W, E>> for DryCloseLoop<T> {
+        fn from(value: CloseLoop<W, E>) -> Self {
             Self(value.workload.into())
         }
     }

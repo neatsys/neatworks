@@ -3,7 +3,7 @@ use std::{thread::available_parallelism, time::Duration};
 use augustus::{
     app::kvstore::{static_workload, InfinitePutGet, Op, Result},
     message::Payload,
-    search::{breadth_first, random_depth_first, Settings, State as _},
+    search::{breadth_first, random_depth_first, Settings},
     unreplicated::check::{DryState, State},
     workload::{Check, DryRecorded, Iter, Recorded, Workload},
 };
@@ -45,7 +45,7 @@ fn main() -> anyhow::Result<()> {
         max_depth: None,
     };
     let result = breadth_first::<_, DryState<_>, _, _, _>(
-        state.duplicate()?,
+        state.clone(),
         settings.clone(),
         1.try_into().unwrap(),
         None,
@@ -81,7 +81,7 @@ fn main() -> anyhow::Result<()> {
         max_depth: None,
     };
     let result = breadth_first::<_, DryState<_>, _, _, _>(
-        state.duplicate()?,
+        state.clone(),
         settings.clone(),
         1.try_into().unwrap(),
         None,
@@ -146,7 +146,7 @@ fn main() -> anyhow::Result<()> {
         max_depth: None,
     };
     let result = breadth_first::<_, DryState<DryRecorded<()>>, _, _, _>(
-        state.duplicate()?,
+        state.clone(),
         settings.clone(),
         1.try_into().unwrap(),
         None,
@@ -179,7 +179,7 @@ fn main() -> anyhow::Result<()> {
         max_depth: None,
     };
     let result = breadth_first::<_, DryState<()>, _, _, _>(
-        state.duplicate()?,
+        state.clone(),
         settings.clone(),
         available_parallelism()?,
         // 1.try_into().unwrap(),

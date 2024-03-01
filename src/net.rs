@@ -155,8 +155,10 @@ pub fn deserialize<M: DeserializeOwned>(buf: &[u8]) -> anyhow::Result<M> {
         .map_err(Into::into)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, derive_more::Deref, derive_more::DerefMut)]
 pub struct IndexNet<N, A> {
+    #[deref]
+    #[deref_mut]
     inner_net: N,
     addrs: Vec<A>,
     local_index: Option<usize>,

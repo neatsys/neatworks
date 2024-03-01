@@ -14,13 +14,6 @@ enum Event {
 impl augustus::search::State for State {
     type Event = Event;
 
-    fn duplicate(&self) -> anyhow::Result<Self>
-    where
-        Self: Sized,
-    {
-        Ok(*self)
-    }
-
     fn events(&self) -> Vec<Self::Event> {
         let mut events = vec![Event::Div2];
         if self.0 > 1 && (self.0 - 1) % 3 == 0 {
