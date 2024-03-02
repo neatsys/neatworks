@@ -89,6 +89,7 @@ dependencies = [
  "replication-control-messages",
  "rusqlite",
  "rustc-hash",
+ "rustix",
  "secp256k1",
  "serde",
  "serde_json",

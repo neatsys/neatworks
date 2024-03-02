@@ -1,6 +1,8 @@
 use std::{
+    io::ErrorKind,
     net::{SocketAddr, UdpSocket},
     sync::Arc,
+    time::Instant,
 };
 
 use super::{Buf, IterAddr, SendMessage};
@@ -12,10 +14,25 @@ impl Udp {
     pub fn recv(
         &self,
         mut on_buf: impl FnMut(&[u8]) -> anyhow::Result<()>,
+        deadline: impl Into<Option<Instant>>,
     ) -> anyhow::Result<()> {
         let mut buf = vec![0; 1 << 16];
+        let deadline = deadline.into();
         loop {
-            let (len, _) = self.0.recv_from(&mut buf)?;
+            if let Some(deadline) = deadline {
+                let timeout = deadline.duration_since(Instant::now());
+                if timeout.is_zero() {
+                    return Ok(());
+                }
+                self.0.set_write_timeout(Some(timeout))?;
+            }
+            let (len, _) = match self.0.recv_from(&mut buf) {
+                Ok(result) => result,
+                Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                    return Ok(())
+                }
+                Err(err) => Err(err)?,
+            };
             on_buf(&buf[..len])?
         }
     }

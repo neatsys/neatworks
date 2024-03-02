@@ -100,6 +100,14 @@ pub trait OnTimer {
     fn on_timer(&mut self, timer_id: TimerId, timer: &mut impl Timer) -> anyhow::Result<()>;
 }
 
+pub struct Inline<'a, S, T>(pub &'a mut S, pub &'a mut T);
+
+impl<S: OnEvent<M>, M, T: Timer> SendEvent<M> for Inline<'_, S, T> {
+    fn send(&mut self, event: M) -> anyhow::Result<()> {
+        self.0.on_event(event, self.1)
+    }
+}
+
 pub struct Void; // for testing
 
 impl<M> SendEvent<M> for Void {

@@ -41,6 +41,7 @@ rand_distr = "0.4.3"
 replication-control-messages = { version = "0.1.0", path = "tools/replication-control-messages" }
 rusqlite = { version = "0.31.0", features = ["bundled"] }
 rustc-hash = "1.1.0"
+rustix = { version = "0.38.31", features = ["process"] }
 secp256k1 = { version = "0.28.1", features = ["rand-std", "serde"] }
 serde = { version = "1.0.195", features = ["derive"] }
 serde_json = "1.0.114"

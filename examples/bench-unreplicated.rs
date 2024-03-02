@@ -1,5 +1,18 @@
+// taskset -c 0 bench-unreplicated
+// => 384321 ops/sec
+// taskset -c 0 bench-unreplicated boxed
+// => 374281.9 ops/sec
+// taskset -c 0 bench-unreplicated blocking
+// => 449670.1 ops/sec
+// bench-unreplicated blocking dual
+// => 617318.2 ops/sec
+
 use std::{
-    collections::HashSet, env::args, future::Future, iter::repeat_with, net::SocketAddr,
+    collections::HashSet,
+    env::args,
+    future::{pending, Future},
+    iter::repeat_with,
+    net::SocketAddr,
     time::Duration,
 };
 
@@ -8,7 +21,8 @@ use augustus::{
     event::{
         blocking,
         erased::{self, Blanket},
-        Session,
+        ordered::Timer,
+        Inline, OnTimer, Session,
     },
     net::{session::Udp, IndexNet},
     unreplicated::{
@@ -40,65 +54,70 @@ async fn main() -> anyhow::Result<()> {
     let flag_client = args.remove("client");
     let flag_boxed = args.remove("boxed");
     let flag_blocking = args.remove("blocking");
+    let flag_dual = args.remove("dual");
     if !args.is_empty() {
         anyhow::bail!("unknown arguments {args:?}")
     }
 
     if flag_client {
-        let replica_addrs = vec![SocketAddr::new([127, 0, 0, 1].into(), 4000)];
+        let replica_addrs = vec![SocketAddr::new([10, 0, 0, 7].into(), 4000)];
         let mut sessions = JoinSet::new();
-        let runtime = runtime::Builder::new_multi_thread().enable_all().build()?;
         let (count_sender, mut count_receiver) = unbounded_channel();
         let cancel = CancellationToken::new();
-        for id in repeat_with(rand::random).take(40) {
-            let socket = UdpSocket::bind("0.0.0.0:0").await?;
-            let addr = SocketAddr::new([127, 0, 0, 101].into(), socket.local_addr()?.port());
-            let raw_net = Udp(socket.into());
+        let mut runtimes = Vec::new();
+        for _ in 0..5 {
+            let runtime = runtime::Builder::new_multi_thread().enable_all().build()?;
+            for id in repeat_with(rand::random).take(8) {
+                let socket = runtime.spawn(UdpSocket::bind("0.0.0.0:0")).await??;
+                let addr = SocketAddr::new([10, 0, 0, 8].into(), socket.local_addr()?.port());
+                let raw_net = Udp(socket.into());
 
-            let mut state_session = Session::<unreplicated::ClientEvent>::new();
-            let mut close_loop_session = erased::Session::new();
+                let mut state_session = Session::<unreplicated::ClientEvent>::new();
+                let mut close_loop_session = erased::Session::new();
 
-            let mut state = Client::new(
-                id,
-                addr,
-                ToReplicaMessageNet::new(IndexNet::new(
-                    raw_net.clone(),
-                    replica_addrs.clone(),
-                    None,
-                )),
-                close_loop_session.erased_sender(),
-            );
-            let mut close_loop = Blanket(CloseLoop::new(
-                state_session.sender(),
-                OpLatency::new(Iter(repeat_with(Default::default))),
-            ));
-            let mut state_sender = state_session.sender();
-            sessions.spawn_on(
-                async move {
-                    raw_net
-                        .recv_session(|buf| to_client_on_buf(buf, &mut state_sender))
-                        .await
-                },
-                runtime.handle(),
-            );
-            sessions.spawn_on(
-                async move { state_session.run(&mut state).await },
-                runtime.handle(),
-            );
-            let cancel = cancel.clone();
-            let count_sender = count_sender.clone();
-            sessions.spawn_on(
-                async move {
-                    close_loop.launch()?;
-                    tokio::select! {
-                        result = close_loop_session.erased_run(&mut close_loop) => result?,
-                        () = cancel.cancelled() => {}
-                    }
-                    let _ = count_sender.send(close_loop.workload.latencies.len());
-                    Ok(())
-                },
-                runtime.handle(),
-            );
+                let mut state = Client::new(
+                    id,
+                    addr,
+                    ToReplicaMessageNet::new(IndexNet::new(
+                        raw_net.clone(),
+                        replica_addrs.clone(),
+                        None,
+                    )),
+                    close_loop_session.erased_sender(),
+                );
+                let mut close_loop = Blanket(CloseLoop::new(
+                    state_session.sender(),
+                    OpLatency::new(Iter(repeat_with(Default::default))),
+                ));
+                let mut state_sender = state_session.sender();
+                sessions.spawn_on(
+                    async move {
+                        raw_net
+                            .recv_session(|buf| to_client_on_buf(buf, &mut state_sender))
+                            .await
+                    },
+                    runtime.handle(),
+                );
+                sessions.spawn_on(
+                    async move { state_session.run(&mut state).await },
+                    runtime.handle(),
+                );
+                let cancel = cancel.clone();
+                let count_sender = count_sender.clone();
+                sessions.spawn_on(
+                    async move {
+                        close_loop.launch()?;
+                        tokio::select! {
+                            result = close_loop_session.erased_run(&mut close_loop) => result?,
+                            () = cancel.cancelled() => {}
+                        }
+                        let _ = count_sender.send(close_loop.workload.latencies.len());
+                        Ok(())
+                    },
+                    runtime.handle(),
+                );
+            }
+            runtimes.push(runtime)
         }
         'select: {
             tokio::select! {
@@ -113,7 +132,9 @@ async fn main() -> anyhow::Result<()> {
         while let Some(count) = count_receiver.recv().await {
             total_count += count
         }
-        runtime.shutdown_background();
+        for runtime in runtimes {
+            runtime.shutdown_background();
+        }
         println!("{} ops/sec", total_count as f32 / 10.);
         return Ok(());
     };
@@ -124,11 +145,34 @@ async fn main() -> anyhow::Result<()> {
         let net = ToClientMessageNet::new(raw_net.clone());
 
         let mut state = Replica::new(Null, net);
+        if !flag_dual {
+            let recv_session = spawn_blocking(move || {
+                let mut timer = Timer::new();
+                loop {
+                    let deadline = timer.deadline();
+                    raw_net.recv(
+                        |buf| to_replica_on_buf(buf, &mut Inline(&mut state, &mut timer)),
+                        deadline,
+                    )?;
+                    state.on_timer(timer.advance()?, &mut timer)?
+                }
+            });
+            return run(async { recv_session.await? }, pending()).await;
+        }
+
         let (mut state_sender, state_receiver) = std::sync::mpsc::channel::<ReplicaEvent<_>>();
         let recv_session = spawn_blocking(move || {
-            raw_net.recv(move |buf| to_replica_on_buf(buf, &mut state_sender))
+            let mut cpu_set = rustix::process::CpuSet::new();
+            cpu_set.set(0);
+            rustix::process::sched_setaffinity(None, &cpu_set)?;
+            raw_net.recv(move |buf| to_replica_on_buf(buf, &mut state_sender), None)
         });
-        let state_session = spawn_blocking(move || blocking::run(state_receiver, &mut state));
+        let state_session = spawn_blocking(move || {
+            let mut cpu_set = rustix::process::CpuSet::new();
+            cpu_set.set(1);
+            rustix::process::sched_setaffinity(None, &cpu_set)?;
+            blocking::run(state_receiver, &mut state)
+        });
         return run(async { recv_session.await? }, async {
             state_session.await?
         })
