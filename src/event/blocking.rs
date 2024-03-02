@@ -15,7 +15,7 @@ impl<N: Into<M>, M> SendEvent<N> for Sender<M> {
 
 pub fn run<M>(
     receiver: Receiver<M>,
-    state: &mut (impl OnEvent<M> + OnTimer),
+    state: &mut (impl OnEvent<Event = M> + OnTimer),
 ) -> anyhow::Result<()> {
     run_internal(receiver, state, OnEvent::on_event, OnTimer::on_timer)
 }

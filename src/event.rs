@@ -14,6 +14,30 @@ impl<T: ?Sized + SendEvent<M>, M> SendEvent<M> for Box<T> {
     }
 }
 
+pub struct Void; // for testing
+
+impl<M> SendEvent<M> for Void {
+    fn send(&mut self, _: M) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, derive_more::Deref, derive_more::DerefMut)]
+pub struct Transient<M>(Vec<M>);
+
+impl<M> Default for Transient<M> {
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
+
+impl<N: Into<M>, M> SendEvent<N> for Transient<M> {
+    fn send(&mut self, event: N) -> anyhow::Result<()> {
+        self.0.push(event.into());
+        Ok(())
+    }
+}
+
 // pub type TimerId = u32;
 // intentionally switch to a non-Copy newtype to mitigate use after free, that
 // is, calling `unset` consume the TimerId so the timer cannot be referred
@@ -92,8 +116,10 @@ impl Timer for LinearTimer {
     }
 }
 
-pub trait OnEvent<M> {
-    fn on_event(&mut self, event: M, timer: &mut impl Timer) -> anyhow::Result<()>;
+pub trait OnEvent {
+    type Event;
+
+    fn on_event(&mut self, event: Self::Event, timer: &mut impl Timer) -> anyhow::Result<()>;
 }
 
 pub trait OnTimer {
@@ -102,41 +128,19 @@ pub trait OnTimer {
 
 pub struct Inline<'a, S, T>(pub &'a mut S, pub &'a mut T);
 
-impl<S: OnEvent<M>, M, T: Timer> SendEvent<M> for Inline<'_, S, T> {
-    fn send(&mut self, event: M) -> anyhow::Result<()> {
+impl<S: OnEvent, T: Timer> SendEvent<S::Event> for Inline<'_, S, T> {
+    fn send(&mut self, event: S::Event) -> anyhow::Result<()> {
         self.0.on_event(event, self.1)
     }
 }
 
-pub struct Void; // for testing
+pub trait RichTimer {
+    type Event;
 
-impl<M> SendEvent<M> for Void {
-    fn send(&mut self, _: M) -> anyhow::Result<()> {
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, derive_more::Deref, derive_more::DerefMut)]
-pub struct Transient<M>(Vec<M>);
-
-impl<M> Default for Transient<M> {
-    fn default() -> Self {
-        Self(Default::default())
-    }
-}
-
-impl<N: Into<M>, M> SendEvent<N> for Transient<M> {
-    fn send(&mut self, event: N) -> anyhow::Result<()> {
-        self.0.push(event.into());
-        Ok(())
-    }
-}
-
-pub trait RichTimer<M> {
     fn set(
         &mut self,
         period: Duration,
-        event: impl FnMut() -> M + Send + Sync + 'static,
+        event: impl FnMut() -> Self::Event + Send + Sync + 'static,
     ) -> anyhow::Result<TimerId>;
 
     fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()>;
@@ -152,11 +156,13 @@ struct BufferedTimer<'a, T, M> {
     attched: &'a mut HashMap<TimerId, Box<dyn FnMut() -> M + Send + Sync>>,
 }
 
-impl<T: Timer, M> RichTimer<M> for BufferedTimer<'_, T, M> {
+impl<T: Timer, M> RichTimer for BufferedTimer<'_, T, M> {
+    type Event = M;
+
     fn set(
         &mut self,
         period: Duration,
-        event: impl FnMut() -> M + Send + Sync + 'static,
+        event: impl FnMut() -> Self::Event + Send + Sync + 'static,
     ) -> anyhow::Result<TimerId> {
         let TimerId(timer_id) = self.inner.set(period)?;
         let replaced = self.attched.insert(TimerId(timer_id), Box::new(event));
@@ -175,12 +181,20 @@ impl<T: Timer, M> RichTimer<M> for BufferedTimer<'_, T, M> {
     }
 }
 
-pub trait OnEventRichTimer<M> {
-    fn on_event(&mut self, event: M, timer: &mut impl RichTimer<M>) -> anyhow::Result<()>;
+pub trait OnEventRichTimer {
+    type Event;
+
+    fn on_event(
+        &mut self,
+        event: Self::Event,
+        timer: &mut impl RichTimer<Event = Self::Event>,
+    ) -> anyhow::Result<()>;
 }
 
-impl<S: OnEventRichTimer<M>, M> OnEvent<M> for Buffered<S, M> {
-    fn on_event(&mut self, event: M, timer: &mut impl Timer) -> anyhow::Result<()> {
+impl<S: OnEventRichTimer> OnEvent for Buffered<S, S::Event> {
+    type Event = S::Event;
+
+    fn on_event(&mut self, event: Self::Event, timer: &mut impl Timer) -> anyhow::Result<()> {
         let mut timer = BufferedTimer {
             inner: timer,
             attched: &mut self.attched,
@@ -189,7 +203,7 @@ impl<S: OnEventRichTimer<M>, M> OnEvent<M> for Buffered<S, M> {
     }
 }
 
-impl<S: OnEventRichTimer<M>, M> OnTimer for Buffered<S, M> {
+impl<S: OnEventRichTimer> OnTimer for Buffered<S, S::Event> {
     fn on_timer(&mut self, timer_id: TimerId, timer: &mut impl Timer) -> anyhow::Result<()> {
         let event = (self
             .attched
@@ -216,17 +230,22 @@ pub mod erased {
     // probably cannot use it here due to object safety, so i instead take this form that fixes the
     // timer type ahead of the time i.e. on producing instead of on consuming the event
     // this fact causes a few headaches, like the Buffered below has to fix the `impl Timer` type
-    // as well, and duplicated `OnEvent` and `OnTimer` traits to the ones in the super module below
+    // as well, and workaround traits `OnEventFixTimer` and `OnTimerFixTimer` (which unfortunately
+    // must be public and even get referenced by replication artifact)
     // it also prevent us to write down obivous facts like
     //   impl<S> OnEvent<Event<S, ???>> { ... }
     // which results in e.g. leaking internal details of `Session::run`
     pub type Event<S, T> = Box<dyn FnOnce(&mut S, &mut T) -> anyhow::Result<()> + Send>;
 
-    pub trait OnEvent<M, T> {
+    pub trait OnEvent<M> {
+        fn on_event(&mut self, event: M, timer: &mut impl Timer) -> anyhow::Result<()>;
+    }
+
+    pub trait OnEventFixTimer<M, T> {
         fn on_event(&mut self, event: M, timer: &mut T) -> anyhow::Result<()>;
     }
 
-    pub trait OnTimer<T> {
+    pub trait OnTimerFixTimer<T> {
         fn on_timer(&mut self, timer_id: TimerId, timer: &mut T) -> anyhow::Result<()>;
     }
 
@@ -234,16 +253,19 @@ pub mod erased {
     // however that will be conflicted with the following impl on Buffered
     // TODO try to apply this wrapper when necessary internally, instead of asking user to wrap
     // the states on their side
+    // anyway for now, the "injudicious" rule is that wrap `impl erased::OnEvent<_>` with `Blanket`
+    // and wrap `impl erased::OnEventRichTimer<_>` with one of the `Buffered`, then it proabably
+    // works
     #[derive(derive_more::Deref, derive_more::DerefMut)]
     pub struct Blanket<S>(pub S);
 
-    impl<S: super::OnEvent<M>, M, T: Timer> OnEvent<M, T> for Blanket<S> {
+    impl<S: OnEvent<M>, M, T: Timer> OnEventFixTimer<M, T> for Blanket<S> {
         fn on_event(&mut self, event: M, timer: &mut T) -> anyhow::Result<()> {
             self.0.on_event(event, timer)
         }
     }
 
-    impl<S: super::OnTimer, T: Timer> OnTimer<T> for Blanket<S> {
+    impl<S: super::OnTimer, T: Timer> OnTimerFixTimer<T> for Blanket<S> {
         fn on_timer(&mut self, timer_id: TimerId, timer: &mut T) -> anyhow::Result<()> {
             self.0.on_timer(timer_id, timer)
         }
@@ -335,7 +357,7 @@ pub mod erased {
         }
     }
 
-    impl<S: OnEventRichTimer<M>, M, T: Timer> OnEvent<M, T> for Buffered<S, T> {
+    impl<S: OnEventRichTimer<M>, M, T: Timer> OnEventFixTimer<M, T> for Buffered<S, T> {
         fn on_event(&mut self, event: M, timer: &mut T) -> anyhow::Result<()> {
             let mut timer = BufferedTimer {
                 inner: timer,
@@ -345,7 +367,7 @@ pub mod erased {
         }
     }
 
-    impl<S, T: Timer> OnTimer<T> for Buffered<S, T> {
+    impl<S, T: Timer> OnTimerFixTimer<T> for Buffered<S, T> {
         fn on_timer(&mut self, timer_id: TimerId, timer: &mut T) -> anyhow::Result<()> {
             (self
                 .attached
@@ -369,8 +391,12 @@ pub mod erased {
         }
     }
 
-    impl<E: SendEvent<Event<S, T>>, S: OnEvent<M, T>, T: Timer, M: Send + Sync + 'static>
-        SendEvent<M> for Erasure<E, S, T>
+    impl<
+            E: SendEvent<Event<S, T>>,
+            S: OnEventFixTimer<M, T>,
+            T: Timer,
+            M: Send + Sync + 'static,
+        > SendEvent<M> for Erasure<E, S, T>
     {
         fn send(&mut self, event: M) -> anyhow::Result<()> {
             let event = move |state: &mut S, timer: &mut T| state.on_event(event, timer);
@@ -383,7 +409,7 @@ pub mod erased {
     pub mod session {
         use crate::event::session::SessionTimer;
 
-        use super::{Erasure, OnTimer};
+        use super::{Erasure, OnTimerFixTimer};
 
         // some historical snippet when `Timer` was still implemented by `Session<_>` itself
         // #[derive(derive_more::From)]
@@ -399,12 +425,12 @@ pub mod erased {
             }
         }
 
-        impl<S: OnTimer<SessionTimer> + 'static> Session<S> {
+        impl<S: OnTimerFixTimer<SessionTimer> + 'static> Session<S> {
             pub async fn erased_run(&mut self, state: &mut S) -> anyhow::Result<()> {
                 self.run_internal(
                     state,
                     |state, event, timer| event(state, timer),
-                    OnTimer::on_timer,
+                    OnTimerFixTimer::on_timer,
                 )
                 .await
             }
@@ -418,7 +444,7 @@ pub mod erased {
 
         use crate::event::{blocking::run_internal, ordered::Timer};
 
-        use super::{Erasure, OnTimer};
+        use super::{Erasure, OnTimerFixTimer};
 
         pub type Event<S> = super::Event<S, Timer>;
         pub type Sender<S> = Erasure<crate::event::blocking::Sender<Event<S>>, S, Timer>;
@@ -428,7 +454,7 @@ pub mod erased {
             (Erasure::from(sender), receiver)
         }
 
-        pub fn run<S: OnTimer<Timer>>(
+        pub fn run<S: OnTimerFixTimer<Timer>>(
             receiver: Receiver<Event<S>>,
             state: &mut S,
         ) -> anyhow::Result<()> {
@@ -436,7 +462,7 @@ pub mod erased {
                 receiver,
                 state,
                 |state, event, timer| event(state, timer),
-                OnTimer::on_timer,
+                OnTimerFixTimer::on_timer,
             )
         }
 

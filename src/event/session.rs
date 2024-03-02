@@ -100,7 +100,10 @@ impl<M> Session<M> {
         Sender(self.sender.clone())
     }
 
-    pub async fn run(&mut self, state: &mut (impl OnEvent<M> + OnTimer)) -> anyhow::Result<()>
+    pub async fn run(
+        &mut self,
+        state: &mut (impl OnEvent<Event = M> + OnTimer),
+    ) -> anyhow::Result<()>
     where
         M: Send + 'static,
     {

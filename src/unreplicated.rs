@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     app::App,
-    event::{OnEvent, OnTimer, SendEvent, Timer, TimerId},
+    event::{erased::OnEvent as On, OnEvent, OnTimer, SendEvent, Timer, TimerId},
     message::{Payload, Request},
     net::{deserialize, events::Recv, Addr, MessageNet, SendMessage},
     workload::{Invoke, InvokeOk},
@@ -67,16 +67,18 @@ impl<N, U, A> Client<N, U, A> {
     }
 }
 
-impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> OnEvent<ClientEvent> for Client<N, U, A> {
-    fn on_event(&mut self, event: ClientEvent, timer: &mut impl Timer) -> anyhow::Result<()> {
+impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> OnEvent for Client<N, U, A> {
+    type Event = ClientEvent;
+
+    fn on_event(&mut self, event: Self::Event, timer: &mut impl Timer) -> anyhow::Result<()> {
         match event {
-            ClientEvent::Invoke(op) => self.on_event(Invoke(op), timer),
-            ClientEvent::Ingress(reply) => self.on_event(Recv(reply), timer),
+            ClientEvent::Invoke(op) => On::on_event(self, Invoke(op), timer),
+            ClientEvent::Ingress(reply) => On::on_event(self, Recv(reply), timer),
         }
     }
 }
 
-impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> OnEvent<Invoke> for Client<N, U, A> {
+impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> On<Invoke> for Client<N, U, A> {
     fn on_event(&mut self, Invoke(op): Invoke, timer: &mut impl Timer) -> anyhow::Result<()> {
         if self.invoke.is_some() {
             anyhow::bail!("concurrent invocation")
@@ -99,7 +101,7 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> OnTimer for Client<N, U, A> {
     }
 }
 
-impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> OnEvent<Recv<Reply>> for Client<N, U, A> {
+impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> On<Recv<Reply>> for Client<N, U, A> {
     fn on_event(&mut self, Recv(reply): Recv<Reply>, timer: &mut impl Timer) -> anyhow::Result<()> {
         if reply.seq != self.seq {
             return Ok(());
@@ -158,16 +160,18 @@ impl<S, N, A> Replica<S, N, A> {
     }
 }
 
-impl<S: App, N: ToClientNet<A>, A> OnEvent<ReplicaEvent<A>> for Replica<S, N, A> {
-    fn on_event(&mut self, event: ReplicaEvent<A>, timer: &mut impl Timer) -> anyhow::Result<()> {
+impl<S: App, N: ToClientNet<A>, A> OnEvent for Replica<S, N, A> {
+    type Event = ReplicaEvent<A>;
+
+    fn on_event(&mut self, event: Self::Event, timer: &mut impl Timer) -> anyhow::Result<()> {
         match event {
-            ReplicaEvent::Ingress(request) => self.on_event(Recv(request), timer),
+            ReplicaEvent::Ingress(request) => On::on_event(self, Recv(request), timer),
             ReplicaEvent::Dummy => unreachable!(),
         }
     }
 }
 
-impl<S: App, N: ToClientNet<A>, A> OnEvent<Recv<Request<A>>> for Replica<S, N, A> {
+impl<S: App, N: ToClientNet<A>, A> On<Recv<Request<A>>> for Replica<S, N, A> {
     fn on_event(
         &mut self,
         Recv(request): Recv<Request<A>>,
@@ -348,7 +352,7 @@ pub mod check {
 
     use crate::{
         app::KVStore,
-        event::{LinearTimer, OnEvent, OnTimer as _, TimerId, Transient, UnreachableTimer},
+        event::{erased::OnEvent, LinearTimer, OnTimer as _, TimerId, Transient, UnreachableTimer},
         message::Request,
         net::{events::Recv, IndexNet, SendMessage},
         workload::{check::DryCloseLoop, CloseLoop, Invoke, InvokeOk, Workload},

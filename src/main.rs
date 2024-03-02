@@ -12,7 +12,7 @@ use augustus::{
     event::{
         erased::{
             session::{Buffered, Sender},
-            Blanket, OnEvent, OnTimer, Session,
+            Blanket, OnEventFixTimer, OnTimerFixTimer, Session,
         },
         session::SessionTimer,
         SendEvent,
@@ -182,7 +182,7 @@ impl NewClient<Buffered<pbft::Client<SocketAddr>>> for ClientConfig {
 }
 
 async fn client_session<
-    S: OnEvent<Invoke, SessionTimer> + OnTimer<SessionTimer> + Send + Sync + 'static,
+    S: OnEventFixTimer<Invoke, SessionTimer> + OnTimerFixTimer<SessionTimer> + Send + Sync + 'static,
 >(
     config: ClientConfig,
     on_buf: impl Fn(&[u8], &mut Sender<S>) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
@@ -264,7 +264,7 @@ where
 }
 
 async fn spawn_client_sessions<
-    S: OnEvent<Invoke, SessionTimer> + OnTimer<SessionTimer> + Send + Sync + 'static,
+    S: OnEventFixTimer<Invoke, SessionTimer> + OnTimerFixTimer<SessionTimer> + Send + Sync + 'static,
     W: Workload + Into<Vec<Duration>> + Send + Sync + 'static,
 >(
     sessions: &mut JoinSet<anyhow::Result<()>>,
@@ -418,7 +418,7 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
 }
 
 async fn replica_session<
-    S: OnTimer<SessionTimer> + Send + 'static,
+    S: OnTimerFixTimer<SessionTimer> + Send + 'static,
     F: Future<Output = anyhow::Result<()>> + Send + 'static,
 >(
     mut state: S,

@@ -12,7 +12,7 @@ use std::{
 };
 
 use crate::{
-    event::{OnEvent, OnTimer, SendEvent, Timer},
+    event::{erased::OnEvent, OnTimer, SendEvent, Timer},
     message::Payload,
 };
 
