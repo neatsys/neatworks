@@ -11,8 +11,8 @@ Bridge the gaps between the abstracted protocols and wrapping layers with combin
 Finally, for the cases that the boilerblate cannot be modeled into combinators, e.g. consolidating multiple `impl OnEvent`s into systems for benchmarking or testing, provide showcases for reference and templating.
 
 The codebase contains selected dependencies that are verified to work well with each other, and demonstrates best practice of constructing software for various purpose, including:
-* concurrency manager based on `tokio` 
-* IO provider: `tokio`
+* event loop solution based on `tokio` and `std`
+* IO solution based on `tokio` and `std`
 * timer service provider: `tokio` and a baseline implementation
 * `anyhow` as error solution
 * `bincode` as (de)serialization solution (with occasionally used `serde_json`)
@@ -23,6 +23,6 @@ The codebase contains selected dependencies that are verified to work well with 
 * `terraform`-based cluster/infrastracture management
 * `tracing` as logging solution
 
-The codebase is intentionally published under restrictly license, as it's intended for non-commercial use and all forkings are expected to be contributed back to upstream eventually. Besides it is inherently never production ready because e.g. breaking changes happen all the time.
+The codebase is intentionally published under a restricted license, as it's intended for non-commercial use and all forkings are expected to be contributed back to upstream eventually. Besides it is inherently never production ready because e.g. breaking changes happen all the time.
 
 TODO list all implemented protocols and applications.
