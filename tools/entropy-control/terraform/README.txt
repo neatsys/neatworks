@@ -51,7 +51,7 @@ $ sudo ip addr add <PUBLIC IP> dev ens5
 
 Notice that instance public IPs change every time `terraform apply ...` is executed (which is possibly reason why it is not bound to network interfaces by default). So the procedure above has to be repeated per applying.
 
-IPFS node must listen to *both* public and private IPs in order to connect to each other under any condition. To set up a node that listen on the default port 4000
+IPFS node must listen to *both* public and private IPs *explicitly* (so `0.0.0.0` not work) in order to connect to each other under any condition. To set up a node that listen on the default port 4000
 $ ipfs init --profile server
 $ ipfs config Addresses.Swarm --json '["/ip4/<PUBLIC IP>/tcp/4000", "/ip4/<PRIVATE IP>/tcp/4000]'
 $ ipfs daemon
