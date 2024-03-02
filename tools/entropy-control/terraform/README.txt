@@ -1,4 +1,4 @@
-Install Terraform and AWS cli tool.
+Install Terraform and AWS cli tool. Install `jq` apt package.
 
 Set up AWS confidence with `aws configure`.
 
@@ -36,15 +36,17 @@ $ terraform apply -var mode=five -var instance-count=10 -var state=stopped
 
 Repeat the original `terraform apply ...` to restart instances.
 
-To modify infrastracture specification: repeat the original `terraform apply ...` with different values. For example,  create evaluation infrastracture in 1 region with 10 instances
+To modify infrastracture specification: repeat the original `terraform apply ...` with different values. For example,  create evaluation infrastracture in 1 region with a total 10 instances
 $ terraform apply -var mode=one -var instance-count=10
+
+(Currently there's no mode two, three or four.^ ^)
 
 Destroy instances
 $ terraform destroy -var mode=five -var instance-count=10
 
 The mode and instance count must be identical to the last `terraform apply ...` command.
 
-Additional notes on IPFS. By default, network interfaces on EC2 instances does not bind its public IP. In order for IPFS node to establish bidirectional connections, you have to manually do the binding
+Additional notes on IPFS. By default, network interfaces on EC2 instances does not bind its public IP. In order for IPFS node to establish bidirectional connections, you have to manually do the binding by executing on each EC2 instance
 $ sudo ip addr add <PUBLIC IP> dev ens5
 
 Notice that instance public IPs change every time `terraform apply ...` is executed (which is possibly reason why it is not bound to network interfaces by default). So the procedure above has to be repeated per applying.
