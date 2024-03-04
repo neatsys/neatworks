@@ -272,10 +272,16 @@ pub mod erased {
     pub struct Blanket<S>(pub S);
 
     impl<S, T> super::OnEventUniversal<T> for Blanket<S> {
-        type Event = Event<S, T>;
+        type Event = Event<Blanket<S>, T>;
 
         fn on_event(&mut self, event: Self::Event, timer: &mut T) -> anyhow::Result<()> {
             event(self, timer)
+        }
+    }
+
+    impl<S: OnEventFixTimer<M, T>, M, T> OnEventFixTimer<M, T> for Blanket<S> {
+        fn on_event(&mut self, event: M, timer: &mut T) -> anyhow::Result<()> {
+            self.0.on_event(event, timer)
         }
     }
 
@@ -285,19 +291,13 @@ pub mod erased {
         }
     }
 
-    pub trait OnEventFixTimer<M, T> {
+    trait OnEventFixTimer<M, T> {
         fn on_event(&mut self, event: M, timer: &mut T) -> anyhow::Result<()>;
     }
 
-    pub trait OnTimerFixTimer<T> {
+    trait OnTimerFixTimer<T> {
         fn on_timer(&mut self, timer_id: TimerId, timer: &mut T) -> anyhow::Result<()>;
     }
-
-    // impl<S, T> OnEventFixTimer<Event<S, T>, T> for S {
-    //     fn on_event(&mut self, event: Event<S, T>, timer: &mut T) -> anyhow::Result<()> {
-    //         event(self, timer)
-    //     }
-    // }
 
     // ideally the following impl should directly apply to S
     // however that will be conflicted with the following impl on Buffered
@@ -473,31 +473,12 @@ pub mod erased {
     }
 
     pub mod blocking {
-        use std::sync::mpsc::Receiver;
+        use crate::event::ordered::Timer;
 
-        use crate::event::{blocking::run_internal, ordered::Timer};
-
-        use super::{Erasure, OnTimerFixTimer};
+        use super::Erasure;
 
         pub type Event<S> = super::Event<S, Timer>;
         pub type Sender<S> = Erasure<crate::event::blocking::Sender<Event<S>>, S, Timer>;
-
-        pub fn channel<S>() -> (Sender<S>, Receiver<Event<S>>) {
-            let (sender, receiver) = std::sync::mpsc::channel();
-            (Erasure::from(sender), receiver)
-        }
-
-        pub fn run<S: OnTimerFixTimer<Timer>>(
-            receiver: Receiver<Event<S>>,
-            state: &mut S,
-        ) -> anyhow::Result<()> {
-            run_internal(
-                receiver,
-                state,
-                |state, event, timer| event(state, timer),
-                OnTimerFixTimer::on_timer,
-            )
-        }
 
         pub type Buffered<S> = super::Buffered<S, Timer>;
     }
