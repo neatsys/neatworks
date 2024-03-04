@@ -12,7 +12,7 @@ use augustus::{
     event::{
         erased::{
             session::{Buffered, Sender},
-            Blanket, OnEventFixTimer, OnTimerFixTimer, Session,
+            Blanket, OnEventFixTimer, OnTimerFixTimer, Session, Unify,
         },
         session::SessionTimer,
         SendEvent,
@@ -98,7 +98,7 @@ async fn start_client(State(state): State<AppState>, Json(config): Json<ClientCo
             .build()?;
         match config.protocol {
             Protocol::Unreplicated => {
-                runtime.block_on(client_session::<Blanket<unreplicated::Client<_, _, _>>>(
+                runtime.block_on(client_session::<Unify<unreplicated::Client<_, _, _>>>(
                     config,
                     unreplicated::erased::to_client_on_buf,
                     benchmark_result,
@@ -127,7 +127,7 @@ trait NewClient<S> {
 
 impl
     NewClient<
-        Blanket<
+        Unify<
             unreplicated::Client<
                 Box<dyn unreplicated::ToReplicaNet<SocketAddr> + Send + Sync>,
                 Box<dyn unreplicated::ClientUpcall + Send + Sync>,
@@ -142,14 +142,14 @@ impl
         addr: SocketAddr,
         net: Udp,
         upcall: impl SendEvent<InvokeOk> + Send + Sync + 'static,
-    ) -> Blanket<
+    ) -> Unify<
         unreplicated::Client<
             Box<dyn unreplicated::ToReplicaNet<SocketAddr> + Send + Sync>,
             Box<dyn unreplicated::ClientUpcall + Send + Sync>,
             SocketAddr,
         >,
     > {
-        Blanket(unreplicated::Client::new(
+        Unify(unreplicated::Client::new(
             id,
             addr,
             Box::new(unreplicated::ToReplicaMessageNet::new(IndexNet::new(
@@ -288,31 +288,34 @@ where
         let mut session = Session::new();
         let mut close_loop_session = Session::new();
 
-        let mut state = config.new_client(
+        let mut state = Blanket(config.new_client(
             client_id,
             addr,
             net.clone(),
-            close_loop_session.erased_sender(),
-        );
-        let mut close_loop = Blanket(CloseLoop::new(session.erased_sender(), workload()));
+            Sender::from(close_loop_session.sender()),
+        ));
+        let mut close_loop = Blanket(Unify(CloseLoop::new(
+            Sender::from(session.sender()),
+            workload(),
+        )));
 
-        let mut sender = session.erased_sender();
+        let mut sender = Sender::from(session.sender());
         let on_buf = on_buf.clone();
         sessions.spawn(async move { net.recv_session(|buf| on_buf(buf, &mut sender)).await });
-        sessions.spawn(async move { session.erased_run(&mut state).await });
+        sessions.spawn(async move { session.run(&mut state).await });
         let stop = stop.clone();
         let latencies = latencies.clone();
         let barrier = barrier.clone();
         sessions.spawn(async move {
             close_loop.launch()?;
             tokio::select! {
-                result = close_loop_session.erased_run(&mut close_loop) => result?,
+                result = close_loop_session.run(&mut close_loop) => result?,
                 () = stop.cancelled() => {}
             }
             latencies
                 .lock()
                 .unwrap()
-                .extend(close_loop.0.workload.into());
+                .extend(close_loop.0 .0.workload.into());
             barrier.wait().await;
             Ok(())
         });
@@ -377,7 +380,7 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
         match config.protocol {
             Protocol::Unreplicated => {
                 assert_eq!(config.replica_id, 0);
-                let state = Blanket(unreplicated::Replica::new(
+                let state = Unify(unreplicated::Replica::new(
                     app,
                     Box::new(unreplicated::ToClientMessageNet::new(net.clone())),
                 ));
@@ -421,7 +424,7 @@ async fn replica_session<
     S: OnTimerFixTimer<SessionTimer> + Send + 'static,
     F: Future<Output = anyhow::Result<()>> + Send + 'static,
 >(
-    mut state: S,
+    state: S,
     on_buf: impl Fn(&[u8], &mut Sender<S>) -> anyhow::Result<()> + Send + Sync + 'static,
     net: Udp,
     crypto_session: impl FnOnce(Sender<S>) -> F,
@@ -429,14 +432,15 @@ async fn replica_session<
 ) -> anyhow::Result<()> {
     let mut session = Session::new();
     let mut recv_session = spawn({
-        let mut sender = session.erased_sender();
+        let mut sender = Sender::from(session.sender());
         async move { net.recv_session(|buf| on_buf(buf, &mut sender)).await }
     });
     let mut crypto_session = spawn({
-        let sender = session.erased_sender();
+        let sender = Sender::from(session.sender());
         crypto_session(sender)
     });
-    let mut state_session = spawn(async move { session.erased_run(&mut state).await });
+    let mut state = Blanket(state);
+    let mut state_session = spawn(async move { session.run(&mut state).await });
     'select: {
         tokio::select! {
             result = &mut recv_session => result??,

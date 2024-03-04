@@ -20,7 +20,7 @@ use augustus::{
     app::Null,
     event::{
         blocking,
-        erased::{self, Blanket},
+        erased::{self, Unify},
         ordered::Timer,
         Inline, OnTimer, Session,
     },
@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
                     )),
                     close_loop_session.erased_sender(),
                 );
-                let mut close_loop = Blanket(CloseLoop::new(
+                let mut close_loop = Unify(CloseLoop::new(
                     state_session.sender(),
                     OpLatency::new(Iter(repeat_with(Default::default))),
                 ));
@@ -184,7 +184,7 @@ async fn main() -> anyhow::Result<()> {
     let net = ToClientMessageNet::new(raw_net.clone());
     if flag_boxed {
         println!("Starting replica with boxed events and net");
-        let mut state = Blanket(Replica::new(Null, Box::new(net)));
+        let mut state = Unify(Replica::new(Null, Box::new(net)));
         let mut state_session = erased::Session::new();
         let mut state_sender = state_session.erased_sender();
         let recv_session = raw_net.recv_session(move |buf| {

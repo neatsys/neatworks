@@ -6,7 +6,9 @@ use tokio::{
     time::{interval, sleep},
 };
 
-use crate::event::{OnEvent, OnTimer, SendEvent, Timer, TimerId};
+use crate::event::{SendEvent, Timer, TimerId};
+
+use super::{OnEventUniversal, OnTimerUniversal};
 
 #[derive(Debug)]
 enum Event<M> {
@@ -102,20 +104,7 @@ impl<M> Session<M> {
 
     pub async fn run(
         &mut self,
-        state: &mut (impl OnEvent<Event = M> + OnTimer),
-    ) -> anyhow::Result<()>
-    where
-        M: Send + 'static,
-    {
-        self.run_internal(state, OnEvent::on_event, OnTimer::on_timer)
-            .await
-    }
-
-    pub async fn run_internal<S>(
-        &mut self,
-        state: &mut S,
-        mut on_event: impl FnMut(&mut S, M, &mut SessionTimer) -> anyhow::Result<()>,
-        mut on_timer: impl FnMut(&mut S, TimerId, &mut SessionTimer) -> anyhow::Result<()>,
+        state: &mut (impl OnEventUniversal<SessionTimer, Event = M> + OnTimerUniversal<SessionTimer>),
     ) -> anyhow::Result<()>
     where
         M: Send + 'static,
@@ -160,9 +149,9 @@ impl<M> Session<M> {
                         // (so wish i have direct access to the timer wheel...)
                         continue;
                     }
-                    on_timer(state, TimerId(timer_id), &mut self.timer)?
+                    state.on_timer(TimerId(timer_id), &mut self.timer)?
                 }
-                Event::Other(event) => on_event(state, event, &mut self.timer)?,
+                Event::Other(event) => state.on_event(event, &mut self.timer)?,
             }
         }
     }

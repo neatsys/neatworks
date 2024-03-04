@@ -213,6 +213,33 @@ impl<S: OnEventRichTimer> OnTimer for Buffered<S, S::Event> {
     }
 }
 
+pub trait OnEventUniversal<T> {
+    type Event;
+
+    fn on_event(&mut self, event: Self::Event, timer: &mut T) -> anyhow::Result<()>;
+}
+
+pub trait OnTimerUniversal<T> {
+    fn on_timer(&mut self, timer_id: TimerId, timer: &mut T) -> anyhow::Result<()>;
+}
+
+#[derive(derive_more::Deref, derive_more::DerefMut)]
+pub struct Unify<S>(pub S);
+
+impl<S: OnEvent, T: Timer> OnEventUniversal<T> for Unify<S> {
+    type Event = S::Event;
+
+    fn on_event(&mut self, event: Self::Event, timer: &mut T) -> anyhow::Result<()> {
+        self.0.on_event(event, timer)
+    }
+}
+
+impl<S: OnTimer, T: Timer> OnTimerUniversal<T> for Unify<S> {
+    fn on_timer(&mut self, timer_id: TimerId, timer: &mut T) -> anyhow::Result<()> {
+        self.0.on_timer(timer_id, timer)
+    }
+}
+
 pub use session::Session;
 
 // alternative interface that performs type erasure on event types
@@ -241,6 +268,23 @@ pub mod erased {
         fn on_event(&mut self, event: M, timer: &mut impl Timer) -> anyhow::Result<()>;
     }
 
+    #[derive(derive_more::Deref, derive_more::DerefMut)]
+    pub struct Blanket<S>(pub S);
+
+    impl<S, T> super::OnEventUniversal<T> for Blanket<S> {
+        type Event = Event<S, T>;
+
+        fn on_event(&mut self, event: Self::Event, timer: &mut T) -> anyhow::Result<()> {
+            event(self, timer)
+        }
+    }
+
+    impl<S: OnTimerFixTimer<T>, T> super::OnTimerUniversal<T> for Blanket<S> {
+        fn on_timer(&mut self, timer_id: TimerId, timer: &mut T) -> anyhow::Result<()> {
+            self.0.on_timer(timer_id, timer)
+        }
+    }
+
     pub trait OnEventFixTimer<M, T> {
         fn on_event(&mut self, event: M, timer: &mut T) -> anyhow::Result<()>;
     }
@@ -263,17 +307,45 @@ pub mod erased {
     // and wrap `impl erased::OnEventRichTimer<_>` with one of the `Buffered`, then it proabably
     // works
     #[derive(derive_more::Deref, derive_more::DerefMut)]
-    pub struct Blanket<S>(pub S);
+    pub struct Unify<S>(pub S);
 
-    impl<S: OnEvent<M>, M, T: Timer> OnEventFixTimer<M, T> for Blanket<S> {
+    impl<S: OnEvent<M>, M, T: Timer> OnEventFixTimer<M, T> for Unify<S> {
         fn on_event(&mut self, event: M, timer: &mut T) -> anyhow::Result<()> {
             self.0.on_event(event, timer)
         }
     }
 
-    impl<S: super::OnTimer, T: Timer> OnTimerFixTimer<T> for Blanket<S> {
+    impl<S: super::OnTimer, T: Timer> OnTimerFixTimer<T> for Unify<S> {
         fn on_timer(&mut self, timer_id: TimerId, timer: &mut T) -> anyhow::Result<()> {
             self.0.on_timer(timer_id, timer)
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct Erasure<E, S, T>(E, std::marker::PhantomData<(S, T)>);
+
+    impl<E, S, T> From<E> for Erasure<E, S, T> {
+        fn from(value: E) -> Self {
+            Self(value, Default::default())
+        }
+    }
+
+    impl<E: Clone, S, T> Clone for Erasure<E, S, T> {
+        fn clone(&self) -> Self {
+            Self::from(self.0.clone())
+        }
+    }
+
+    impl<
+            E: SendEvent<Event<S, T>>,
+            S: OnEventFixTimer<M, T>,
+            T: Timer,
+            M: Send + Sync + 'static,
+        > SendEvent<M> for Erasure<E, S, T>
+    {
+        fn send(&mut self, event: M) -> anyhow::Result<()> {
+            let event = move |state: &mut S, timer: &mut T| state.on_event(event, timer);
+            self.0.send(Box::new(event))
         }
     }
 
@@ -303,6 +375,16 @@ pub mod erased {
         attached: Attached<S, T>,
     }
 
+    type Attached<S, T> = HashMap<
+        TimerId,
+        // not FnMut() -> Event<S, BufferedTimer<'???, T, S>> because cannot write out the lifetime
+        Box<
+            dyn FnMut() -> Box<dyn FnOnce(&mut Buffered<S, T>, &mut T) -> anyhow::Result<()>>
+                + Send
+                + Sync,
+        >,
+    >;
+
     impl<S: Debug, T> Debug for Buffered<S, T> {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("Buffered")
@@ -319,16 +401,6 @@ pub mod erased {
             }
         }
     }
-
-    type Attached<S, T> = HashMap<
-        TimerId,
-        // not FnMut() -> Event<S, BufferedTimer<'???, T, S>> because cannot write out the lifetime
-        Box<
-            dyn FnMut() -> Box<dyn FnOnce(&mut Buffered<S, T>, &mut T) -> anyhow::Result<()>>
-                + Send
-                + Sync,
-        >,
-    >;
 
     struct BufferedTimer<'a, T, S> {
         inner: &'a mut T,
@@ -382,40 +454,12 @@ pub mod erased {
         }
     }
 
-    #[derive(Debug)]
-    pub struct Erasure<E, S, T>(E, std::marker::PhantomData<(S, T)>);
-
-    impl<E, S, T> From<E> for Erasure<E, S, T> {
-        fn from(value: E) -> Self {
-            Self(value, Default::default())
-        }
-    }
-
-    impl<E: Clone, S, T> Clone for Erasure<E, S, T> {
-        fn clone(&self) -> Self {
-            Self::from(self.0.clone())
-        }
-    }
-
-    impl<
-            E: SendEvent<Event<S, T>>,
-            S: OnEventFixTimer<M, T>,
-            T: Timer,
-            M: Send + Sync + 'static,
-        > SendEvent<M> for Erasure<E, S, T>
-    {
-        fn send(&mut self, event: M) -> anyhow::Result<()> {
-            let event = move |state: &mut S, timer: &mut T| state.on_event(event, timer);
-            self.0.send(Box::new(event))
-        }
-    }
-
     pub use session::Session;
 
     pub mod session {
         use crate::event::session::SessionTimer;
 
-        use super::{Erasure, OnTimerFixTimer};
+        use super::Erasure;
 
         // some historical snippet when `Timer` was still implemented by `Session<_>` itself
         // #[derive(derive_more::From)]
@@ -424,23 +468,6 @@ pub mod erased {
         pub type Event<S> = super::Event<S, SessionTimer>;
         pub type Session<S> = crate::event::Session<Event<S>>;
         pub type Sender<S> = Erasure<crate::event::session::Sender<Event<S>>, S, SessionTimer>;
-
-        impl<S> Session<S> {
-            pub fn erased_sender(&self) -> Sender<S> {
-                Erasure(self.sender(), Default::default())
-            }
-        }
-
-        impl<S: OnTimerFixTimer<SessionTimer> + 'static> Session<S> {
-            pub async fn erased_run(&mut self, state: &mut S) -> anyhow::Result<()> {
-                self.run_internal(
-                    state,
-                    |state, event, timer| event(state, timer),
-                    OnTimerFixTimer::on_timer,
-                )
-                .await
-            }
-        }
 
         pub type Buffered<S> = super::Buffered<S, SessionTimer>;
     }
