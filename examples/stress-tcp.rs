@@ -9,7 +9,10 @@ use std::{
 };
 
 use augustus::{
-    event::erased::{session::Buffered, Session},
+    event::erased::{
+        session::{Buffered, Sender},
+        Blanket, Session,
+    },
     net::{
         session::{tcp_listen_session, Tcp, TcpControl},
         SendMessage,
@@ -40,10 +43,10 @@ async fn main() -> anyhow::Result<()> {
         }));
     }
     for _ in 0..num_peer {
-        let mut control = Buffered::from(TcpControl::<Vec<u8>>::new());
+        let mut control = Blanket(Buffered::from(TcpControl::<Vec<u8>>::new()));
         let mut control_session = Session::new();
-        let mut net = Tcp(control_session.erased_sender());
-        sessions.spawn(async move { control_session.erased_run(&mut control).await });
+        let mut net = Tcp(Sender::from(control_session.sender()));
+        sessions.spawn(async move { control_session.run(&mut control).await });
         sessions.spawn(async move {
             loop {
                 for j in 0..multiplier {

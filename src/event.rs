@@ -128,7 +128,7 @@ pub trait OnTimer {
 
 pub struct Inline<'a, S, T>(pub &'a mut S, pub &'a mut T);
 
-impl<S: OnEvent, T: Timer> SendEvent<S::Event> for Inline<'_, S, T> {
+impl<S: OnEventUniversal<T>, T: Timer> SendEvent<S::Event> for Inline<'_, S, T> {
     fn send(&mut self, event: S::Event) -> anyhow::Result<()> {
         self.0.on_event(event, self.1)
     }

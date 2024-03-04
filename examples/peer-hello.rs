@@ -3,7 +3,10 @@ use std::{env::args, net::SocketAddr};
 use augustus::{
     crypto::{Crypto, Verifiable},
     event::{
-        erased::{session::Buffered, Session},
+        erased::{
+            session::{Buffered, Sender},
+            Blanket, Session,
+        },
         SendEvent as _,
     },
     kademlia::{Buckets, FindPeer, FindPeerOk, Peer, PeerId, PeerRecord},
@@ -61,12 +64,12 @@ async fn main() -> anyhow::Result<()> {
         let seed_peer = PeerRecord::new(seed_crypto.public_key(), seed_addr.parse()?);
         send_hello = Some(seed_peer.id);
         buckets.insert(seed_peer)?;
-        peer = Buffered::from(Peer::new(
+        peer = Peer::new(
             buckets,
             MessageNet::new(socket_net.clone()),
-            control_session.erased_sender(),
-            Worker::new_inline(crypto, Box::new(peer_session.erased_sender())),
-        ));
+            Sender::from(control_session.sender()),
+            Worker::new_inline(crypto, Box::new(Sender::from(peer_session.sender()))),
+        );
         let cancel = bootstrap_finished.clone();
         peer.bootstrap(Box::new(move || {
             cancel.cancel();
@@ -78,16 +81,16 @@ async fn main() -> anyhow::Result<()> {
         println!("SEED PeerId {}", H256(peer_id));
 
         let buckets = Buckets::new(peer_record);
-        peer = Buffered::from(Peer::new(
+        peer = Peer::new(
             buckets,
             MessageNet::new(socket_net.clone()),
-            control_session.erased_sender(),
-            Worker::new_inline(seed_crypto, Box::new(peer_session.erased_sender())),
-        ));
+            Sender::from(control_session.sender()),
+            Worker::new_inline(seed_crypto, Box::new(Sender::from(peer_session.sender()))),
+        );
         bootstrap_finished.cancel(); // skip bootstrap on seed peer
     }
 
-    let mut peer_net = PeerNet(control_session.erased_sender());
+    let mut peer_net = PeerNet(Sender::from(control_session.sender()));
     let hello_session = spawn({
         let mut peer_net = peer_net.clone();
         async move {
@@ -99,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let mut peer_sender = peer_session.erased_sender();
+    let mut peer_sender = Sender::from(peer_session.sender());
     let socket_session = socket_net.recv_session(|buf| {
         let message = bincode::options()
             .allow_trailing_bytes()
@@ -125,12 +128,13 @@ async fn main() -> anyhow::Result<()> {
         Ok(())
     });
 
-    let mut control = Buffered::from(Control::new(
+    let mut control = Blanket(Buffered::from(Control::new(
         augustus::net::MessageNet::<_, Message>::new(socket_net.clone()),
-        peer_session.erased_sender(),
-    ));
-    let peer_session = peer_session.erased_run(&mut peer);
-    let control_session = control_session.erased_run(&mut control);
+        Sender::from(peer_session.sender()),
+    )));
+    let mut peer = Blanket(Buffered::from(peer));
+    let peer_session = peer_session.run(&mut peer);
+    let control_session = control_session.run(&mut control);
     tokio::select! {
         result = socket_session => result?,
         result = peer_session => result?,

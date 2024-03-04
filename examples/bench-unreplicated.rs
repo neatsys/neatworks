@@ -20,9 +20,9 @@ use augustus::{
     app::Null,
     event::{
         blocking,
-        erased::{self, Unify},
+        erased::{self, Blanket},
         ordered::Timer,
-        Inline, OnTimer, Session,
+        Inline, OnTimer, Session, Unify,
     },
     net::{session::Udp, IndexNet},
     unreplicated::{
@@ -75,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
                 let mut state_session = Session::<unreplicated::ClientEvent>::new();
                 let mut close_loop_session = erased::Session::new();
 
-                let mut state = Client::new(
+                let mut state = Unify(Client::new(
                     id,
                     addr,
                     ToReplicaMessageNet::new(IndexNet::new(
@@ -83,12 +83,12 @@ async fn main() -> anyhow::Result<()> {
                         replica_addrs.clone(),
                         None,
                     )),
-                    close_loop_session.erased_sender(),
-                );
-                let mut close_loop = Unify(CloseLoop::new(
+                    erased::session::Sender::from(close_loop_session.sender()),
+                ));
+                let mut close_loop = Blanket(erased::Unify(CloseLoop::new(
                     state_session.sender(),
                     OpLatency::new(Iter(repeat_with(Default::default))),
-                ));
+                )));
                 let mut state_sender = state_session.sender();
                 sessions.spawn_on(
                     async move {
@@ -108,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
                     async move {
                         close_loop.launch()?;
                         tokio::select! {
-                            result = close_loop_session.erased_run(&mut close_loop) => result?,
+                            result = close_loop_session.run(&mut close_loop) => result?,
                             () = cancel.cancelled() => {}
                         }
                         let _ = count_sender.send(close_loop.workload.latencies.len());
@@ -144,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
         let raw_net = augustus::net::blocking::Udp(socket.into());
         let net = ToClientMessageNet::new(raw_net.clone());
 
-        let mut state = Replica::new(Null, net);
+        let mut state = Unify(Replica::new(Null, net));
         if !flag_dual {
             let recv_session = spawn_blocking(move || {
                 let mut timer = Timer::new();
@@ -184,16 +184,16 @@ async fn main() -> anyhow::Result<()> {
     let net = ToClientMessageNet::new(raw_net.clone());
     if flag_boxed {
         println!("Starting replica with boxed events and net");
-        let mut state = Unify(Replica::new(Null, Box::new(net)));
+        let mut state = Blanket(erased::Unify(Replica::new(Null, Box::new(net))));
         let mut state_session = erased::Session::new();
-        let mut state_sender = state_session.erased_sender();
+        let mut state_sender = erased::session::Sender::from(state_session.sender());
         let recv_session = raw_net.recv_session(move |buf| {
             unreplicated::erased::to_replica_on_buf(buf, &mut state_sender)
         });
-        let state_session = state_session.erased_run(&mut state);
+        let state_session = state_session.run(&mut state);
         run(recv_session, state_session).await
     } else {
-        let mut state = Replica::new(Null, net);
+        let mut state = Unify(Replica::new(Null, net));
         let mut state_session = Session::<unreplicated::ReplicaEvent<_>>::new();
         let mut state_sender = state_session.sender();
         let recv_session =

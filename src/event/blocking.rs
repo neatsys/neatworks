@@ -3,7 +3,7 @@ use std::{
     time::Instant,
 };
 
-use super::{ordered::Timer, OnEvent, OnTimer, SendEvent, TimerId};
+use super::{ordered::Timer, OnEventUniversal, OnTimerUniversal, SendEvent};
 
 pub type Sender<M> = std::sync::mpsc::Sender<M>;
 
@@ -13,20 +13,11 @@ impl<N: Into<M>, M> SendEvent<N> for Sender<M> {
     }
 }
 
-pub fn run<M>(
-    receiver: Receiver<M>,
-    state: &mut (impl OnEvent<Event = M> + OnTimer),
-) -> anyhow::Result<()> {
-    run_internal(receiver, state, OnEvent::on_event, OnTimer::on_timer)
-}
-
 // there's no way to cancel a blocking run, so it should be fine to create timer in the function
 // scope. not absolutely sure though
-pub fn run_internal<S, M>(
+pub fn run<M>(
     receiver: Receiver<M>,
-    state: &mut S,
-    mut on_event: impl FnMut(&mut S, M, &mut Timer) -> anyhow::Result<()>,
-    mut on_timer: impl FnMut(&mut S, TimerId, &mut Timer) -> anyhow::Result<()>,
+    state: &mut (impl OnEventUniversal<Timer, Event = M> + OnTimerUniversal<Timer>),
 ) -> anyhow::Result<()> {
     let mut timer = Timer::new();
     loop {
@@ -40,9 +31,9 @@ pub fn run_internal<S, M>(
             Some(receiver.recv().map_err(|err| anyhow::anyhow!(err))?)
         };
         if let Some(event) = event {
-            on_event(state, event, &mut timer)?
+            state.on_event(event, &mut timer)?
         } else {
-            on_timer(state, timer.advance()?, &mut timer)?
+            state.on_timer(timer.advance()?, &mut timer)?
         }
     }
 }

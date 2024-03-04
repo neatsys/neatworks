@@ -17,7 +17,7 @@ use augustus::{
     event::{
         erased::{
             session::{Buffered, Sender},
-            Session,
+            Blanket, Session,
         },
         SendEvent,
     },
@@ -167,7 +167,8 @@ struct AppState {
 #[derive(Default)]
 struct PeersState {
     sessions: JoinSet<anyhow::Result<()>>,
-    senders: Vec<Sender<Buffered<Peer<[u8; 32]>>>>,
+    #[allow(clippy::type_complexity)]
+    senders: Vec<Sender<Blanket<Buffered<Peer<[u8; 32]>>>>>,
     // cancel
 }
 
@@ -211,7 +212,7 @@ async fn start_peers(State(state): State<AppState>, Json(config): Json<StartPeer
     }
     for (record, crypto, rng) in local_peers {
         let peer_session = Session::new();
-        peers.senders.push(peer_session.erased_sender());
+        peers.senders.push(Sender::from(peer_session.sender()));
         // peers.sessions.spawn_on(
         peers.sessions.spawn(
             start_peer(
@@ -233,7 +234,7 @@ async fn start_peer(
     crypto: Crypto<PeerId>,
     mut rng: StdRng,
     mut records: Vec<PeerRecord<PublicKey, SocketAddr>>,
-    mut peer_session: Session<Buffered<Peer<[u8; 32]>>>,
+    mut peer_session: Session<Blanket<Buffered<Peer<[u8; 32]>>>>,
     upcall_sender: UnboundedSender<Upcall>,
     config: StartPeersConfig,
 ) -> anyhow::Result<()> {
@@ -270,37 +271,40 @@ async fn start_peer(
     let (fs_sender, fs_receiver) = unbounded_channel();
     let mut tcp_control_session = Session::new();
 
-    let mut kademlia_peer = Buffered::from(kademlia::Peer::new(
+    let mut kademlia_peer = Blanket(Buffered::from(kademlia::Peer::new(
         buckets,
         // MessageNet::new(socket_net.clone()),
-        MessageNet::new(Tcp(tcp_control_session.erased_sender())),
-        kademlia_control_session.erased_sender(),
-        Worker::new_inline(crypto.clone(), Box::new(kademlia_session.erased_sender())),
-    ));
-    let mut kademlia_control = Buffered::from(Control::new(
+        MessageNet::new(Tcp(Sender::from(tcp_control_session.sender()))),
+        Sender::from(kademlia_control_session.sender()),
+        Worker::new_inline(
+            crypto.clone(),
+            Box::new(Sender::from(kademlia_session.sender())),
+        ),
+    )));
+    let mut kademlia_control = Blanket(Buffered::from(Control::new(
         // socket_net.clone(),
-        Tcp(tcp_control_session.erased_sender()),
-        kademlia_session.erased_sender(),
-    ));
-    let mut peer = Buffered::from(Peer::new(
+        Tcp(Sender::from(tcp_control_session.sender())),
+        Sender::from(kademlia_session.sender()),
+    )));
+    let mut peer = Blanket(Buffered::from(Peer::new(
         peer_id,
         crypto,
         config.fragment_len,
         config.chunk_k,
         config.chunk_n,
         config.chunk_m,
-        MessageNet::<_, SocketAddr>::new(PeerNet(kademlia_control_session.erased_sender())),
+        MessageNet::<_, SocketAddr>::new(PeerNet(Sender::from(kademlia_control_session.sender()))),
         blob_sender.clone(),
         upcall_sender,
-        Worker::new_inline((), Box::new(peer_session.erased_sender())),
+        Worker::new_inline((), Box::new(Sender::from(peer_session.sender()))),
         fs_sender,
-    ));
-    let mut tcp_control = Buffered::from(TcpControl::new());
+    )));
+    let mut tcp_control = Blanket(Buffered::from(TcpControl::new()));
 
     // let socket_session = socket_net.recv_session({
     let socket_session = tcp_listen_session(listener, {
-        let mut peer_sender = peer_session.erased_sender();
-        let mut kademlia_sender = kademlia_session.erased_sender();
+        let mut peer_sender = Sender::from(peer_session.sender());
+        let mut kademlia_sender = Sender::from(kademlia_session.sender());
         move |buf| {
             entropy::on_buf(
                 buf,
@@ -310,17 +314,17 @@ async fn start_peer(
             )
         }
     });
-    let kademlia_session = kademlia_session.erased_run(&mut kademlia_peer);
+    let kademlia_session = kademlia_session.run(&mut kademlia_peer);
     let blob_session = blob::session(
         ip,
         blob_receiver,
-        MessageNet::<_, SocketAddr>::new(PeerNet(kademlia_control_session.erased_sender())),
-        peer_session.erased_sender(),
+        MessageNet::<_, SocketAddr>::new(PeerNet(Sender::from(kademlia_control_session.sender()))),
+        Sender::from(peer_session.sender()),
     );
-    let kademlia_control_session = kademlia_control_session.erased_run(&mut kademlia_control);
-    let fs_session = entropy::fs::session(path, fs_receiver, peer_session.erased_sender());
-    let peer_session = peer_session.erased_run(&mut peer);
-    let tcp_control_session = tcp_control_session.erased_run(&mut tcp_control);
+    let kademlia_control_session = kademlia_control_session.run(&mut kademlia_control);
+    let fs_session = entropy::fs::session(path, fs_receiver, Sender::from(peer_session.sender()));
+    let peer_session = peer_session.run(&mut peer);
+    let tcp_control_session = tcp_control_session.run(&mut tcp_control);
 
     tokio::select! {
         result = socket_session => result?,
