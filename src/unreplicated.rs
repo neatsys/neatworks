@@ -354,7 +354,7 @@ pub mod check {
         app::KVStore,
         event::{erased::OnEvent, LinearTimer, OnTimer as _, TimerId, Transient, UnreachableTimer},
         message::Request,
-        net::{events::Recv, IndexNet, SendMessage},
+        net::{events::Recv, SendMessage},
         workload::{check::DryCloseLoop, CloseLoop, Invoke, InvokeOk, Workload},
     };
 
@@ -366,7 +366,7 @@ pub mod check {
         Replica,
     }
 
-    type Client = super::Client<IndexNet<Transient<MessageEvent>, Addr>, Transient<InvokeOk>, Addr>;
+    type Client = super::Client<Transient<MessageEvent>, Transient<InvokeOk>, Addr>;
     type Replica = super::Replica<KVStore, Transient<MessageEvent>, Addr>;
 
     pub struct State<W: Workload> {
@@ -484,6 +484,17 @@ pub mod check {
         }
     }
 
+    impl<M: Into<Message>> SendMessage<u8, M> for Transient<MessageEvent> {
+        fn send(&mut self, dest: u8, message: M) -> anyhow::Result<()> {
+            assert_eq!(dest, 0);
+            self.push(MessageEvent {
+                dest: Addr::Replica,
+                message: message.into(),
+            });
+            Ok(())
+        }
+    }
+
     impl<W: Workload> Default for State<W> {
         fn default() -> Self {
             Self::new()
@@ -505,7 +516,7 @@ pub mod check {
                 state: Client::new(
                     index as u32 + 1000,
                     Addr::Client(index),
-                    IndexNet::new(Transient::default(), vec![Addr::Replica], None),
+                    Transient::default(),
                     Transient::default(),
                 ),
                 timer: LinearTimer::default(),

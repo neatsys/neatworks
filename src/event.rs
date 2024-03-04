@@ -249,6 +249,12 @@ pub mod erased {
         fn on_timer(&mut self, timer_id: TimerId, timer: &mut T) -> anyhow::Result<()>;
     }
 
+    // impl<S, T> OnEventFixTimer<Event<S, T>, T> for S {
+    //     fn on_event(&mut self, event: Event<S, T>, timer: &mut T) -> anyhow::Result<()> {
+    //         event(self, timer)
+    //     }
+    // }
+
     // ideally the following impl should directly apply to S
     // however that will be conflicted with the following impl on Buffered
     // TODO try to apply this wrapper when necessary internally, instead of asking user to wrap

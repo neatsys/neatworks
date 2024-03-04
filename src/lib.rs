@@ -123,7 +123,12 @@ pub mod workload;
 //   so i assert it to compiler. one decent example is to "pop" a random entry
 //   from hash map
 //     if let Some(k) = m.keys().next() { let v = m.remove(k).unwrap(); }
-//   another is to turn non-zero integer literal into NonZero* type
+//   another is to turn non-zero integer literal into NonZero* type. putting
+//   panic in the same place of unsafe is aligned to the fact that there's also
+//   panic assertion in heap allocation code path (at least in glibc), which
+//   means some cases of failing to fulfilling an unsafe contract are already
+//   converted into panicking, or in another direction, encountering a panic
+//   already may imply failing to filfull some contracts
 //
 //   use unstructured/ad-hoc error i.e. anyhow::anyhow!() when there's no upper
 //   layer wants to handle that error, so it suppose to lead to crash. the
@@ -156,15 +161,15 @@ pub mod workload;
 // `panic = "abort"` does not work well with test profile, so test cases
 // behavior will diverge from expectation
 //
-// tentatively the rational is that panic and unstructured error do not happen
-// for different reasons. for panic it theoretially should not happen, and for
-// unstructured error it does not happen if the outer world is going as expect.
-// the reason to use panic is to save some code that i assert will never be
-// executed, so it's ok to have false positive error-returning code: that just
-// some unreachable code that is too hard to be proved to be dead code. however,
-// if my assertion on unreachability is incorrect and the program does panic,
-// then i should replace the panic with the code that previously saved e.g.
-// return an error instead.
+// the ration of the crashing cases is that returning error when "oh there's
+// something happened but i can do nothing about it", and panicking when "oh
+// there's something happened which i though should never happen". the reason to
+// use panic is to save some code that i assert will never be executed, so it's
+// ok to have false positive error-returning code: that just some unreachable
+// code that is too hard to be proved to be dead code. however, if my assertion
+// on unreachability is incorrect and the program does panic, then i should
+// replace the panic with the code that previously saved e.g. return an error
+// instead.
 //
 // on the other hand, unstructured error defines "under what condition this code
 // suppose to work". if the conidition is just temporarily unsatisfied, i can
