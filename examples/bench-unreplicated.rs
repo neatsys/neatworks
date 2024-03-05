@@ -7,7 +7,7 @@
 // bench-unreplicated blocking dual
 // => 617318.2 ops/sec
 // taskset -c 0 bench-unreplicated tcp (with bench-unreplicated client tcp)
-// => 161237.5 ops/sec
+// => 178405.7 ops/sec
 
 use std::{
     collections::HashSet,
@@ -27,7 +27,7 @@ use augustus::{
         Inline, OnTimer, Session, Unify,
     },
     net::{
-        session::{tcp_listen_session, TcpControl, TcpControl, Udp},
+        session::{Tcp, TcpListener, Udp},
         IndexNet,
     },
     unreplicated::{
@@ -37,7 +37,7 @@ use augustus::{
     workload::{CloseLoop, Iter, OpLatency},
 };
 use tokio::{
-    net::{TcpListener, UdpSocket},
+    net::UdpSocket,
     runtime,
     signal::ctrl_c,
     sync::mpsc::unbounded_channel,
@@ -55,6 +55,7 @@ use tokio_util::sync::CancellationToken;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt::init();
     let mut args = args().skip(1).collect::<HashSet<_>>();
     let flag_client = args.remove("client");
     let flag_tcp = args.remove("tcp");
@@ -90,13 +91,14 @@ async fn main() -> anyhow::Result<()> {
                 )));
 
                 if flag_tcp {
-                    let listener = runtime.spawn(TcpListener::bind("0.0.0.0:0")).await??;
-                    let addr = SocketAddr::new([10, 0, 0, 8].into(), listener.local_addr()?.port());
+                    let listener = runtime
+                        .spawn(tokio::net::TcpListener::bind("10.0.0.8:0"))
+                        .await??;
                     let mut tcp_session = erased::Session::new();
-                    let raw_net = TcpControl(erased::session::Sender::from(tcp_session.sender()));
+                    let raw_net = Tcp(erased::session::Sender::from(tcp_session.sender()));
                     let mut state = Unify(Client::new(
                         id,
-                        addr,
+                        listener.local_addr()?,
                         ToReplicaMessageNet::new(IndexNet::new(
                             raw_net.clone(),
                             replica_addrs.clone(),
@@ -104,28 +106,29 @@ async fn main() -> anyhow::Result<()> {
                         )),
                         erased::session::Sender::from(close_loop_session.sender()),
                     ));
+                    let listener = TcpListener(listener);
                     let mut state_sender = state_session.sender();
+                    let mut tcp_control =
+                        Blanket(erased::Unify(listener.control(move |buf: &_| {
+                            to_client_on_buf(buf, &mut state_sender)
+                        })?));
+
+                    let tcp_sender = erased::session::Sender::from(tcp_session.sender());
                     sessions.spawn_on(
-                        async move {
-                            tcp_listen_session(listener, |buf| {
-                                to_client_on_buf(buf, &mut state_sender)
-                            })
-                            .await
-                        },
+                        async move { listener.accept_session(tcp_sender).await },
+                        runtime.handle(),
+                    );
+                    sessions.spawn_on(
+                        async move { tcp_session.run(&mut tcp_control).await },
                         runtime.handle(),
                     );
                     sessions.spawn_on(
                         async move { state_session.run(&mut state).await },
                         runtime.handle(),
                     );
-                    let mut tcp_control = Blanket(erased::Buffered::from(TcpControl::new()));
-                    sessions.spawn_on(
-                        async move { tcp_session.run(&mut tcp_control).await },
-                        runtime.handle(),
-                    );
                 } else {
-                    let socket = runtime.spawn(UdpSocket::bind("0.0.0.0:0")).await??;
-                    let addr = SocketAddr::new([10, 0, 0, 8].into(), socket.local_addr()?.port());
+                    let socket = runtime.spawn(UdpSocket::bind("10.0.0.8:0")).await??;
+                    let addr = socket.local_addr()?;
                     let raw_net = Udp(socket.into());
                     let mut state = Unify(Client::new(
                         id,
@@ -231,23 +234,28 @@ async fn main() -> anyhow::Result<()> {
 
     if flag_tcp {
         let mut tcp_session = erased::Session::new();
-        let raw_net = TcpControl(erased::session::Sender::from(tcp_session.sender()));
+        let raw_net = Tcp(erased::session::Sender::from(tcp_session.sender()));
         let mut state = Unify(Replica::new(Null, ToClientMessageNet::new(raw_net)));
         let mut state_session = Session::new();
+        let listener = TcpListener(tokio::net::TcpListener::bind("0.0.0.0:4000").await?);
         let mut state_sender = state_session.sender();
-        let listener = TcpListener::bind("0.0.0.0:4000").await?;
-        let recv_session = tcp_listen_session(listener, move |buf| {
-            to_replica_on_buf(buf, &mut state_sender)
-        });
-        let state_session = state_session.run(&mut state);
-        let mut tcp_control = Blanket(erased::Buffered::from(TcpControl::new()));
+        let mut tcp_control = Blanket(erased::Unify(listener.control::<bytes::Bytes, _>(
+            move |buf: &_| to_replica_on_buf(buf, &mut state_sender),
+        )?));
+
+        let accept_session =
+            listener.accept_session(erased::session::Sender::from(tcp_session.sender()));
         let tcp_session = tcp_session.run(&mut tcp_control);
-        return run(recv_session, async {
-            tokio::select! {
-                result = state_session => result,
-                result = tcp_session => result,
-            }
-        })
+        let state_session = state_session.run(&mut state);
+        return run(
+            async {
+                tokio::select! {
+                    result = accept_session => result,
+                    result = tcp_session => result,
+                }
+            },
+            state_session,
+        )
         .await;
     }
 

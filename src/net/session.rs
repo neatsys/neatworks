@@ -1,4 +1,4 @@
-use std::{fmt::Debug, net::SocketAddr, sync::Arc, time::Duration};
+use std::{fmt::Debug, io::ErrorKind, net::SocketAddr, sync::Arc, time::Duration};
 
 use lru::LruCache;
 use tokio::{
@@ -12,7 +12,7 @@ use tokio::{
 };
 use tracing::warn;
 
-use crate::event::{erased::OnEvent, SendEvent, Timer};
+use crate::event::{erased::OnEvent, OnTimer, SendEvent, Timer};
 
 use super::{Buf, IterAddr, SendMessage};
 
@@ -88,11 +88,14 @@ struct Connection<B> {
 }
 
 impl<B, F> TcpControl<B, F> {
-    fn new(on_buf: F, preamble: bytes::Bytes) -> Self {
+    fn new(on_buf: F, addr: SocketAddr) -> Self {
+        let mut preamble = addr.to_string();
+        assert!(preamble.len() < TCP_PREAMBLE_LEN);
+        preamble += &vec![" "; TCP_PREAMBLE_LEN - preamble.len()].concat();
         Self {
             connections: LruCache::new(TCP_MAX_CONNECTION_NUM.try_into().unwrap()),
             on_buf,
-            preamble,
+            preamble: preamble.into_bytes().into(),
         }
     }
 }
@@ -100,8 +103,16 @@ impl<B, F> TcpControl<B, F> {
 impl<B, F: FnMut(&[u8]) -> anyhow::Result<()>> TcpControl<B, F> {
     async fn read_task(mut stream: OwnedReadHalf, mut on_buf: F, remote: SocketAddr) {
         loop {
+            let len = match stream.read_u64().await {
+                Ok(len) => len as _,
+                Err(err) => {
+                    if !matches!(err.kind(), ErrorKind::UnexpectedEof) {
+                        warn!("<<< {remote} {err}")
+                    }
+                    break;
+                }
+            };
             if let Err(err) = async {
-                let len = stream.read_u64().await? as _;
                 if len > TCP_MAX_BUF_LEN {
                     anyhow::bail!("invalid buffer length {len}")
                 }
@@ -229,21 +240,30 @@ impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnE
         let (read, write) = stream.into_split();
         tokio::spawn(Self::read_task(read, self.on_buf.clone(), remote));
         tokio::spawn(Self::write_task(write, receiver, remote));
-        let replaced = self.connections.put(
-            remote,
-            Connection {
-                sender,
-                used_at: Instant::now(),
-            },
-        );
-        if replaced.is_some() {
-            warn!("<<< {remote} replacing previous connection")
+        if remote != SocketAddr::from(([0, 0, 0, 0], 0)) {
+            let replaced = self.connections.put(
+                remote,
+                Connection {
+                    sender,
+                    used_at: Instant::now(),
+                },
+            );
+            if replaced.is_some() {
+                warn!("<<< {remote} replacing previous connection")
+            }
         }
         Ok(())
     }
 }
 
-pub struct Tcp<E>(E);
+impl<B, F> OnTimer for TcpControl<B, F> {
+    fn on_timer(&mut self, _: crate::event::TimerId, _: &mut impl Timer) -> anyhow::Result<()> {
+        unreachable!()
+    }
+}
+
+#[derive(Clone)]
+pub struct Tcp<E>(pub E);
 
 impl<E: SendEvent<Outgoing<B>>, B> SendMessage<SocketAddr, B> for Tcp<E> {
     fn send(&mut self, dest: SocketAddr, message: B) -> anyhow::Result<()> {
@@ -270,8 +290,6 @@ pub mod simplex {
         net::{Buf, IterAddr, SendMessage},
     };
 
-    use super::TCP_PREAMBLE_LEN;
-
     pub struct Tcp<B>(super::TcpControl<B, fn(&[u8]) -> anyhow::Result<()>>);
 
     impl<B> Default for Tcp<B> {
@@ -281,7 +299,7 @@ pub mod simplex {
                     warn!("ignore ingress message of simplex connection");
                     Ok(())
                 },
-                vec![0; TCP_PREAMBLE_LEN].into(),
+                SocketAddr::from(([0, 0, 0, 0], 0)),
             ))
         }
     }
@@ -307,14 +325,11 @@ pub mod simplex {
     }
 }
 
-pub struct TcpListener(tokio::net::TcpListener);
+pub struct TcpListener(pub tokio::net::TcpListener);
 
 impl TcpListener {
     pub fn control<B, F>(&self, on_buf: F) -> anyhow::Result<TcpControl<B, F>> {
-        let mut preamble = self.0.local_addr()?.to_string().into_bytes();
-        assert!(preamble.len() <= TCP_PREAMBLE_LEN);
-        preamble.resize(TCP_PREAMBLE_LEN, 0);
-        Ok(TcpControl::new(on_buf, preamble.into()))
+        Ok(TcpControl::new(on_buf, self.0.local_addr()?))
     }
 
     pub async fn accept_session(&self, mut sender: impl SendEvent<Incoming>) -> anyhow::Result<()> {
@@ -324,7 +339,7 @@ impl TcpListener {
                 stream.set_nodelay(true)?;
                 let mut preamble = vec![0; TCP_PREAMBLE_LEN];
                 stream.read_exact(&mut preamble).await?;
-                anyhow::Result::<_>::Ok(std::str::from_utf8(&preamble)?.parse()?)
+                anyhow::Result::<_>::Ok(std::str::from_utf8(&preamble)?.trim_end().parse()?)
             }
             .await
             {
@@ -334,6 +349,7 @@ impl TcpListener {
                     continue;
                 }
             };
+            // println!("{peer_addr} -> {remote}");
             sender.send(Incoming(remote, stream))?
         }
     }
