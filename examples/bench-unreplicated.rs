@@ -6,6 +6,8 @@
 // => 449670.1 ops/sec
 // bench-unreplicated blocking dual
 // => 617318.2 ops/sec
+// taskset -c 0 bench-unreplicated tcp (with bench-unreplicated client tcp)
+// => 161237.5 ops/sec
 
 use std::{
     collections::HashSet,

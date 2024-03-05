@@ -1,5 +1,5 @@
 pub mod app;
-pub mod blob;
+pub mod bulk;
 pub mod crypto;
 pub mod event;
 pub mod kademlia;

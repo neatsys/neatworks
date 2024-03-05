@@ -142,6 +142,7 @@ impl<B: Buf> OnEventRichTimer<(SocketAddr, B)> for TcpControl<B> {
         tokio::spawn(async move {
             if let Err(err) = async {
                 let mut stream = TcpStream::connect(dest).await?;
+                stream.set_nodelay(true)?;
                 // let socket = TcpSocket::new_v4()?;
                 // socket.set_reuseaddr(true).unwrap();
                 // let mut stream = socket.connect(dest).await?;
@@ -209,6 +210,7 @@ pub async fn tcp_listen_session(
             Some(result) = stream_sessions.join_next() => Select::JoinNext(result??),
         } {
             Select::Accept((mut stream, _)) => {
+                stream.set_nodelay(true)?;
                 let sender = sender.clone();
                 stream_sessions.spawn(async move {
                     loop {

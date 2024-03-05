@@ -12,7 +12,7 @@ use std::{
 };
 
 use augustus::{
-    blob,
+    bulk,
     crypto::{Crypto, DigestHash, PublicKey, H256},
     event::{
         erased::{
@@ -315,7 +315,7 @@ async fn start_peer(
         }
     });
     let kademlia_session = kademlia_session.run(&mut kademlia_peer);
-    let blob_session = blob::session(
+    let blob_session = bulk::session(
         ip,
         blob_receiver,
         MessageNet::<_, SocketAddr>::new(PeerNet(Sender::from(kademlia_control_session.sender()))),

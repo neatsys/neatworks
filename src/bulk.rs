@@ -1,43 +1,32 @@
-// justification of dedicated blob transfer service
+// justification of dedicated bulk transfer service
 //
 // the network messaging abstraction in this codebse i.e. `SendMessage` is
-// suitable for delivering short messages with negligible overhead (negligible
-// for delivering single message, overall networking overhead may still be
-// significant). when sending messages/data that is large enough to break this
-// expectation, use this module can provide more stable performance and
-// additional functions
+// suitable for unreliably delivering short messages with negligible overhead
+// (negligible for delivering single message, overall networking overhead may
+// still be significant). this module, on the other hand, provides different
+// semantic that is usally desired when sending binary large object
 //
-// for applications deployed with udp-based transportation, a reliable delivery
-// service is demanded for any message that cannot be fit into several IP
-// segments, or it would be unpractical to deliver the message through repeatly
-// resending. blob transfer service provides such reliability with ephemeral TCP
-// servers and connections, and it's safe to consider blob transfer failures as
-// fatal errors without hurting robustness
+// firstly this service provides explicit cancel interface, which could be
+// helpful to improve bandwidth and performance efficiency. notice that the
+// cancellation results in a silent fail on the other side, without explicit
+// notification, and the cancel itself is not reliable: a transfer that get
+// cancelled too late may still be treated as finished on the other side. so
+// it is a purely optimization shortcut
 //
-// (notice that it is still possible to have receiver side totally unaware of
-// the transferring while sender consider the transferring to be
-// canceled/rejected by receiver. the reliability is only hold when the `Serve`
-// message is reliability delivered by the underlying network and both
-// participants are willing to finish the transferring)
+// secondly this service guarantees reliable transfer (in the absent of
+// cancellation and sender/receiver crashing). `impl SendMessage` does not
+// guarantee the message will be delivered under any conidition. this service,
+// instead, ensures the transfer will always finish as long as both participants
+// do not cancel the transfer, the underlying connection does not broken, and
+// the `Serve` message is delivered. application may take this assertion to
+// simplify logic
 //
-// although tcp-based deployment does not have the reliability concren above,
-// if the transportation delivers all messages destinating same remote address
-// sequentially (e.g. `net::tokio::Tcp`), blob messages may occupy the
-// transmission channel and postpone later messages longer than expect. also,
-// blob messages probably should be logged differently for diagnostic (e.g. we
-// probably don't want to log blob's full content). as the result dedicated
-// serivce (at least channels) for blob transfer is still desirable
-//
-// this blob service additionally supports cancellation on both sender and
-// receiver side, which can be helpful to improve bandwidth and performance
-// efficiency. in conclusion, for the following statements:
-// * protocol doesn't want to keep in mind that the sending may fail
-// * protocol can benefit from isolation between sending blob and ordinary
-//   messages
-// * protocol can make use of a cancellation interface
-// if any of these is true, a blob transfer service instance can be deployed
+// without further consideration, this service can also be used to avoid head of
+// line blocking. exclude large transfer from the ordinary connection can help
+// to keep latency low and stable
 
 use std::{
+    collections::HashMap,
     net::{IpAddr, SocketAddr},
     time::Duration,
 };
@@ -45,11 +34,11 @@ use std::{
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt as _},
+    io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
     sync::mpsc::UnboundedReceiver,
-    task::{yield_now, JoinSet},
-    time::timeout,
+    task::JoinSet,
+    time::sleep,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -67,7 +56,7 @@ pub struct Offer<A, M> {
 }
 
 pub struct Accept<N> {
-    pub serve_addr: SocketAddr,
+    pub serve_internal: (SocketAddr, u32),
     pub expect_len: Option<usize>,
     pub into_recv_event: Box<dyn FnOnce(Vec<u8>) -> N + Send + Sync>,
     pub cancel: Option<CancellationToken>,
@@ -77,14 +66,20 @@ pub struct Accept<N> {
 pub enum Event<A, M, N> {
     Offer(Offer<A, M>),
     Accept(Accept<N>),
-    RecvServe(Recv<Serve<M>>),
+    RecvServe(Serve<M>),
+}
+
+impl<A, M, N> From<Recv<Serve<M>>> for Event<A, M, N> {
+    fn from(Recv(value): Recv<Serve<M>>) -> Self {
+        Self::RecvServe(value)
+    }
 }
 
 #[derive(derive_more::Deref)]
 pub struct RecvOffer<M> {
     #[deref]
     pub inner: M,
-    serve_addr: Option<SocketAddr>,
+    serve_internal: Option<(SocketAddr, u32)>,
 }
 
 pub trait Service<A, M, N>: SendEvent<Event<A, M, N>> {}
@@ -145,8 +140,8 @@ impl<T: Service<A, M, N> + ?Sized, A, M, N> ServiceExt<A, M, N> for T {
         cancel: impl Into<Option<CancellationToken>>,
     ) -> anyhow::Result<()> {
         let accept = Accept {
-            serve_addr: recv_offer
-                .serve_addr
+            serve_internal: recv_offer
+                .serve_internal
                 .take()
                 // TODO compile time check instead
                 .ok_or(anyhow::anyhow!(
@@ -161,7 +156,7 @@ impl<T: Service<A, M, N> + ?Sized, A, M, N> ServiceExt<A, M, N> for T {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Serve<M>(M, SocketAddr);
+pub struct Serve<M>(M, SocketAddr, u32);
 
 pub async fn session<A, M, N: Send + 'static>(
     ip: impl Into<Option<IpAddr>>,
@@ -169,74 +164,58 @@ pub async fn session<A, M, N: Send + 'static>(
     mut net: impl SendMessage<A, Serve<M>>,
     mut upcall: impl SendEvent<RecvOffer<M>> + SendEvent<N>,
 ) -> anyhow::Result<()> {
-    let ip = ip.into().unwrap_or(IpAddr::from([0, 0, 0, 0]));
+    let listener = TcpListener::bind((ip.into().unwrap_or(IpAddr::from([0, 0, 0, 0])), 0)).await?;
+    let addr = listener.local_addr()?;
+    let mut id = 0;
+    let mut pending_accept = HashMap::new();
 
-    let mut bind_tasks = JoinSet::<anyhow::Result<_>>::new();
     let mut send_tasks = JoinSet::new();
     let mut recv_tasks = JoinSet::new();
-    let mut pending_bind = Vec::new();
+    let mut cancel_tasks = JoinSet::new();
     loop {
         enum Select<A, M, N> {
             Recv(Event<A, M, N>),
-            JoinNextBind(TcpListener),
+            Accept((TcpStream, SocketAddr)),
             JoinNextSend(()),
             JoinNextRecv(Option<N>),
+            JoinNextCancel(u32),
         }
         match tokio::select! {
             event = events.recv() => Select::Recv(event.ok_or(anyhow::anyhow!("channel closed"))?),
-            Some(result) = bind_tasks.join_next() => Select::JoinNextBind(result??),
+            stream = listener.accept() => Select::Accept(stream?),
             Some(result) = send_tasks.join_next() => Select::JoinNextSend(result?),
             Some(result) = recv_tasks.join_next() => Select::JoinNextRecv(result?),
+            Some(result) = cancel_tasks.join_next() => Select::JoinNextCancel(result?),
         } {
             Select::Recv(Event::Offer(offer)) => {
-                pending_bind.push(offer);
-                // comparing to this ad-hoc binding, a bounded size ephemeral server pool may be
-                // more desired
-                bind_tasks.spawn(async move { Ok(TcpListener::bind((ip, 0)).await?) });
-            }
-            Select::JoinNextBind(listener) => {
-                let offer = pending_bind.pop().unwrap();
-                let addr = listener.local_addr()?;
-                send_tasks.spawn(async move {
-                    let task = async {
-                        // escaping path to prevent the ephemeral server leaks forever
-                        // that could happen e.g. remote does not accept the transfer
-                        let (mut stream, _) =
-                            timeout(Duration::from_millis(2500), listener.accept()).await??;
-                        Result::<_, anyhow::Error>::Ok(stream.write_all(&offer.buf).await?)
-                    };
-                    let result = if let Some(cancel) = offer.cancel {
-                        tokio::select! {
-                            result = task => result,
-                            () = cancel.cancelled() => Ok(())
-                        }
+                id += 1;
+                pending_accept.insert(id, (offer.buf, offer.cancel.clone()));
+                cancel_tasks.spawn(async move {
+                    if let Some(cancel) = offer.cancel {
+                        cancel.cancelled().await
                     } else {
-                        task.await
-                    };
-                    if let Err(err) = result {
-                        info!("{err}")
+                        // default timeout to avoid `pending_accept` entry leaks
+                        sleep(Duration::from_millis(2500)).await
                     }
+                    id
                 });
-                // it's possible that the message arrives before listener start accepting
-                // send inside spawned task requires clone and send `net`
-                // i don't want that, instead do best effort spurious error mitigation with
-                // active yielding
-                // notice that such spuerious error is not hard error, just effectively false
-                // positive cancel the transfer
-                yield_now().await;
-                net.send(offer.dest, Serve(offer.message, addr))?;
+                net.send(offer.dest, Serve(offer.message, addr, id))?
             }
-            Select::JoinNextSend(()) => {}
-            Select::Recv(Event::RecvServe(Recv(Serve(message, serve_addr)))) => {
+            Select::JoinNextCancel(id) => {
+                pending_accept.remove(&id);
+            }
+            Select::Recv(Event::RecvServe(Serve(message, serve_addr, id))) => {
                 upcall.send(RecvOffer {
                     inner: message,
-                    serve_addr: Some(serve_addr),
+                    serve_internal: Some((serve_addr, id)),
                 })?
             }
             Select::Recv(Event::Accept(accept)) => {
+                let (addr, id) = accept.serve_internal;
                 recv_tasks.spawn(async move {
                     let task = async {
-                        let mut stream = TcpStream::connect(accept.serve_addr).await?;
+                        let mut stream = TcpStream::connect(addr).await?;
+                        stream.write_u32(id).await?;
                         let mut buf = Vec::new();
                         if let Some(expect_len) = accept.expect_len {
                             buf.resize(expect_len, Default::default());
@@ -268,6 +247,34 @@ pub async fn session<A, M, N: Send + 'static>(
                     upcall.send(recv_event)?
                 }
             }
+            Select::Accept((mut stream, _)) => {
+                // it is a little risky to blocking the main event loop, but base on the sender
+                // logic this should either finish fast or fail fast, and we are not chasing
+                // concurrency that hard
+                let Ok(id) = stream.read_u32().await else {
+                    continue;
+                };
+                let Some((buf, cancel)) = pending_accept.remove(&id) else {
+                    continue; // drop stream to close connection
+                };
+                // technically this does not need to be joined
+                // just as a good habbit and in case needed later
+                send_tasks.spawn(async move {
+                    let task = stream.write_all(&buf);
+                    let result = if let Some(cancel) = cancel {
+                        tokio::select! {
+                            result = task => result,
+                            () = cancel.cancelled() => Ok(())
+                        }
+                    } else {
+                        task.await
+                    };
+                    if let Err(err) = result {
+                        info!("{err}")
+                    }
+                });
+            }
+            Select::JoinNextSend(()) => {}
         }
     }
 }

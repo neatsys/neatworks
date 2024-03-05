@@ -7,7 +7,7 @@ use std::{
 };
 
 use augustus::{
-    blob::{self, RecvOffer, ServiceExt as _},
+    bulk::{self, RecvOffer, ServiceExt as _},
     crypto::{Crypto, PublicKey, Verifiable, H256},
     event::{
         erased::{OnEventRichTimer as OnEvent, RichTimer as Timer},
@@ -144,7 +144,7 @@ pub struct Peer<K> {
     pending_pulls: HashMap<Chunk, Vec<PeerId>>,
 
     net: Box<dyn Net + Send + Sync>,
-    blob: Box<dyn blob::Service<PeerId, SendFragment, DownloadOk> + Send + Sync>,
+    blob: Box<dyn bulk::Service<PeerId, SendFragment, DownloadOk> + Send + Sync>,
     upcall: Box<dyn Upcall<K> + Send + Sync>,
     codec_worker: CodecWorker,
     fs: Box<dyn SendFsEvent + Send + Sync>,
@@ -225,7 +225,7 @@ impl<K> Peer<K> {
         chunk_n: NonZeroUsize,
         chunk_m: NonZeroUsize,
         net: impl Net + Send + Sync + 'static,
-        blob: impl blob::Service<PeerId, SendFragment, DownloadOk> + Send + Sync + 'static,
+        blob: impl bulk::Service<PeerId, SendFragment, DownloadOk> + Send + Sync + 'static,
         upcall: impl Upcall<K> + Send + Sync + 'static,
         codec_worker: CodecWorker,
         fs: impl SendFsEvent + Send + Sync + 'static,
@@ -724,7 +724,7 @@ pub enum Message<A> {
     FindPeer(Verifiable<FindPeer<A>>),
     FindPeerOk(Verifiable<FindPeerOk<A>>),
 
-    BlobServe(blob::Serve<SendFragment>),
+    BlobServe(bulk::Serve<SendFragment>),
 }
 
 pub type MessageNet<T, A> = augustus::net::MessageNet<T, Message<A>>;
@@ -749,7 +749,7 @@ pub fn on_buf<A: Addr>(
     buf: &[u8],
     entropy_sender: &mut impl SendRecvEvent,
     kademlia_sender: &mut impl kademlia::SendRecvEvent<A>,
-    blob_sender: &mut impl SendEvent<Recv<blob::Serve<SendFragment>>>,
+    blob_sender: &mut impl SendEvent<Recv<bulk::Serve<SendFragment>>>,
 ) -> anyhow::Result<()> {
     match deserialize(buf)? {
         Message::Invite(message) => entropy_sender.send(Recv(message)),
