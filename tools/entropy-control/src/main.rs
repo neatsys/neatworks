@@ -1,28 +1,11 @@
-use std::{
-    env::args,
-    io::{SeekFrom::Start, Write as _},
-    net::IpAddr,
-    num::NonZeroUsize,
-    ops::Range,
-    sync::{
-        atomic::{AtomicUsize, Ordering::SeqCst},
-        Arc,
-    },
-    time::Duration,
-};
+use std::{env::args, net::IpAddr, num::NonZeroUsize, time::Duration};
 
-use entropy_control::{retain_instances, terraform_instances, TerraformOutputInstance};
+use entropy_control::{terraform_instances, TerraformOutputInstance};
 use entropy_control_messages::{
     GetConfig, GetResult, PeerUrl, PutConfig, PutResult, StartPeersConfig,
 };
 use rand::{seq::SliceRandom, thread_rng};
-use tokio::{
-    fs::OpenOptions,
-    io::{AsyncReadExt, AsyncSeekExt},
-    sync::mpsc::unbounded_channel,
-    task::JoinSet,
-    time::{sleep, Instant},
-};
+use tokio::{task::JoinSet, time::sleep};
 
 const NUM_PEER_PER_IP: usize = 100;
 
@@ -40,185 +23,200 @@ async fn main() -> anyhow::Result<()> {
     //     private_ip: [127, 0, 0, 1].into(),
     //     public_dns: "localhost".into(),
     // }];
+    latency_benchmark(
+        control_client,
+        &instances,
+        &category,
+        1 << 20,
+        32.try_into().unwrap(),
+        80.try_into().unwrap(),
+        88.try_into().unwrap(),
+        8.try_into().unwrap(),
+        10.try_into().unwrap(),
+        10,
+        &[],
+        |line| println!("{line}"),
+    )
+    .await?;
 
-    if !category.ends_with("stress") {
-        let mut out = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open("entropy-5.txt")
-            .await?;
-        let mut lines = String::new();
-        out.seek(Start(0)).await?;
-        out.read_to_string(&mut lines).await?;
-        let lines = lines.lines().map(ToString::to_string).collect::<Vec<_>>();
-        let mut out = out.into_std().await;
-        let mut out = |line| writeln!(&mut out, "{line}").unwrap();
+    // if !category.ends_with("stress") {
+    //     let mut out = OpenOptions::new()
+    //         .create(true)
+    //         .read(true)
+    //         .append(true)
+    //         .open("entropy-5.txt")
+    //         .await?;
+    //     let mut lines = String::new();
+    //     out.seek(Start(0)).await?;
+    //     out.read_to_string(&mut lines).await?;
+    //     let lines = lines.lines().map(ToString::to_string).collect::<Vec<_>>();
+    //     let mut out = out.into_std().await;
+    //     let mut out = |line| writeln!(&mut out, "{line}").unwrap();
 
-        benchmark(
-            control_client.clone(),
-            &instances,
-            &category,
-            1 << 22,
-            NonZeroUsize::new(32).unwrap(),
-            NonZeroUsize::new(80).unwrap(),
-            NonZeroUsize::new(88).unwrap(),
-            NonZeroUsize::new(8).unwrap(),
-            NonZeroUsize::new(10).unwrap(),
-            1,
-            &lines,
-            &mut out,
-        )
-        .await?;
-        // return Ok(());
+    //     benchmark(
+    //         control_client.clone(),
+    //         &instances,
+    //         &category,
+    //         1 << 22,
+    //         NonZeroUsize::new(32).unwrap(),
+    //         NonZeroUsize::new(80).unwrap(),
+    //         NonZeroUsize::new(88).unwrap(),
+    //         NonZeroUsize::new(8).unwrap(),
+    //         NonZeroUsize::new(10).unwrap(),
+    //         1,
+    //         &lines,
+    //         &mut out,
+    //     )
+    //     .await?;
+    //     // return Ok(());
 
-        benchmark(
-            control_client.clone(),
-            &instances,
-            &category,
-            1 << 23,
-            NonZeroUsize::new(32).unwrap(),
-            NonZeroUsize::new(80).unwrap(),
-            NonZeroUsize::new(88).unwrap(),
-            NonZeroUsize::new(4).unwrap(),
-            NonZeroUsize::new(5).unwrap(),
-            1,
-            &lines,
-            &mut out,
-        )
-        .await?;
+    //     benchmark(
+    //         control_client.clone(),
+    //         &instances,
+    //         &category,
+    //         1 << 23,
+    //         NonZeroUsize::new(32).unwrap(),
+    //         NonZeroUsize::new(80).unwrap(),
+    //         NonZeroUsize::new(88).unwrap(),
+    //         NonZeroUsize::new(4).unwrap(),
+    //         NonZeroUsize::new(5).unwrap(),
+    //         1,
+    //         &lines,
+    //         &mut out,
+    //     )
+    //     .await?;
 
-        benchmark(
-            control_client.clone(),
-            &instances,
-            &category,
-            1 << 21,
-            NonZeroUsize::new(32).unwrap(),
-            NonZeroUsize::new(80).unwrap(),
-            NonZeroUsize::new(88).unwrap(),
-            NonZeroUsize::new(16).unwrap(),
-            NonZeroUsize::new(20).unwrap(),
-            1,
-            &lines,
-            &mut out,
-        )
-        .await?;
+    //     benchmark(
+    //         control_client.clone(),
+    //         &instances,
+    //         &category,
+    //         1 << 21,
+    //         NonZeroUsize::new(32).unwrap(),
+    //         NonZeroUsize::new(80).unwrap(),
+    //         NonZeroUsize::new(88).unwrap(),
+    //         NonZeroUsize::new(16).unwrap(),
+    //         NonZeroUsize::new(20).unwrap(),
+    //         1,
+    //         &lines,
+    //         &mut out,
+    //     )
+    //     .await?;
 
-        if !category.starts_with("ipfs") {
-            benchmark(
-                control_client.clone(),
-                &instances,
-                &category,
-                1 << 23,
-                NonZeroUsize::new(16).unwrap(),
-                NonZeroUsize::new(40).unwrap(),
-                NonZeroUsize::new(48).unwrap(),
-                NonZeroUsize::new(8).unwrap(),
-                NonZeroUsize::new(10).unwrap(),
-                1,
-                &lines,
-                &mut out,
-            )
-            .await?;
+    //     if !category.starts_with("ipfs") {
+    //         benchmark(
+    //             control_client.clone(),
+    //             &instances,
+    //             &category,
+    //             1 << 23,
+    //             NonZeroUsize::new(16).unwrap(),
+    //             NonZeroUsize::new(40).unwrap(),
+    //             NonZeroUsize::new(48).unwrap(),
+    //             NonZeroUsize::new(8).unwrap(),
+    //             NonZeroUsize::new(10).unwrap(),
+    //             1,
+    //             &lines,
+    //             &mut out,
+    //         )
+    //         .await?;
 
-            benchmark(
-                control_client.clone(),
-                &instances,
-                &category,
-                1 << 21,
-                NonZeroUsize::new(64).unwrap(),
-                NonZeroUsize::new(160).unwrap(),
-                NonZeroUsize::new(168).unwrap(),
-                NonZeroUsize::new(8).unwrap(),
-                NonZeroUsize::new(10).unwrap(),
-                1,
-                &lines,
-                &mut out,
-            )
-            .await?
-        } else {
-            // benchmark(
-            //     control_client.clone(),
-            //     &instances,
-            //     &category,
-            //     1 << 25,
-            //     NonZeroUsize::new(32).unwrap(),
-            //     NonZeroUsize::new(80).unwrap(),
-            //     NonZeroUsize::new(88).unwrap(),
-            //     NonZeroUsize::new(1).unwrap(),
-            //     NonZeroUsize::new(1).unwrap(),
-            //     1,
-            //     &lines,
-            //     &mut out,
-            // )
-            // .await?;
-        }
+    //         benchmark(
+    //             control_client.clone(),
+    //             &instances,
+    //             &category,
+    //             1 << 21,
+    //             NonZeroUsize::new(64).unwrap(),
+    //             NonZeroUsize::new(160).unwrap(),
+    //             NonZeroUsize::new(168).unwrap(),
+    //             NonZeroUsize::new(8).unwrap(),
+    //             NonZeroUsize::new(10).unwrap(),
+    //             1,
+    //             &lines,
+    //             &mut out,
+    //         )
+    //         .await?
+    //     } else {
+    //         // benchmark(
+    //         //     control_client.clone(),
+    //         //     &instances,
+    //         //     &category,
+    //         //     1 << 25,
+    //         //     NonZeroUsize::new(32).unwrap(),
+    //         //     NonZeroUsize::new(80).unwrap(),
+    //         //     NonZeroUsize::new(88).unwrap(),
+    //         //     NonZeroUsize::new(1).unwrap(),
+    //         //     NonZeroUsize::new(1).unwrap(),
+    //         //     1,
+    //         //     &lines,
+    //         //     &mut out,
+    //         // )
+    //         // .await?;
+    //     }
 
-        for num_per_region in [4, 8, 12, 16] {
-            // well, i can just run ipfs according to what specified from command line
-            // but this is safer right?
-            if category.starts_with("ipfs")
-                && args().nth(2) != Some((num_per_region * 5 * 100).to_string())
-            {
-                continue;
-            }
-            let instances = retain_instances(&instances, num_per_region);
-            assert_eq!(instances.len(), num_per_region * 5);
-            benchmark(
-                control_client.clone(),
-                &instances,
-                &category,
-                1 << 22,
-                NonZeroUsize::new(32).unwrap(),
-                NonZeroUsize::new(80).unwrap(),
-                NonZeroUsize::new(88).unwrap(),
-                NonZeroUsize::new(8).unwrap(),
-                NonZeroUsize::new(10).unwrap(),
-                1,
-                &lines,
-                &mut out,
-            )
-            .await?;
-        }
-    } else {
-        let mut out = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open("entropy-1.txt")
-            .await?;
-        let mut lines = String::new();
-        out.seek(Start(0)).await?;
-        out.read_to_string(&mut lines).await?;
-        let lines = lines.lines().map(ToString::to_string).collect::<Vec<_>>();
-        let mut out = out.into_std().await;
-        let mut out = |line| writeln!(&mut out, "{line}").unwrap();
+    //     for num_per_region in [4, 8, 12, 16] {
+    //         // well, i can just run ipfs according to what specified from command line
+    //         // but this is safer right?
+    //         if category.starts_with("ipfs")
+    //             && args().nth(2) != Some((num_per_region * 5 * 100).to_string())
+    //         {
+    //             continue;
+    //         }
+    //         let instances = retain_instances(&instances, num_per_region);
+    //         assert_eq!(instances.len(), num_per_region * 5);
+    //         benchmark(
+    //             control_client.clone(),
+    //             &instances,
+    //             &category,
+    //             1 << 22,
+    //             NonZeroUsize::new(32).unwrap(),
+    //             NonZeroUsize::new(80).unwrap(),
+    //             NonZeroUsize::new(88).unwrap(),
+    //             NonZeroUsize::new(8).unwrap(),
+    //             NonZeroUsize::new(10).unwrap(),
+    //             1,
+    //             &lines,
+    //             &mut out,
+    //         )
+    //         .await?;
+    //     }
+    // } else {
+    //     let mut out = OpenOptions::new()
+    //         .create(true)
+    //         .read(true)
+    //         .append(true)
+    //         .open("entropy-1.txt")
+    //         .await?;
+    //     let mut lines = String::new();
+    //     out.seek(Start(0)).await?;
+    //     out.read_to_string(&mut lines).await?;
+    //     let lines = lines.lines().map(ToString::to_string).collect::<Vec<_>>();
+    //     let mut out = out.into_std().await;
+    //     let mut out = |line| writeln!(&mut out, "{line}").unwrap();
 
-        // for n in (1..10).map(|i| i * 600).chain((1..10).map(|i| i * 6000)) {
-        for n in [10, 20, 40, 100, 200] {
-            benchmark(
-                control_client.clone(),
-                &instances,
-                &category,
-                1 << 22,
-                NonZeroUsize::new(32).unwrap(),
-                NonZeroUsize::new(80).unwrap(),
-                NonZeroUsize::new(88).unwrap(),
-                NonZeroUsize::new(8).unwrap(),
-                NonZeroUsize::new(10).unwrap(),
-                n,
-                &lines,
-                &mut out,
-            )
-            .await?;
-            // sleep(Duration::from_secs(10)).await
-        }
-    }
+    //     // for n in (1..10).map(|i| i * 600).chain((1..10).map(|i| i * 6000)) {
+    //     for n in [10, 20, 40, 100, 200] {
+    //         benchmark(
+    //             control_client.clone(),
+    //             &instances,
+    //             &category,
+    //             1 << 22,
+    //             NonZeroUsize::new(32).unwrap(),
+    //             NonZeroUsize::new(80).unwrap(),
+    //             NonZeroUsize::new(88).unwrap(),
+    //             NonZeroUsize::new(8).unwrap(),
+    //             NonZeroUsize::new(10).unwrap(),
+    //             n,
+    //             &lines,
+    //             &mut out,
+    //         )
+    //         .await?;
+    //         // sleep(Duration::from_secs(10)).await
+    //     }
+    // }
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn benchmark(
+async fn latency_benchmark(
     control_client: reqwest::Client,
     instances: &[TerraformOutputInstance],
     category: &str,
@@ -228,16 +226,12 @@ async fn benchmark(
     chunk_m: NonZeroUsize,
     k: NonZeroUsize,
     n: NonZeroUsize,
-    num_concurrency: usize,
+    num_total: usize,
     lines: &[String],
     mut out: impl FnMut(String),
 ) -> anyhow::Result<()> {
-    let chunk_len = fragment_len * chunk_k.get() as u32;
-    // assert_eq!(chunk_len as usize * k.get(), 1 << 30);
-    let replication_factor = if category.starts_with("ipfs") { 3 } else { 1 };
-
     let prefix = format!(
-        "NEAT,{},{chunk_k},{chunk_n},{chunk_m},{k},{n},{},{num_concurrency}",
+        "NEAT,{},{chunk_k},{chunk_n},{chunk_m},{k},{n},{}",
         if category.starts_with("ipfs") {
             "ipfs"
         } else {
@@ -246,17 +240,11 @@ async fn benchmark(
         instances.len() * NUM_PEER_PER_IP,
     );
     println!("{prefix}");
-    let count = lines
+    let _count = lines
         .iter()
         .filter(|line| line.starts_with(&(prefix.clone() + ",")))
         .count();
-    // 10 operations
-    if num_concurrency == 1 && count >= 20 {
-        return Ok(());
-    }
-    if num_concurrency != 1 && count != 0 {
-        return Ok(());
-    }
+    // TODO skip when `count` is already sufficient
 
     let mut start_peers_sessions = JoinSet::new();
     if !category.starts_with("ipfs") {
@@ -283,151 +271,18 @@ async fn benchmark(
         }
     }
 
-    let peer_urls = if category.starts_with("ipfs") {
-        instances
-            .iter()
-            .flat_map(|instance| {
-                (0..100)
-                    .map(|i| PeerUrl::Ipfs(format!("http://{}:{}", instance.public_ip, 5000 + i)))
-            })
-            .collect::<Vec<_>>()
-    } else {
-        instances
-            .iter()
-            .flat_map(|instance| {
-                (0..100).map(|i| PeerUrl::Entropy(format!("http://{}:3000", instance.public_ip), i))
-            })
-            .collect::<Vec<_>>()
-    };
-    let instance_urls = instances
-        .iter()
-        .map(|instance| format!("http://{}:3000", instance.public_ip))
-        .collect::<Vec<_>>();
-
-    if num_concurrency == 1 {
-        // let num_total = (20 - count) / 2 + 1;
-        let num_total = 1;
-        close_loop_session(
+    for _ in 0..num_total {
+        operation_session(
             control_client.clone(),
-            peer_urls.clone(),
-            instance_urls.clone(),
-            chunk_len,
+            instances,
+            category,
+            fragment_len,
+            chunk_k,
             k,
             n,
-            replication_factor,
-            Arc::new(AtomicUsize::new(0)),
-            0..num_total,
-            |line| out(format!("{prefix},{line}")),
+            &mut out,
         )
         .await?
-    } else {
-        // let interval = Duration::from_secs(3600) / num_operation_per_hour as u32;
-        let interval = Duration::from_secs(3600) / 18000;
-        println!("Open loop interval {interval:?}");
-        let interval_sleep = sleep(Duration::ZERO);
-        tokio::pin!(interval_sleep);
-
-        let mut open_loop_sessions = JoinSet::<anyhow::Result<_>>::new();
-        let mut warmup_finish = false;
-        let mut count = 0;
-        let mut stop_count = 0;
-        let (out_sender, mut out_receiver) = unbounded_channel();
-        let mut out_lines = Vec::new();
-        loop {
-            enum Select {
-                Sleep,
-                JoinNext(()),
-                Recv((u32, String)),
-            }
-            match tokio::select! {
-                () = &mut interval_sleep => Select::Sleep,
-                Some(result) = open_loop_sessions.join_next() => Select::JoinNext(result??),
-                recv = out_receiver.recv() => Select::Recv(recv.unwrap()),
-            } {
-                Select::Sleep => {
-                    interval_sleep.as_mut().reset(Instant::now() + interval);
-                    if open_loop_sessions.len() >= num_concurrency {
-                        continue;
-                    }
-
-                    let put_url = instance_urls
-                        .choose(&mut thread_rng())
-                        .ok_or(anyhow::anyhow!("no instance available"))?;
-                    let get_url = instance_urls
-                        .choose(&mut thread_rng())
-                        .ok_or(anyhow::anyhow!("no instance available"))?;
-                    println!("Put {put_url} Get {get_url}");
-
-                    if warmup_finish && stop_count == 0 {
-                        count += 1;
-                        let out_sender = out_sender.clone();
-                        open_loop_sessions.spawn(operation_session(
-                            control_client.clone(),
-                            put_url.clone(),
-                            get_url.clone(),
-                            peer_urls.clone(),
-                            chunk_len,
-                            k,
-                            n,
-                            replication_factor,
-                            move |line| {
-                                // if the operation starts before last minute operation but finishes
-                                // after it, the result will be rejected
-                                let _ = out_sender.send((count, line));
-                            },
-                        ));
-                    } else {
-                        open_loop_sessions.spawn(operation_session(
-                            control_client.clone(),
-                            put_url.clone(),
-                            get_url.clone(),
-                            peer_urls.clone(),
-                            chunk_len,
-                            k,
-                            n,
-                            replication_factor,
-                            |_| {},
-                        ));
-                    }
-                }
-                Select::JoinNext(()) => {
-                    if !warmup_finish {
-                        println!("Warmup finish");
-                        warmup_finish = true
-                    }
-                }
-                Select::Recv((i, line)) => {
-                    out_lines.push(format!("{prefix},{line}"));
-                    // this is awful, but i don't want to think anymore
-                    if line.contains("get") {
-                        if stop_count == 0 && count >= 10 {
-                            println!("Last minute operation");
-                            stop_count = count
-                        } else if i == stop_count {
-                            println!("Cooldown");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        out_receiver.close();
-        while let Some((_, line)) = out_receiver.recv().await {
-            out_lines.push(format!("{prefix},{line}"))
-        }
-        out(out_lines.join("\n"));
-
-        let session = async {
-            while let Some(result) = open_loop_sessions.join_next().await {
-                result??
-            }
-            Result::<_, anyhow::Error>::Ok(())
-        };
-        tokio::select! {
-            result = session => result?,
-            Some(result) = start_peers_sessions.join_next() => result??,
-        }
-        assert!(open_loop_sessions.is_empty())
     }
 
     if !category.starts_with("ipfs") {
@@ -515,15 +370,42 @@ async fn stop_peers_session(control_client: reqwest::Client, url: String) -> any
 #[allow(clippy::too_many_arguments)]
 async fn operation_session(
     control_client: reqwest::Client,
-    put_url: String,
-    get_url: String,
-    peer_urls: Vec<PeerUrl>,
-    chunk_len: u32,
+    instances: &[TerraformOutputInstance],
+    category: &str,
+    fragment_len: u32,
+    chunk_k: NonZeroUsize,
     k: NonZeroUsize,
     n: NonZeroUsize,
-    replication_factor: usize,
     mut out: impl FnMut(String),
 ) -> anyhow::Result<()> {
+    let chunk_len = fragment_len * chunk_k.get() as u32;
+    // assert_eq!(chunk_len as usize * k.get(), 1 << 30);
+    let replication_factor = if category.starts_with("ipfs") { 3 } else { 1 };
+
+    let peer_urls = if category.starts_with("ipfs") {
+        instances
+            .iter()
+            .flat_map(|instance| {
+                (0..100)
+                    .map(|i| PeerUrl::Ipfs(format!("http://{}:{}", instance.public_ip, 5000 + i)))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        instances
+            .iter()
+            .flat_map(|instance| {
+                (0..100).map(|i| PeerUrl::Entropy(format!("http://{}:3000", instance.public_ip), i))
+            })
+            .collect::<Vec<_>>()
+    };
+    let instance_urls = instances
+        .iter()
+        .map(|instance| format!("http://{}:3000", instance.public_ip))
+        .collect::<Vec<_>>();
+
+    let put_url = instance_urls
+        .choose(&mut thread_rng())
+        .ok_or(anyhow::anyhow!("no instance available"))?;
     let put_peer_urls = peer_urls
         .choose_multiple(&mut thread_rng(), n.get() * replication_factor)
         .cloned()
@@ -577,6 +459,9 @@ async fn operation_session(
     let digest = result.digest;
 
     sleep(Duration::from_secs(1)).await;
+    let get_url = instance_urls
+        .choose(&mut thread_rng())
+        .ok_or(anyhow::anyhow!("no instance available"))?;
     let get_peer_urls = peer_urls
         .choose_multiple(&mut thread_rng(), n.into())
         .cloned()
@@ -629,63 +514,4 @@ async fn operation_session(
     } else {
         Err(anyhow::anyhow!("digest mismatch"))
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn close_loop_session(
-    control_client: reqwest::Client,
-    peer_urls: Vec<PeerUrl>,    // choosen to serve put/get-chunk
-    instance_urls: Vec<String>, // choosen to serve benchmark-put/get
-    chunk_len: u32,
-    k: NonZeroUsize,
-    n: NonZeroUsize,
-    replication_factor: usize,
-    shared_count: Arc<AtomicUsize>,
-    valid_range: Range<usize>,
-    mut out: impl FnMut(String),
-) -> anyhow::Result<()> {
-    let mut count;
-    while {
-        count = shared_count.fetch_add(1, SeqCst);
-        count < valid_range.end
-    } {
-        // let backoff = Duration::from_millis(thread_rng().gen_range(1000..5000));
-        // sleep(backoff).await;
-        let put_url = instance_urls
-            .choose(&mut thread_rng())
-            .ok_or(anyhow::anyhow!("no instance available"))?;
-        let get_url = instance_urls
-            .choose(&mut thread_rng())
-            .ok_or(anyhow::anyhow!("no instance available"))?;
-        println!("Put {put_url} Get {get_url}",);
-        if valid_range.contains(&count) {
-            operation_session(
-                control_client.clone(),
-                put_url.clone(),
-                get_url.clone(),
-                peer_urls.clone(),
-                chunk_len,
-                k,
-                n,
-                replication_factor,
-                &mut out,
-            )
-            .await
-        } else {
-            println!("(Discard result of warmup/cooldown)");
-            operation_session(
-                control_client.clone(),
-                put_url.clone(),
-                get_url.clone(),
-                peer_urls.clone(),
-                chunk_len,
-                k,
-                n,
-                replication_factor,
-                |_| {},
-            )
-            .await
-        }?
-    }
-    Ok(())
 }
