@@ -13,8 +13,8 @@ impl<N: Into<M>, M> SendEvent<N> for Sender<M> {
     }
 }
 
-// there's no way to cancel a blocking run, so it should be fine to create timer in the function
-// scope. not absolutely sure though
+// there's no way to cancel a blocking run, so it should be fine to create 
+// scoped timer inside the function. not absolutely sure though
 pub fn run<M>(
     receiver: Receiver<M>,
     state: &mut (impl OnEventUniversal<Timer, Event = M> + OnTimerUniversal<Timer>),

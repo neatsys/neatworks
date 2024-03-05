@@ -37,9 +37,9 @@ impl<T: AsRef<[u8]> + Send + Sync + Clone + 'static> Buf for T {}
 // types
 // there used to be a dediated trait for raw net, but later get merged into this
 // univeral trait
-// these result in the `Addr` and `Buf` traits are not directly mentioned in
-// sending trait anymore. nevertheless, constrait type parameters with them
-// manually when necessary
+// these result in the fact that `Addr` and `Buf` traits are not directly
+// mentioned in sending trait anymore. nevertheless, constrait type parameters
+// with them manually when necessary
 
 // it's obvious that `M` is not required to `impl Buf` for all cases, but `A`
 // is neither required to `impl Addr` for all cases
@@ -79,11 +79,11 @@ impl<T: ?Sized + SendMessage<A, M>, A, M> SendMessage<A, M> for Box<T> {
 
 // this is usable enough, just still feels not very decent, and performance will
 // be limited, certainly
+pub struct IterAddr<'a, A>(pub &'a mut (dyn Iterator<Item = A> + Send + Sync));
 // it may seem like a default implementation of SendMessage<IterAddr<A>, M>
 // should be provided as long as SendMessage<A, M> and M is Clone. but in this
 // codebase "address" has been abused and certain address iterator e.g.
 // IterAddr<All> does not really make sense
-pub struct IterAddr<'a, A>(pub &'a mut (dyn Iterator<Item = A> + Send + Sync));
 
 // the user site interface. avoid writing out `IterAddr` explicitly
 // TODO better name
@@ -108,13 +108,13 @@ pub mod events {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SendAddr<T>(pub T);
+pub struct SendAddr<E>(pub E);
 
 #[derive(Debug)]
 pub struct Auto<A>(PhantomData<A>); // TODO better name
 
-impl<T: SendEvent<M>, M> SendMessage<SendAddr<T>, M> for Auto<SendAddr<T>> {
-    fn send(&mut self, mut dest: SendAddr<T>, message: M) -> anyhow::Result<()> {
+impl<E: SendEvent<M>, M> SendMessage<SendAddr<E>, M> for Auto<SendAddr<E>> {
+    fn send(&mut self, mut dest: SendAddr<E>, message: M) -> anyhow::Result<()> {
         dest.0.send(message)
     }
 }

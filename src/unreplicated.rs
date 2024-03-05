@@ -352,7 +352,9 @@ pub mod check {
 
     use crate::{
         app::KVStore,
-        event::{erased::OnEvent, LinearTimer, OnTimer as _, TimerId, Transient, UnreachableTimer},
+        event::{
+            erased::OnEvent, linear::Timer, OnTimer as _, TimerId, Transient, UnreachableTimer,
+        },
         message::Request,
         net::{events::Recv, SendMessage},
         workload::{check::DryCloseLoop, CloseLoop, Invoke, InvokeOk, Workload},
@@ -377,7 +379,7 @@ pub mod check {
 
     pub struct ClientState<W: Workload> {
         pub state: Client,
-        timer: LinearTimer,
+        timer: Timer,
         pub close_loop: CloseLoop<W, Transient<Invoke>>,
     }
 
@@ -519,7 +521,7 @@ pub mod check {
                     Transient::default(),
                     Transient::default(),
                 ),
-                timer: LinearTimer::default(),
+                timer: Timer::default(),
                 close_loop: CloseLoop::new(Transient::<Invoke>::default(), workload),
             });
             Ok(())
@@ -566,12 +568,12 @@ pub mod check {
                     client.state.on_event(Recv(message), &mut client.timer)?
                 }
                 Event::Timer(TimerEvent {
-                    timer_id: TimerId(id),
+                    timer_id,
                     client_index: index,
                 }) => {
                     let client = &mut self.clients[index];
-                    client.timer.step_timer(TimerId(id))?;
-                    client.state.on_timer(TimerId(id), &mut client.timer)?
+                    client.timer.step_timer(&timer_id)?;
+                    client.state.on_timer(timer_id, &mut client.timer)?
                 }
                 _ => anyhow::bail!("unexpected event"),
             }
