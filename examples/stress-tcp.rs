@@ -14,7 +14,7 @@ use augustus::{
         Blanket, Session,
     },
     net::{
-        session::{tcp_listen_session, Tcp, TcpControl},
+        session::{tcp_listen_session, TcpControl, TcpControl},
         SendMessage,
     },
 };
@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
     for _ in 0..num_peer {
         let mut control = Blanket(Buffered::from(TcpControl::<Vec<u8>>::new()));
         let mut control_session = Session::new();
-        let mut net = Tcp(Sender::from(control_session.sender()));
+        let mut net = TcpControl(Sender::from(control_session.sender()));
         sessions.spawn(async move { control_session.run(&mut control).await });
         sessions.spawn(async move {
             loop {

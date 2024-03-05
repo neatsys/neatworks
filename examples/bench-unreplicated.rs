@@ -27,7 +27,7 @@ use augustus::{
         Inline, OnTimer, Session, Unify,
     },
     net::{
-        session::{tcp_listen_session, Tcp, TcpControl, Udp},
+        session::{tcp_listen_session, TcpControl, TcpControl, Udp},
         IndexNet,
     },
     unreplicated::{
@@ -93,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
                     let listener = runtime.spawn(TcpListener::bind("0.0.0.0:0")).await??;
                     let addr = SocketAddr::new([10, 0, 0, 8].into(), listener.local_addr()?.port());
                     let mut tcp_session = erased::Session::new();
-                    let raw_net = Tcp(erased::session::Sender::from(tcp_session.sender()));
+                    let raw_net = TcpControl(erased::session::Sender::from(tcp_session.sender()));
                     let mut state = Unify(Client::new(
                         id,
                         addr,
@@ -231,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
 
     if flag_tcp {
         let mut tcp_session = erased::Session::new();
-        let raw_net = Tcp(erased::session::Sender::from(tcp_session.sender()));
+        let raw_net = TcpControl(erased::session::Sender::from(tcp_session.sender()));
         let mut state = Unify(Replica::new(Null, ToClientMessageNet::new(raw_net)));
         let mut state_session = Session::new();
         let mut state_sender = state_session.sender();

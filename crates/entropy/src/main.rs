@@ -24,7 +24,7 @@ use augustus::{
     kademlia::{self, Buckets, PeerId, PeerRecord},
     net::{
         kademlia::{Control, PeerNet},
-        session::{tcp_listen_session, Tcp, TcpControl},
+        session::{tcp_listen_session, TcpControl, TcpControl},
     },
     worker::erased::Worker,
 };
@@ -274,7 +274,7 @@ async fn start_peer(
     let mut kademlia_peer = Blanket(Buffered::from(kademlia::Peer::new(
         buckets,
         // MessageNet::new(socket_net.clone()),
-        MessageNet::new(Tcp(Sender::from(tcp_control_session.sender()))),
+        MessageNet::new(TcpControl(Sender::from(tcp_control_session.sender()))),
         Sender::from(kademlia_control_session.sender()),
         Worker::new_inline(
             crypto.clone(),
@@ -283,7 +283,7 @@ async fn start_peer(
     )));
     let mut kademlia_control = Blanket(Buffered::from(Control::new(
         // socket_net.clone(),
-        Tcp(Sender::from(tcp_control_session.sender())),
+        TcpControl(Sender::from(tcp_control_session.sender())),
         Sender::from(kademlia_session.sender()),
     )));
     let mut peer = Blanket(Buffered::from(Peer::new(

@@ -19,8 +19,8 @@ impl<T: Send + Sync + Clone + Eq + Hash + Debug + Serialize + DeserializeOwned +
 {
 }
 
-pub trait Buf: AsRef<[u8]> + Send + Sync + Clone + 'static {}
-impl<T: AsRef<[u8]> + Send + Sync + Clone + 'static> Buf for T {}
+pub trait Buf: AsRef<[u8]> + Send + Sync + Clone + From<Vec<u8>> + 'static {}
+impl<T: AsRef<[u8]> + Send + Sync + Clone + From<Vec<u8>> + 'static> Buf for T {}
 
 // terms about nets that used in this codebase
 // raw net: implementation of `SendMessage<_, impl Buf>`

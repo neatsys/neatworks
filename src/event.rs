@@ -221,6 +221,14 @@ pub mod erased {
         fn on_event(&mut self, event: M, timer: &mut impl Timer) -> anyhow::Result<()>;
     }
 
+    pub struct Inline<'a, S, T>(pub &'a mut S, pub &'a mut T);
+
+    impl<S: OnEvent<M>, M, T: Timer> SendEvent<M> for Inline<'_, S, T> {
+        fn send(&mut self, event: M) -> anyhow::Result<()> {
+            self.0.on_event(event, self.1)
+        }
+    }
+
     #[derive(derive_more::Deref, derive_more::DerefMut)]
     pub struct Blanket<S>(pub S);
 
