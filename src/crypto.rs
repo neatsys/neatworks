@@ -4,14 +4,13 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use aws_lc_rs::digest;
 use serde::{Deserialize, Serialize};
-// use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256};
 
 use crate::kademlia::PeerId;
 
 // Hashed based digest deriving solution
-// There's no well known solution for deriving digest methods to general
+// There's no well known solution for deriving digest methods for general
 // structural data i.e. structs and enums (as far as I know), which means to
 // compute digest for a structural data e.g. message type, one has to do either:
 //   specify the tranversal manually
@@ -29,13 +28,7 @@ pub trait DigestHasher {
     fn write(&mut self, bytes: &[u8]);
 }
 
-// impl DigestHasher for Sha256 {
-//     fn write(&mut self, bytes: &[u8]) {
-//         self.update(bytes)
-//     }
-// }
-
-impl DigestHasher for digest::Context {
+impl DigestHasher for Sha256 {
     fn write(&mut self, bytes: &[u8]) {
         self.update(bytes)
     }
@@ -91,19 +84,23 @@ pub trait DigestHash: Hash {
     }
 
     fn sha256(&self) -> [u8; 32] {
-        let mut state = digest::Context::new(&digest::SHA256);
+        let mut state = Sha256::new();
         DigestHash::hash(self, &mut state);
-        state.finish().as_ref().try_into().unwrap()
+        state.finalize().into()
     }
 }
 impl<T: Hash> DigestHash for T {}
 
 pub use primitive_types::H256;
 
+// the cryptographic library to be used in this codebase must support seedable
+// RNG based keypair generation
+// TODO introduce ed25519_dalek and use that for entropy
+
 #[derive(Debug, Clone)]
 pub struct Crypto<I> {
     secret_key: secp256k1::SecretKey,
-    public_keys: HashMap<I, secp256k1::PublicKey>,
+    public_keys: HashMap<I, PublicKey>,
     secp: secp256k1::Secp256k1<secp256k1::All>,
 }
 
@@ -133,19 +130,6 @@ pub mod events {
     pub struct Verified<M>(pub super::Verifiable<M>);
 }
 
-impl<I> Crypto<I> {
-    pub fn new(
-        secret_key: secp256k1::SecretKey,
-        public_keys: HashMap<I, secp256k1::PublicKey>,
-    ) -> Self {
-        Self {
-            secret_key,
-            public_keys,
-            secp: secp256k1::Secp256k1::new(),
-        }
-    }
-}
-
 impl Crypto<u8> {
     pub fn new_hardcoded_replication(num_replica: usize, replica_id: u8) -> anyhow::Result<Self> {
         let secret_keys = (0..num_replica)
@@ -156,15 +140,16 @@ impl Crypto<u8> {
                 secp256k1::SecretKey::from_slice(&k)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let secp = secp256k1::Secp256k1::signing_only();
-        Ok(Self::new(
-            secret_keys[replica_id as usize],
-            secret_keys
+        let secp = secp256k1::Secp256k1::new();
+        Ok(Self {
+            secret_key: secret_keys[replica_id as usize],
+            public_keys: secret_keys
                 .into_iter()
                 .enumerate()
                 .map(|(id, secret_key)| (id as _, secret_key.public_key(&secp)))
                 .collect(),
-        ))
+            secp,
+        })
     }
 }
 
