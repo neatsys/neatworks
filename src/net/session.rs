@@ -195,14 +195,13 @@ impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnE
         let preamble = self.preamble.clone();
         let on_buf = self.on_buf.clone();
         tokio::spawn(async move {
-            let stream = match async {
+            let task = async {
                 let mut stream = TcpStream::connect(remote).await?;
                 stream.set_nodelay(true)?;
                 stream.write_all(&preamble).await?;
                 anyhow::Result::<_>::Ok(stream)
-            }
-            .await
-            {
+            };
+            let stream = match task.await {
                 Ok(stream) => stream,
                 Err(err) => {
                     warn!(">>> {remote} {err}");
@@ -290,6 +289,7 @@ pub mod simplex {
         net::{Buf, IterAddr, SendMessage},
     };
 
+    #[allow(clippy::type_complexity)]
     pub struct Tcp<B>(super::TcpControl<B, fn(&[u8]) -> anyhow::Result<()>>);
 
     impl<B> Default for Tcp<B> {
@@ -335,14 +335,13 @@ impl TcpListener {
     pub async fn accept_session(&self, mut sender: impl SendEvent<Incoming>) -> anyhow::Result<()> {
         loop {
             let (mut stream, peer_addr) = self.0.accept().await?;
-            let remote = match async {
+            let task = async {
                 stream.set_nodelay(true)?;
                 let mut preamble = vec![0; TCP_PREAMBLE_LEN];
                 stream.read_exact(&mut preamble).await?;
                 anyhow::Result::<_>::Ok(std::str::from_utf8(&preamble)?.trim_end().parse()?)
-            }
-            .await
-            {
+            };
+            let remote = match task.await {
                 Ok(remote) => remote,
                 Err(err) => {
                     warn!("{peer_addr} {err}");

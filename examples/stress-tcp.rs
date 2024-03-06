@@ -9,18 +9,14 @@ use std::{
 };
 
 use augustus::{
-    event::erased::{
-        session::{Buffered, Sender},
-        Blanket, Session,
-    },
+    event::erased::{session::Sender, Blanket, Session, Unify},
     net::{
-        session::{tcp_listen_session, TcpControl, TcpControl},
+        session::{Tcp, TcpListener},
         SendMessage,
     },
 };
 use rand::{thread_rng, Rng};
 use tokio::{
-    net::TcpListener,
     task::JoinSet,
     time::{sleep, timeout},
 };
@@ -33,19 +29,18 @@ async fn main() -> anyhow::Result<()> {
     let count = Arc::new(AtomicU32::new(0));
     let mut sessions = JoinSet::new();
     for i in 0..num_peer {
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", 3000 + i)).await?;
-        sessions.spawn(tcp_listen_session(listener, {
+        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", 3000 + i)).await?;
+        let listener = TcpListener(listener);
+        let mut control = Blanket(Unify(listener.control({
             let count = count.clone();
-            move |_| {
+            move |_: &_| {
                 count.fetch_add(1, SeqCst);
                 Ok(())
             }
-        }));
-    }
-    for _ in 0..num_peer {
-        let mut control = Blanket(Buffered::from(TcpControl::<Vec<u8>>::new()));
+        })?));
+
         let mut control_session = Session::new();
-        let mut net = TcpControl(Sender::from(control_session.sender()));
+        let mut net = Tcp(Sender::from(control_session.sender()));
         sessions.spawn(async move { control_session.run(&mut control).await });
         sessions.spawn(async move {
             loop {
@@ -53,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
                     for k in 0..num_peer {
                         net.send(
                             SocketAddr::from(([127, 0, 0, j + 1], 3000 + k)),
-                            b"hello".to_vec(),
+                            bytes::Bytes::from(b"hello".to_vec()),
                         )?;
                         let delay = 10 + thread_rng().gen_range(0..10);
                         sleep(Duration::from_millis(delay)).await

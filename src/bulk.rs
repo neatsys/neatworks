@@ -223,7 +223,7 @@ pub async fn session<A, M, N: Send + 'static>(
                         } else {
                             stream.read_to_end(&mut buf).await?;
                         }
-                        Result::<_, anyhow::Error>::Ok(buf)
+                        anyhow::Result::<_>::Ok(buf)
                     };
                     let buf = if let Some(cancel) = accept.cancel {
                         tokio::select! {

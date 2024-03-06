@@ -114,7 +114,7 @@ async fn put_session(op_client: reqwest::Client, peer_urls: Vec<String>) -> anyh
         let mut count = 0;
         let hash = loop {
             match async {
-                Result::<_, anyhow::Error>::Ok(
+                anyhow::Result::<_>::Ok(
                     op_client
                         .post(format!("{peer_url}/api/v0/add"))
                         .multipart(Form::new().part("", Part::bytes(data.clone())))

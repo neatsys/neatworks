@@ -17,14 +17,14 @@ use augustus::{
     event::{
         erased::{
             session::{Buffered, Sender},
-            Blanket, Session,
+            Blanket, Session, Unify,
         },
         SendEvent,
     },
     kademlia::{self, Buckets, PeerId, PeerRecord},
     net::{
         kademlia::{Control, PeerNet},
-        session::{tcp_listen_session, TcpControl, TcpControl},
+        session::{Tcp, TcpListener},
     },
     worker::erased::Worker,
 };
@@ -44,7 +44,6 @@ use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{create_dir, remove_dir_all},
-    net::TcpSocket,
     signal::ctrl_c,
     sync::{
         mpsc::{unbounded_channel, UnboundedSender},
@@ -243,16 +242,9 @@ async fn start_peer(
     let path = std::path::Path::new(&path);
     let _ = remove_dir_all(path).await;
     create_dir(path).await?;
-    // let socket_net = Udp(UdpSocket::bind((config.bind_ip, record.addr.port()))
-    // let socket_net = Udp(
-    //     UdpSocket::bind(SocketAddr::from(([0; 4], record.addr.port())))
-    //         .await?
-    //         .into(),
-    // );
-    // let listener = TcpListener::bind(SocketAddr::from(([0; 4], record.addr.port()))).await?;
-    let socket = TcpSocket::new_v4()?;
-    socket.bind(SocketAddr::from(([0; 4], record.addr.port())))?;
-    let listener = socket.listen(12000)?;
+    let listener =
+        tokio::net::TcpListener::bind(SocketAddr::from(([0; 4], record.addr.port()))).await?;
+    let listener = TcpListener(listener);
 
     let ip = record.addr.ip();
     let mut buckets = Buckets::new(record);
@@ -274,7 +266,7 @@ async fn start_peer(
     let mut kademlia_peer = Blanket(Buffered::from(kademlia::Peer::new(
         buckets,
         // MessageNet::new(socket_net.clone()),
-        MessageNet::new(TcpControl(Sender::from(tcp_control_session.sender()))),
+        MessageNet::new(Tcp(Sender::from(tcp_control_session.sender()))),
         Sender::from(kademlia_control_session.sender()),
         Worker::new_inline(
             crypto.clone(),
@@ -283,7 +275,7 @@ async fn start_peer(
     )));
     let mut kademlia_control = Blanket(Buffered::from(Control::new(
         // socket_net.clone(),
-        TcpControl(Sender::from(tcp_control_session.sender())),
+        Tcp(Sender::from(tcp_control_session.sender())),
         Sender::from(kademlia_session.sender()),
     )));
     let mut peer = Blanket(Buffered::from(Peer::new(
@@ -299,13 +291,10 @@ async fn start_peer(
         Worker::new_inline((), Box::new(Sender::from(peer_session.sender()))),
         fs_sender,
     )));
-    let mut tcp_control = Blanket(Buffered::from(TcpControl::new()));
-
-    // let socket_session = socket_net.recv_session({
-    let socket_session = tcp_listen_session(listener, {
+    let mut tcp_control = Blanket(Unify(listener.control({
         let mut peer_sender = Sender::from(peer_session.sender());
         let mut kademlia_sender = Sender::from(kademlia_session.sender());
-        move |buf| {
+        move |buf: &_| {
             entropy::on_buf(
                 buf,
                 &mut peer_sender,
@@ -313,7 +302,9 @@ async fn start_peer(
                 &mut blob_sender,
             )
         }
-    });
+    })?));
+
+    let socket_session = listener.accept_session(Sender::from(tcp_control_session.sender()));
     let kademlia_session = kademlia_session.run(&mut kademlia_peer);
     let blob_session = bulk::session(
         ip,
@@ -363,7 +354,7 @@ async fn put_chunk(
         state.peers.lock().await.senders[peer_index].send(Put(chunk, buf))?;
         // detach receiving, so that even if http connection closed receiver keeps alive
         tokio::spawn(receiver).await??;
-        Result::<_, anyhow::Error>::Ok(format!("{:x}", H256(chunk)))
+        anyhow::Result::<_>::Ok(format!("{:x}", H256(chunk)))
     };
     match task.await {
         Ok(result) => (StatusCode::OK, result),
@@ -384,7 +375,7 @@ async fn get_chunk(
         let replaced = state.pending_gets.lock().await.insert(chunk, sender);
         assert!(replaced.is_none());
         state.peers.lock().await.senders[peer_index].send(Get(chunk))?;
-        Result::<_, anyhow::Error>::Ok(tokio::spawn(receiver).await??)
+        anyhow::Result::<_>::Ok(tokio::spawn(receiver).await??)
     };
     match task.await {
         Ok(result) => (StatusCode::OK, result),
