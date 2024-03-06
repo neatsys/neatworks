@@ -405,7 +405,7 @@ impl<R: Rng> crate::workload::Workload for Workload<R> {
             if Some(self.transaction_count) == self.settings.operation_count {
                 break 'op None;
             }
-            let _ = self.start.insert(Instant::now());
+            self.start = Some(Instant::now());
             let transaction = Self::TRANSACTIONS[self.transaction.sample(&mut self.rng)];
             let field = if !matches!(transaction, Transaction::Insert | Transaction::Read) {
                 self.rng.gen_range(0..self.settings.field_count)
@@ -429,7 +429,7 @@ impl<R: Rng> crate::workload::Workload for Workload<R> {
                 Transaction::ReadModifyWrite => {
                     let op = Op::Read(key_name.clone());
                     let value = self.build_value();
-                    let _ = self.rmw_update.insert(Op::Update(key_name, field, value));
+                    self.rmw_update = Some(Op::Update(key_name, field, value));
                     op
                 }
             })

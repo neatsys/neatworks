@@ -158,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
                             result = close_loop_session.run(&mut close_loop) => result?,
                             () = cancel.cancelled() => {}
                         }
-                        let _ = count_sender.send(close_loop.workload.latencies.len());
+                        count_sender.send(close_loop.workload.latencies.len())?;
                         Ok(())
                     },
                     runtime.handle(),

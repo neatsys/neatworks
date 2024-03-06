@@ -28,7 +28,6 @@ lto = true
 
 [dependencies]
 anyhow = { version = "1.0.79", features = ["backtrace"] }
-aws-lc-rs = "1.6.2"
 axum = "0.7.4"
 bincode = "1.3.3"
 bytes = "1.5.0"

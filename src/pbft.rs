@@ -435,9 +435,7 @@ impl<S, A> OnEvent<(Verified<PrePrepare>, Vec<Request<A>>)> for Replica<S, A> {
         if self.log[pre_prepare.op_num as usize].pre_prepare.is_some() {
             return Ok(());
         }
-        let _ = self.log[pre_prepare.op_num as usize]
-            .pre_prepare
-            .insert(pre_prepare.clone());
+        self.log[pre_prepare.op_num as usize].pre_prepare = Some(pre_prepare.clone());
         self.log[pre_prepare.op_num as usize].view_num = self.view_num;
         self.log[pre_prepare.op_num as usize].requests = requests;
 

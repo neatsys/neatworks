@@ -75,7 +75,6 @@ name = "augustus"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "aws-lc-rs",
  "axum",
  "bincode",
  "bytes",
@@ -117,7 +116,6 @@ dependencies = [
  "aws-lc-sys",
  "mirai-annotations",
  "paste",
- "untrusted 0.7.1",
  "zeroize",
 ]
 
@@ -1433,7 +1431,7 @@ dependencies = [
  "getrandom",
  "libc",
  "spin",
- "untrusted 0.9.0",
+ "untrusted",
  "windows-sys 0.52.0",
 ]
 
@@ -1521,7 +1519,7 @@ dependencies = [
  "aws-lc-rs",
  "ring",
  "rustls-pki-types",
- "untrusted 0.9.0",
+ "untrusted",
 ]
 
 [[package]]
@@ -2011,12 +2009,6 @@ checksum = "a56d1686db2308d901306f92a263857ef59ea39678a5458e7cb17f01415101f5"
 dependencies = [
  "tinyvec",
 ]
-
-[[package]]
-name = "untrusted"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a156c684c91ea7d62626509bce3cb4e1d9ed5c4d978f7b4352658f96a4c26b4a"
 
 [[package]]
 name = "untrusted"
