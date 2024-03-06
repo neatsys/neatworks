@@ -4,8 +4,9 @@ use std::{
     hash::{Hash, Hasher},
 };
 
+use aws_lc_rs::digest;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+// use sha2::{Digest, Sha256};
 
 use crate::kademlia::PeerId;
 
@@ -28,7 +29,13 @@ pub trait DigestHasher {
     fn write(&mut self, bytes: &[u8]);
 }
 
-impl DigestHasher for Sha256 {
+// impl DigestHasher for Sha256 {
+//     fn write(&mut self, bytes: &[u8]) {
+//         self.update(bytes)
+//     }
+// }
+
+impl DigestHasher for digest::Context {
     fn write(&mut self, bytes: &[u8]) {
         self.update(bytes)
     }
@@ -84,9 +91,9 @@ pub trait DigestHash: Hash {
     }
 
     fn sha256(&self) -> [u8; 32] {
-        let mut state = Sha256::new();
+        let mut state = digest::Context::new(&digest::SHA256);
         DigestHash::hash(self, &mut state);
-        state.finalize().into()
+        state.finish().as_ref().try_into().unwrap()
     }
 }
 impl<T: Hash> DigestHash for T {}

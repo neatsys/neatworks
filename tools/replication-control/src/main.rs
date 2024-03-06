@@ -29,8 +29,8 @@ async fn main() -> anyhow::Result<()> {
             backend: YcsbBackend::BTree,
             profile,
         });
-        benchmark_session(control_client.clone(), Protocol::Unreplicated, app).await?
-        // sleep(Duration::from_millis(1500)).await
+        // benchmark_session(control_client.clone(), Protocol::Unreplicated, app).await?
+        benchmark_session(control_client.clone(), Protocol::Pbft, app).await?
     }
     Ok(())
 }
