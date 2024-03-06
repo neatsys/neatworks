@@ -24,7 +24,7 @@ use augustus::{
     kademlia::{self, Buckets, PeerId, PeerRecord},
     net::{
         kademlia::{Control, PeerNet},
-        session::{Tcp, TcpListener},
+        session::{tcp_accept_session, Tcp, TcpControl},
     },
     worker::erased::Worker,
 };
@@ -44,6 +44,7 @@ use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{create_dir, remove_dir_all},
+    net::TcpListener,
     signal::ctrl_c,
     sync::{
         mpsc::{unbounded_channel, UnboundedSender},
@@ -135,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = args().nth(1);
     let addr = addr.as_deref().unwrap_or("0.0.0.0:3000");
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let listener = TcpListener::bind(&addr).await?;
     let serve = axum::serve(listener, app)
         .with_graceful_shutdown(async { ctrl_c().await.unwrap() })
         .into_future();
@@ -242,9 +243,7 @@ async fn start_peer(
     let path = std::path::Path::new(&path);
     let _ = remove_dir_all(path).await;
     create_dir(path).await?;
-    let listener =
-        tokio::net::TcpListener::bind(SocketAddr::from(([0; 4], record.addr.port()))).await?;
-    let listener = TcpListener(listener);
+    let listener = TcpListener::bind(SocketAddr::from(([0; 4], record.addr.port()))).await?;
 
     let ip = record.addr.ip();
     let mut buckets = Buckets::new(record);
@@ -291,20 +290,23 @@ async fn start_peer(
         Worker::new_inline((), Box::new(Sender::from(peer_session.sender()))),
         fs_sender,
     )));
-    let mut tcp_control = Blanket(Unify(listener.control({
-        let mut peer_sender = Sender::from(peer_session.sender());
-        let mut kademlia_sender = Sender::from(kademlia_session.sender());
-        move |buf: &_| {
-            entropy::on_buf(
-                buf,
-                &mut peer_sender,
-                &mut kademlia_sender,
-                &mut blob_sender,
-            )
-        }
-    })?));
+    let mut tcp_control = Blanket(Unify(TcpControl::new(
+        {
+            let mut peer_sender = Sender::from(peer_session.sender());
+            let mut kademlia_sender = Sender::from(kademlia_session.sender());
+            move |buf: &_| {
+                entropy::on_buf(
+                    buf,
+                    &mut peer_sender,
+                    &mut kademlia_sender,
+                    &mut blob_sender,
+                )
+            }
+        },
+        listener.local_addr()?,
+    )));
 
-    let socket_session = listener.accept_session(Sender::from(tcp_control_session.sender()));
+    let socket_session = tcp_accept_session(listener, Sender::from(tcp_control_session.sender()));
     let kademlia_session = kademlia_session.run(&mut kademlia_peer);
     let blob_session = bulk::session(
         ip,

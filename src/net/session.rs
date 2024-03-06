@@ -5,7 +5,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
-        TcpStream,
+        TcpListener, TcpStream,
     },
     sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
     time::Instant,
@@ -61,6 +61,12 @@ const TCP_MAX_BUF_LEN: usize = 1 << 20;
 
 const TCP_PREAMBLE_LEN: usize = 32;
 
+// a construction that enables connection reusing and thottling
+// the client side of a connection informs its server address to the connected
+// server with preamble, so if later a message need to be delivered in the
+// opposite direction, it can go through the existing connection
+// TODO consider generalize this connection over underlying transportation
+// protocols to be reused e.g. for QUIC
 #[derive(Debug)]
 pub struct TcpControl<B, F> {
     // cached connections based on the last *outgoing* traffic
@@ -76,6 +82,8 @@ pub struct TcpControl<B, F> {
     // sender and cause further outgoing traffic (on remote side, incoming traffic on local side)
     // migrate to the new connection. as the result, (eventually) there's at most one connection
     // between each pair of addresses
+    // even if i find a way to easily promote connections on incoming messages, this strategy is
+    // still necessary to eliminate duplicated connections between same pair of addresses
     connections: LruCache<SocketAddr, Connection<B>>,
     on_buf: F,
     preamble: bytes::Bytes,
@@ -88,7 +96,8 @@ struct Connection<B> {
 }
 
 impl<B, F> TcpControl<B, F> {
-    fn new(on_buf: F, addr: SocketAddr) -> Self {
+    pub fn new(on_buf: F, addr: impl Into<Option<SocketAddr>>) -> Self {
+        let addr = addr.into().unwrap_or(SocketAddr::from(([0, 0, 0, 0], 0)));
         let mut preamble = addr.to_string();
         assert!(preamble.len() < TCP_PREAMBLE_LEN);
         preamble += &vec![" "; TCP_PREAMBLE_LEN - preamble.len()].concat();
@@ -299,7 +308,7 @@ pub mod simplex {
                     warn!("ignore ingress message of simplex connection");
                     Ok(())
                 },
-                SocketAddr::from(([0, 0, 0, 0], 0)),
+                None,
             ))
         }
     }
@@ -325,31 +334,26 @@ pub mod simplex {
     }
 }
 
-pub struct TcpListener(pub tokio::net::TcpListener);
-
-impl TcpListener {
-    pub fn control<B, F>(&self, on_buf: F) -> anyhow::Result<TcpControl<B, F>> {
-        Ok(TcpControl::new(on_buf, self.0.local_addr()?))
-    }
-
-    pub async fn accept_session(&self, mut sender: impl SendEvent<Incoming>) -> anyhow::Result<()> {
-        loop {
-            let (mut stream, peer_addr) = self.0.accept().await?;
-            let task = async {
-                stream.set_nodelay(true)?;
-                let mut preamble = vec![0; TCP_PREAMBLE_LEN];
-                stream.read_exact(&mut preamble).await?;
-                anyhow::Result::<_>::Ok(std::str::from_utf8(&preamble)?.trim_end().parse()?)
-            };
-            let remote = match task.await {
-                Ok(remote) => remote,
-                Err(err) => {
-                    warn!("{peer_addr} {err}");
-                    continue;
-                }
-            };
-            // println!("{peer_addr} -> {remote}");
-            sender.send(Incoming(remote, stream))?
-        }
+pub async fn tcp_accept_session(
+    listener: TcpListener,
+    mut sender: impl SendEvent<Incoming>,
+) -> anyhow::Result<()> {
+    loop {
+        let (mut stream, peer_addr) = listener.accept().await?;
+        let task = async {
+            stream.set_nodelay(true)?;
+            let mut preamble = vec![0; TCP_PREAMBLE_LEN];
+            stream.read_exact(&mut preamble).await?;
+            anyhow::Result::<_>::Ok(std::str::from_utf8(&preamble)?.trim_end().parse()?)
+        };
+        let remote = match task.await {
+            Ok(remote) => remote,
+            Err(err) => {
+                warn!("{peer_addr} {err}");
+                continue;
+            }
+        };
+        // println!("{peer_addr} -> {remote}");
+        sender.send(Incoming(remote, stream))?
     }
 }

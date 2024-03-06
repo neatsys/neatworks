@@ -11,35 +11,44 @@ use std::{
 use augustus::{
     event::erased::{session::Sender, Blanket, Session, Unify},
     net::{
-        session::{Tcp, TcpListener},
+        session::{tcp_accept_session, Tcp, TcpControl},
         SendMessage,
     },
 };
 use rand::{thread_rng, Rng};
 use tokio::{
+    net::TcpListener,
     task::JoinSet,
     time::{sleep, timeout},
 };
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt::init();
     let num_peer = args().nth(1).map(|n| n.parse::<u16>()).unwrap_or(Ok(100))?;
     let multiplier = args().nth(2).map(|n| n.parse::<u8>()).unwrap_or(Ok(100))?;
 
     let count = Arc::new(AtomicU32::new(0));
     let mut sessions = JoinSet::new();
     for i in 0..num_peer {
-        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", 3000 + i)).await?;
-        let listener = TcpListener(listener);
-        let mut control = Blanket(Unify(listener.control({
-            let count = count.clone();
-            move |_: &_| {
-                count.fetch_add(1, SeqCst);
-                Ok(())
-            }
-        })?));
+        let listener = TcpListener::bind(format!("0.0.0.0:{}", 3000 + i)).await?;
+
+        let mut control = Blanket(Unify(TcpControl::new(
+            {
+                let count = count.clone();
+                move |_: &_| {
+                    count.fetch_add(1, SeqCst);
+                    Ok(())
+                }
+            },
+            None,
+        )));
 
         let mut control_session = Session::new();
+        sessions.spawn(tcp_accept_session(
+            listener,
+            Sender::from(control_session.sender()),
+        ));
         let mut net = Tcp(Sender::from(control_session.sender()));
         sessions.spawn(async move { control_session.run(&mut control).await });
         sessions.spawn(async move {

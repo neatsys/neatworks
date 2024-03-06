@@ -27,7 +27,7 @@ use augustus::{
         Inline, OnTimer, Session, Unify,
     },
     net::{
-        session::{Tcp, TcpListener, Udp},
+        session::{tcp_accept_session, Tcp, TcpControl, Udp},
         IndexNet,
     },
     unreplicated::{
@@ -37,7 +37,7 @@ use augustus::{
     workload::{CloseLoop, Iter, OpLatency},
 };
 use tokio::{
-    net::UdpSocket,
+    net::{TcpListener, UdpSocket},
     runtime,
     signal::ctrl_c,
     sync::mpsc::unbounded_channel,
@@ -91,9 +91,7 @@ async fn main() -> anyhow::Result<()> {
                 )));
 
                 if flag_tcp {
-                    let listener = runtime
-                        .spawn(tokio::net::TcpListener::bind("10.0.0.8:0"))
-                        .await??;
+                    let listener = runtime.spawn(TcpListener::bind("10.0.0.8:0")).await??;
                     let mut tcp_session = erased::Session::new();
                     let raw_net = Tcp(erased::session::Sender::from(tcp_session.sender()));
                     let mut state = Unify(Client::new(
@@ -106,18 +104,14 @@ async fn main() -> anyhow::Result<()> {
                         )),
                         erased::session::Sender::from(close_loop_session.sender()),
                     ));
-                    let listener = TcpListener(listener);
                     let mut state_sender = state_session.sender();
-                    let mut tcp_control =
-                        Blanket(erased::Unify(listener.control(move |buf: &_| {
-                            to_client_on_buf(buf, &mut state_sender)
-                        })?));
+                    let mut tcp_control = Blanket(erased::Unify(TcpControl::new(
+                        move |buf: &_| to_client_on_buf(buf, &mut state_sender),
+                        listener.local_addr()?,
+                    )));
 
                     let tcp_sender = erased::session::Sender::from(tcp_session.sender());
-                    sessions.spawn_on(
-                        async move { listener.accept_session(tcp_sender).await },
-                        runtime.handle(),
-                    );
+                    sessions.spawn_on(tcp_accept_session(listener, tcp_sender), runtime.handle());
                     sessions.spawn_on(
                         async move { tcp_session.run(&mut tcp_control).await },
                         runtime.handle(),
@@ -237,14 +231,17 @@ async fn main() -> anyhow::Result<()> {
         let raw_net = Tcp(erased::session::Sender::from(tcp_session.sender()));
         let mut state = Unify(Replica::new(Null, ToClientMessageNet::new(raw_net)));
         let mut state_session = Session::new();
-        let listener = TcpListener(tokio::net::TcpListener::bind("0.0.0.0:4000").await?);
+        let listener = TcpListener::bind("0.0.0.0:4000").await?;
         let mut state_sender = state_session.sender();
-        let mut tcp_control = Blanket(erased::Unify(listener.control::<bytes::Bytes, _>(
+        let mut tcp_control = Blanket(erased::Unify(TcpControl::new(
             move |buf: &_| to_replica_on_buf(buf, &mut state_sender),
-        )?));
+            listener.local_addr()?,
+        )));
 
-        let accept_session =
-            listener.accept_session(erased::session::Sender::from(tcp_session.sender()));
+        let accept_session = tcp_accept_session(
+            listener,
+            erased::session::Sender::from(tcp_session.sender()),
+        );
         let tcp_session = tcp_session.run(&mut tcp_control);
         let state_session = state_session.run(&mut state);
         return run(
