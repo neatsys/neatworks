@@ -24,10 +24,10 @@ use augustus::{
         blocking,
         erased::{self, Blanket},
         ordered::Timer,
-        Inline, OnTimer, Session, Unify,
+        Inline, OnTimer, Session, Unify, UnreachableTimer,
     },
     net::{
-        session::{tcp_accept_session, Tcp, TcpControl, Udp},
+        session::{simplex, tcp_accept_session, Tcp, TcpControl, Udp},
         IndexNet,
     },
     unreplicated::{
@@ -59,6 +59,7 @@ async fn main() -> anyhow::Result<()> {
     let mut args = args().skip(1).collect::<HashSet<_>>();
     let flag_client = args.remove("client");
     let flag_tcp = args.remove("tcp");
+    let flag_simplex = args.remove("simplex");
     let flag_dyn = args.remove("dyn");
     let flag_blocking = args.remove("blocking");
     let flag_dual = args.remove("dual");
@@ -66,9 +67,10 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("unknown arguments {args:?}")
     }
     #[allow(clippy::nonminimal_bool)]
-    if flag_client && (flag_dyn || flag_blocking)
+    if flag_client && (flag_dyn || flag_blocking || flag_simplex)
         || flag_tcp && (flag_blocking || flag_dyn)
         || flag_dual && !flag_blocking
+        || flag_simplex && !flag_tcp
     {
         anyhow::bail!("invalid argument combination")
     }
@@ -108,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
                     let mut tcp_control = Blanket(erased::Unify(TcpControl::new(
                         move |buf: &_| to_client_on_buf(buf, &mut state_sender),
                         listener.local_addr()?,
-                    )));
+                    )?));
 
                     let tcp_sender = erased::session::Sender::from(tcp_session.sender());
                     sessions.spawn_on(tcp_accept_session(listener, tcp_sender), runtime.handle());
@@ -227,16 +229,32 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if flag_tcp {
+        let listener = TcpListener::bind("0.0.0.0:4000").await?;
+        if flag_simplex {
+            let raw_net = simplex::Tcp::new()?;
+            let mut state = Unify(Replica::new(Null, ToClientMessageNet::new(raw_net)));
+            let mut state_session = Session::new();
+            let mut state_sender = state_session.sender();
+            let mut tcp_control = TcpControl::<bytes::Bytes, _>::new(
+                move |buf: &_| to_replica_on_buf(buf, &mut state_sender),
+                None,
+            )?;
+            let mut timer = UnreachableTimer;
+            let accept_session =
+                tcp_accept_session(listener, erased::Inline(&mut tcp_control, &mut timer));
+            let state_session = state_session.run(&mut state);
+            return run(accept_session, state_session).await;
+        }
+
         let mut tcp_session = erased::Session::new();
         let raw_net = Tcp(erased::session::Sender::from(tcp_session.sender()));
         let mut state = Unify(Replica::new(Null, ToClientMessageNet::new(raw_net)));
         let mut state_session = Session::new();
-        let listener = TcpListener::bind("0.0.0.0:4000").await?;
         let mut state_sender = state_session.sender();
         let mut tcp_control = Blanket(erased::Unify(TcpControl::new(
             move |buf: &_| to_replica_on_buf(buf, &mut state_sender),
             listener.local_addr()?,
-        )));
+        )?));
 
         let accept_session = tcp_accept_session(
             listener,
@@ -246,6 +264,8 @@ async fn main() -> anyhow::Result<()> {
         let state_session = state_session.run(&mut state);
         return run(
             async {
+                // mulplex the two sessions probably does not hurt performance since
+                // `accept_session` pending forever ever since all client connections established
                 tokio::select! {
                     result = accept_session => result,
                     result = tcp_session => result,

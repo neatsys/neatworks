@@ -307,7 +307,7 @@ async fn start_peer(
             }
         },
         listener.local_addr()?,
-    )));
+    )?));
 
     let socket_session = tcp_accept_session(listener, Sender::from(tcp_control_session.sender()));
     let kademlia_session = kademlia_session.run(&mut kademlia_peer);

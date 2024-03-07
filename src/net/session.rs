@@ -1,5 +1,6 @@
 use std::{fmt::Debug, io::ErrorKind, net::SocketAddr, sync::Arc, time::Duration};
 
+use bincode::Options;
 use lru::LruCache;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -59,12 +60,30 @@ const TCP_MAX_CONNECTION_NUM: usize = 1024;
 
 const TCP_MAX_BUF_LEN: usize = 1 << 20;
 
-const TCP_PREAMBLE_LEN: usize = 32;
+const TCP_PREAMBLE_LEN: usize = 16;
 
 // a construction that enables connection reusing and thottling
 // the client side of a connection informs its server address to the connected
 // server with preamble, so if later a message need to be delivered in the
 // opposite direction, it can go through the existing connection
+//
+// this is not a solution optimized for performance: each outgoing message must
+// go through two channels, the first one for getting into `TcpControl` and the
+// second one for dispatching into corresponding `write_task`. the first queuing
+// is necessary for keeping all mutation to connection cache inside
+// `TcpControl`. after all, the highest priority goal is to ensure bounded
+// OS resource (mostly number of occupied ephemeral ports) usage, which is
+// essential for p2p stress test. also this strategy is also taken by libp2p,
+// makes it more fair comparison between protocol in this codebase and in libp2p
+//
+// for better performance, consider `simplex::Tcp` which inlines the
+// `TcpControl` into `impl SendMessage` and saves the first queuing. the
+// tradeoff is that it cannot accept incoming connections anymore, you can use
+// a second `TcpControl` that wrapped as
+//   Inline(&mut control, &mut UnreachableTimer)
+// to `impl SendEvent<Incoming>` and pass into `tcp_accept_session` for incoming
+// connections. check unreplicated benchmark for demonstration
+//
 // TODO consider generalize this connection over underlying transportation
 // protocols to be reused e.g. for QUIC
 #[derive(Debug)]
@@ -95,28 +114,39 @@ struct Connection<B> {
     used_at: Instant,
 }
 
+type Preamble = Option<SocketAddr>;
+
 impl<B, F> TcpControl<B, F> {
-    pub fn new(on_buf: F, addr: impl Into<Option<SocketAddr>>) -> Self {
-        let addr = addr.into().unwrap_or(SocketAddr::from(([0, 0, 0, 0], 0)));
-        let mut preamble = addr.to_string();
+    pub fn new(on_buf: F, addr: impl Into<Option<SocketAddr>>) -> anyhow::Result<Self> {
+        let addr = addr.into();
+        let mut preamble = bincode::options().serialize(&addr)?;
         assert!(preamble.len() < TCP_PREAMBLE_LEN);
-        preamble += &vec![" "; TCP_PREAMBLE_LEN - preamble.len()].concat();
-        Self {
+        preamble.resize(TCP_PREAMBLE_LEN, Default::default());
+        Ok(Self {
             connections: LruCache::new(TCP_MAX_CONNECTION_NUM.try_into().unwrap()),
             on_buf,
-            preamble: preamble.into_bytes().into(),
-        }
+            preamble: preamble.into(),
+        })
     }
 }
 
 impl<B, F: FnMut(&[u8]) -> anyhow::Result<()>> TcpControl<B, F> {
-    async fn read_task(mut stream: OwnedReadHalf, mut on_buf: F, remote: SocketAddr) {
+    async fn read_task(
+        mut stream: OwnedReadHalf,
+        mut on_buf: F,
+        remote: impl Into<Option<SocketAddr>>,
+    ) {
+        let remote = remote.into();
         loop {
             let len = match stream.read_u64().await {
                 Ok(len) => len as _,
                 Err(err) => {
                     if !matches!(err.kind(), ErrorKind::UnexpectedEof) {
-                        warn!("<<< {remote} {err}")
+                        warn!(
+                            "{:?} (remote {remote:?}) >>> {:?} {err}",
+                            stream.peer_addr(),
+                            stream.local_addr()
+                        )
                     }
                     break;
                 }
@@ -132,7 +162,11 @@ impl<B, F: FnMut(&[u8]) -> anyhow::Result<()>> TcpControl<B, F> {
             }
             .await
             {
-                warn!("<<< {remote} {err}");
+                warn!(
+                    "{:?} (remote {remote:?}) >>> {:?} {err}",
+                    stream.peer_addr(),
+                    stream.local_addr()
+                );
                 break;
             }
         }
@@ -153,7 +187,11 @@ impl<B: Buf, F> TcpControl<B, F> {
             }
             .await
             {
-                warn!(">>> {remote} {err}");
+                warn!(
+                    "{:?} >=> {:?} (remote {remote}) {err}",
+                    stream.local_addr(),
+                    stream.peer_addr()
+                );
                 break;
             }
         }
@@ -162,7 +200,7 @@ impl<B: Buf, F> TcpControl<B, F> {
 
 pub struct Outgoing<B>(SocketAddr, B);
 
-pub struct Incoming(SocketAddr, TcpStream);
+pub struct Incoming(Preamble, TcpStream);
 
 impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnEvent<Outgoing<B>>
     for TcpControl<B, F>
@@ -213,7 +251,7 @@ impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnE
             let stream = match task.await {
                 Ok(stream) => stream,
                 Err(err) => {
-                    warn!(">>> {remote} {err}");
+                    warn!(">=> {remote} {err}");
                     return;
                 }
             };
@@ -222,7 +260,7 @@ impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnE
             tokio::spawn(Self::write_task(write, receiver, remote));
         });
         if sender.send(buf).is_err() {
-            warn!(">>> {remote} new connection immediately fail")
+            warn!(">=> {remote} new connection immediately fail")
         } else {
             self.connections.push(
                 remote,
@@ -241,14 +279,14 @@ impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnE
 {
     fn on_event(
         &mut self,
-        Incoming(remote, stream): Incoming,
+        Incoming(preamble, stream): Incoming,
         _: &mut impl Timer,
     ) -> anyhow::Result<()> {
-        let (sender, receiver) = unbounded_channel::<B>();
         let (read, write) = stream.into_split();
-        tokio::spawn(Self::read_task(read, self.on_buf.clone(), remote));
-        tokio::spawn(Self::write_task(write, receiver, remote));
-        if remote != SocketAddr::from(([0, 0, 0, 0], 0)) {
+        tokio::spawn(Self::read_task(read, self.on_buf.clone(), preamble));
+        if let Some(remote) = preamble {
+            let (sender, receiver) = unbounded_channel::<B>();
+            tokio::spawn(Self::write_task(write, receiver, remote));
             let replaced = self.connections.put(
                 remote,
                 Connection {
@@ -301,15 +339,13 @@ pub mod simplex {
     #[allow(clippy::type_complexity)]
     pub struct Tcp<B>(super::TcpControl<B, fn(&[u8]) -> anyhow::Result<()>>);
 
-    impl<B> Default for Tcp<B> {
-        fn default() -> Self {
-            Self(super::TcpControl::new(
-                |_| {
-                    warn!("ignore ingress message of simplex connection");
-                    Ok(())
-                },
-                None,
-            ))
+    impl<B> Tcp<B> {
+        pub fn new() -> anyhow::Result<Self> {
+            let on_buf = (|_: &_| {
+                warn!("ignore ingress message of simplex connection");
+                Ok(())
+            }) as _;
+            Ok(Self(super::TcpControl::new(on_buf, None)?))
         }
     }
 
@@ -332,6 +368,10 @@ pub mod simplex {
             )
         }
     }
+
+    // impl<B, F> super::TcpControl<B, F> {
+    //     pub fn new_accept(on_buf: F) -> Inline<'??
+    // }
 }
 
 pub async fn tcp_accept_session(
@@ -344,7 +384,11 @@ pub async fn tcp_accept_session(
             stream.set_nodelay(true)?;
             let mut preamble = vec![0; TCP_PREAMBLE_LEN];
             stream.read_exact(&mut preamble).await?;
-            anyhow::Result::<_>::Ok(std::str::from_utf8(&preamble)?.trim_end().parse()?)
+            anyhow::Result::<_>::Ok(
+                bincode::options()
+                    .allow_trailing_bytes()
+                    .deserialize(&preamble)?,
+            )
         };
         let remote = match task.await {
             Ok(remote) => remote,

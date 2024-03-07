@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             },
             None,
-        )));
+        )?));
 
         let mut control_session = Session::new();
         sessions.spawn(tcp_accept_session(
