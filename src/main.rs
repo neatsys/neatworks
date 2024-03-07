@@ -8,7 +8,7 @@ use std::{
 
 use augustus::{
     app::{ycsb, App, Sqlite},
-    crypto::Crypto,
+    crypto::{Crypto, CryptoFlavor},
     event::{
         erased::{
             session::{Buffered, Sender},
@@ -390,7 +390,12 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
         );
         let net = Udp(socket.into());
 
-        let crypto = Crypto::new_hardcoded_replication(config.num_replica, config.replica_id)?;
+        let crypto = Crypto::new_hardcoded_replication(
+            config.num_replica,
+            config.replica_id,
+            CryptoFlavor::Schnorrkel,
+            // CryptoFlavor::Secp256k1,
+        )?;
         let (crypto_worker, mut crypto_executor) = spawn_backend(crypto);
 
         match config.protocol {
