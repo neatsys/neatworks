@@ -1,13 +1,7 @@
-use std::{
-    borrow::BorrowMut,
-    collections::HashMap,
-    hash::{Hash, Hasher},
-};
+use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-
-use crate::kademlia::PeerId;
 
 // Hashed based digest deriving solution
 // There's no well known solution for deriving digest methods for general
@@ -31,6 +25,12 @@ pub trait DigestHasher {
 impl DigestHasher for Sha256 {
     fn write(&mut self, bytes: &[u8]) {
         self.update(bytes)
+    }
+}
+
+impl DigestHasher for Vec<u8> {
+    fn write(&mut self, bytes: &[u8]) {
+        self.extend(bytes.iter().cloned())
     }
 }
 
@@ -93,30 +93,17 @@ impl<T: Hash> DigestHash for T {}
 
 pub use primitive_types::H256;
 
-// the cryptographic library to be used in this codebase must support seedable
-// RNG based keypair generation
-// TODO introduce ed25519_dalek and use that for entropy
-
-#[derive(Debug, Clone)]
-pub struct Crypto<I> {
-    secret_key: secp256k1::SecretKey,
-    public_keys: HashMap<I, PublicKey>,
-    secp: secp256k1::Secp256k1<secp256k1::All>,
-}
-
-pub type PublicKey = secp256k1::PublicKey;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Signature(pub secp256k1::ecdsa::Signature);
 
 #[derive(Debug, Clone, Serialize, Deserialize, derive_more::Deref)]
-pub struct Verifiable<M> {
+pub struct Verifiable<M, S = Signature> {
     #[deref]
     inner: M,
-    signature: Signature,
+    signature: S,
 }
 
-impl<M> Verifiable<M> {
+impl<M, S> Verifiable<M, S> {
     pub fn into_inner(self) -> M {
         self.inner
     }
@@ -124,14 +111,31 @@ impl<M> Verifiable<M> {
 
 pub mod events {
     #[derive(Debug, Clone)]
-    pub struct Signed<M>(pub super::Verifiable<M>);
+    pub struct Signed<M, S = super::Signature>(pub super::Verifiable<M, S>);
 
     #[derive(Debug, Clone)]
-    pub struct Verified<M>(pub super::Verifiable<M>);
+    pub struct Verified<M, S = super::Signature>(pub super::Verifiable<M, S>);
 }
 
-impl Crypto<u8> {
-    pub fn new_hardcoded_replication(num_replica: usize, replica_id: u8) -> anyhow::Result<Self> {
+// the cryptographic library to be used in this codebase must support seedable
+// RNG based keypair generation
+// it would be better if the library supports prehashed message as well, but a
+// fallback `impl DigestHasher for Vec<u8>` is provided above anyway
+
+#[derive(Debug, Clone)]
+pub struct Crypto {
+    secret_key: secp256k1::SecretKey,
+    public_keys: Vec<PublicKey>,
+    secp: secp256k1::Secp256k1<secp256k1::All>,
+}
+
+pub type PublicKey = secp256k1::PublicKey;
+
+impl Crypto {
+    pub fn new_hardcoded_replication(
+        num_replica: usize,
+        replica_id: impl Into<usize>,
+    ) -> anyhow::Result<Self> {
         let secret_keys = (0..num_replica)
             .map(|id| {
                 let mut k = [0; 32];
@@ -142,30 +146,15 @@ impl Crypto<u8> {
             .collect::<Result<Vec<_>, _>>()?;
         let secp = secp256k1::Secp256k1::new();
         Ok(Self {
-            secret_key: secret_keys[replica_id as usize],
+            secret_key: secret_keys[replica_id.into()],
             public_keys: secret_keys
                 .into_iter()
-                .enumerate()
-                .map(|(id, secret_key)| (id as _, secret_key.public_key(&secp)))
+                .map(|secret_key| secret_key.public_key(&secp))
                 .collect(),
             secp,
         })
     }
-}
 
-impl Crypto<PeerId> {
-    pub fn new_random(rng: &mut impl rand::Rng) -> Self {
-        let secp = secp256k1::Secp256k1::new();
-        let (secret_key, _) = secp.generate_keypair(rng);
-        Self {
-            secret_key,
-            public_keys: Default::default(),
-            secp,
-        }
-    }
-}
-
-impl<I> Crypto<I> {
     pub fn public_key(&self) -> PublicKey {
         self.secret_key.public_key(&self.secp)
     }
@@ -178,11 +167,12 @@ impl<I> Crypto<I> {
         }
     }
 
-    pub fn verify<M: DigestHash>(&self, index: &I, signed: &Verifiable<M>) -> anyhow::Result<()>
-    where
-        I: Eq + Hash,
-    {
-        let Some(public_key) = self.public_keys.get(index) else {
+    pub fn verify<M: DigestHash>(
+        &self,
+        index: impl Into<usize>,
+        signed: &Verifiable<M>,
+    ) -> anyhow::Result<()> {
+        let Some(public_key) = self.public_keys.get(index.into()) else {
             anyhow::bail!("no identifier for index")
         };
         let digest = secp256k1::Message::from_digest(signed.inner.sha256());
@@ -192,26 +182,81 @@ impl<I> Crypto<I> {
     }
 }
 
-impl Crypto<PeerId> {
-    pub fn verify_with_public_key<M: DigestHash>(
-        &self,
-        mut peer_id: impl BorrowMut<Option<PeerId>>,
-        public_key: &PublicKey,
-        signed: &Verifiable<M>,
-    ) -> anyhow::Result<()> {
-        let claimed_peer_id = peer_id.borrow_mut();
-        let peer_id = public_key.sha256();
-        if let Some(claimed_peer_id) = claimed_peer_id.as_mut() {
-            if claimed_peer_id != &peer_id {
-                anyhow::bail!("peer id mismatch")
+// impl Crypto<PeerId> {
+//     pub fn verify_with_public_key<M: DigestHash>(
+//         &self,
+//         mut peer_id: impl BorrowMut<Option<PeerId>>,
+//         public_key: &PublicKey,
+//         signed: &Verifiable<M, Signature>,
+//     ) -> anyhow::Result<()> {
+//         let claimed_peer_id = peer_id.borrow_mut();
+//         let peer_id = public_key.sha256();
+//         if let Some(claimed_peer_id) = claimed_peer_id.as_mut() {
+//             if claimed_peer_id != &peer_id {
+//                 anyhow::bail!("peer id mismatch")
+//             }
+//         }
+//         *claimed_peer_id = Some(peer_id);
+
+//         let digest = secp256k1::Message::from_digest(signed.inner.sha256());
+//         self.secp
+//             .verify_ecdsa(&digest, &signed.signature.0, public_key)?;
+//         Ok(())
+//     }
+// }
+
+pub mod peer {
+    use rand::{CryptoRng, RngCore};
+    use schnorrkel::{context::SigningContext, Keypair};
+    use sha2::{Digest, Sha256};
+
+    use super::DigestHash;
+
+    pub type Signature = schnorrkel::Signature;
+
+    pub type Verifiable<M> = super::Verifiable<M, Signature>;
+
+    pub type PublicKey = schnorrkel::PublicKey;
+
+    #[derive(Clone)]
+    pub struct Crypto {
+        keypair: Keypair,
+        context: SigningContext,
+    }
+
+    impl Crypto {
+        pub fn new_random(rng: &mut (impl CryptoRng + RngCore)) -> Self {
+            Self {
+                keypair: Keypair::generate_with(rng),
+                context: SigningContext::new(b"default"),
             }
         }
-        *claimed_peer_id = Some(peer_id);
 
-        let digest = secp256k1::Message::from_digest(signed.inner.sha256());
-        self.secp
-            .verify_ecdsa(&digest, &signed.signature.0, public_key)?;
-        Ok(())
+        pub fn public_key(&self) -> PublicKey {
+            self.keypair.public
+        }
+
+        pub fn sign<M: DigestHash>(&self, message: M) -> Verifiable<M> {
+            let mut state = Sha256::new();
+            DigestHash::hash(&message, &mut state);
+            let signature = self.keypair.sign(self.context.hash256(state));
+            Verifiable {
+                inner: message,
+                signature,
+            }
+        }
+
+        pub fn verify<M: DigestHash>(
+            &self,
+            public_key: &PublicKey,
+            signed: &Verifiable<M>,
+        ) -> anyhow::Result<()> {
+            let mut state = Sha256::new();
+            DigestHash::hash(&signed.inner, &mut state);
+            public_key
+                .verify(self.context.hash256(state), &signed.signature)
+                .map_err(anyhow::Error::msg)
+        }
     }
 }
 

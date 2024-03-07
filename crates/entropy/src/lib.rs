@@ -8,7 +8,10 @@ use std::{
 
 use augustus::{
     bulk::{self, RecvOffer, ServiceExt as _},
-    crypto::{Crypto, PublicKey, Verifiable, H256},
+    crypto::{
+        peer::{Crypto, PublicKey, Verifiable},
+        DigestHash, H256,
+    },
     event::{
         erased::{OnEventRichTimer as OnEvent, RichTimer as Timer},
         SendEvent,
@@ -153,7 +156,7 @@ pub struct Peer<K> {
     // tightly bounded on bandwidth (instead of pps) so saving stateful-processing overhead becomes
     // marginal for improving performance
     // in conclusion, do crypto inline, less event and less concurrency to consider :)
-    crypto: Crypto<PeerId>,
+    crypto: Crypto,
 }
 
 pub type CodecWorker = Worker<(), dyn SendCodecEvent + Send + Sync>;
@@ -219,7 +222,7 @@ impl<K> Peer<K> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: PeerId,
-        crypto: Crypto<PeerId>,
+        crypto: Crypto,
         fragment_len: u32,
         chunk_k: NonZeroUsize,
         chunk_n: NonZeroUsize,
@@ -551,14 +554,11 @@ impl<K> OnEvent<Recv<Verifiable<FragmentAvailable>>> for Peer<K> {
         let Some(state) = self.uploads.get_mut(&fragment_available.chunk) else {
             return Ok(());
         };
-        if self
-            .crypto
-            .verify_with_public_key(
-                Some(fragment_available.peer_id),
-                &fragment_available.peer_key,
-                &fragment_available,
-            )
-            .is_err()
+        if fragment_available.peer_id == fragment_available.peer_key.sha256()
+            && self
+                .crypto
+                .verify(&fragment_available.peer_key, &fragment_available)
+                .is_err()
         {
             // TODO log
             return Ok(());

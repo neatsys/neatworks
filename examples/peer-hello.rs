@@ -1,7 +1,7 @@
 use std::{env::args, net::SocketAddr};
 
 use augustus::{
-    crypto::{Crypto, Verifiable},
+    crypto::peer::{Crypto, Verifiable},
     event::{
         erased::{
             session::{Buffered, Sender},

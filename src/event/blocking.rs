@@ -13,7 +13,7 @@ impl<N: Into<M>, M> SendEvent<N> for Sender<M> {
     }
 }
 
-// there's no way to cancel a blocking run, so it should be fine to create 
+// there's no way to cancel a blocking run, so it should be fine to create
 // scoped timer inside the function. not absolutely sure though
 pub fn run<M>(
     receiver: Receiver<M>,
@@ -25,10 +25,10 @@ pub fn run<M>(
             match receiver.recv_timeout(deadline.duration_since(Instant::now())) {
                 Ok(event) => Some(event),
                 Err(RecvTimeoutError::Timeout) => None,
-                Err(err) => anyhow::bail!(err),
+                Err(err) => Err(err)?,
             }
         } else {
-            Some(receiver.recv().map_err(|err| anyhow::anyhow!(err))?)
+            Some(receiver.recv()?)
         };
         if let Some(event) = event {
             state.on_event(event, &mut timer)?

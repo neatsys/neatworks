@@ -114,7 +114,7 @@ pub mod erased {
             // requires S: 'static and E: 'static, which in turn requires many things 'static
             // allow they probably happen to 'static, feels too tricky when later reasoning about
             // the bound
-            // self.0.send(work).map_err(|err| anyhow::anyhow!(err))
+            // self.0.send(work).map_err(anyhow::Error::msg)
             self.0
                 .send(work)
                 .map_err(|err| anyhow::anyhow!(err.to_string()))

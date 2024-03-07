@@ -13,7 +13,10 @@ use std::{
 
 use augustus::{
     bulk,
-    crypto::{Crypto, DigestHash, PublicKey, H256},
+    crypto::{
+        peer::{Crypto, PublicKey},
+        DigestHash as _, H256,
+    },
     event::{
         erased::{
             session::{Buffered, Sender},
@@ -21,7 +24,7 @@ use augustus::{
         },
         SendEvent,
     },
-    kademlia::{self, Buckets, PeerId, PeerRecord},
+    kademlia::{self, Buckets, PeerRecord},
     net::{
         kademlia::{Control, PeerNet},
         session::{tcp_accept_session, Tcp, TcpControl},
@@ -231,7 +234,7 @@ async fn start_peers(State(state): State<AppState>, Json(config): Json<StartPeer
 
 async fn start_peer(
     record: PeerRecord<PublicKey, SocketAddr>,
-    crypto: Crypto<PeerId>,
+    crypto: Crypto,
     mut rng: StdRng,
     mut records: Vec<PeerRecord<PublicKey, SocketAddr>>,
     mut peer_session: Session<Blanket<Buffered<Peer<[u8; 32]>>>>,

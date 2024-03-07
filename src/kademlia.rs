@@ -7,13 +7,14 @@ use std::{
 };
 
 use primitive_types::{H256, U256};
-use secp256k1::PublicKey;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::{
     crypto::{
         events::{Signed, Verified},
-        Crypto, DigestHash, Verifiable,
+        peer::{Crypto, PublicKey, Signature, Verifiable},
+        DigestHash,
     },
     event::{
         erased::{OnEventRichTimer as OnEvent, RichTimer as Timer},
@@ -269,17 +270,17 @@ pub trait Upcall<A>: SendEvent<QueryResult<A>> {}
 impl<T: SendEvent<QueryResult<A>>, A> Upcall<A> for T {}
 
 pub trait SendCryptoEvent<A>:
-    SendEvent<Signed<FindPeer<A>>>
-    + SendEvent<Signed<FindPeerOk<A>>>
-    + SendEvent<Verified<FindPeer<A>>>
-    + SendEvent<Verified<FindPeerOk<A>>>
+    SendEvent<Signed<FindPeer<A>, Signature>>
+    + SendEvent<Signed<FindPeerOk<A>, Signature>>
+    + SendEvent<Verified<FindPeer<A>, Signature>>
+    + SendEvent<Verified<FindPeerOk<A>, Signature>>
 {
 }
 impl<
-        T: SendEvent<Signed<FindPeer<A>>>
-            + SendEvent<Signed<FindPeerOk<A>>>
-            + SendEvent<Verified<FindPeer<A>>>
-            + SendEvent<Verified<FindPeerOk<A>>>,
+        T: SendEvent<Signed<FindPeer<A>, Signature>>
+            + SendEvent<Signed<FindPeerOk<A>, Signature>>
+            + SendEvent<Verified<FindPeer<A>, Signature>>
+            + SendEvent<Verified<FindPeerOk<A>, Signature>>,
         A,
     > SendCryptoEvent<A> for T
 {
@@ -301,7 +302,7 @@ pub struct Peer<A> {
 }
 
 type OnBootstrap = Box<dyn FnOnce() -> anyhow::Result<()> + Send + Sync>;
-pub type CryptoWorker<A> = Worker<Crypto<PeerId>, dyn SendCryptoEvent<A> + Send + Sync>;
+pub type CryptoWorker<A> = Worker<Crypto, dyn SendCryptoEvent<A> + Send + Sync>;
 
 impl<A> Debug for Peer<A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -393,10 +394,10 @@ impl<A: Addr> Peer<A> {
 struct ResendFindPeer<A>(Target, PeerRecord<PublicKey, A>);
 const RESEND_FIND_PEER_DURATION: Duration = Duration::from_millis(2500);
 
-impl<A: Addr> OnEvent<Signed<FindPeer<A>>> for Peer<A> {
+impl<A: Addr> OnEvent<Signed<FindPeer<A>, Signature>> for Peer<A> {
     fn on_event(
         &mut self,
-        Signed(find_peer): Signed<FindPeer<A>>,
+        Signed(find_peer): Signed<FindPeer<A>, Signature>,
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let target = find_peer.target;
@@ -471,27 +472,22 @@ impl<A: Addr> OnEvent<Recv<Verifiable<FindPeer<A>>>> for Peer<A> {
         //     H256(find_peer.target)
         // );
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
-            if crypto
-                .verify_with_public_key(
-                    Some(find_peer.record.id),
-                    &find_peer.record.key,
-                    &find_peer,
-                )
-                .is_ok()
+            if find_peer.record.key.sha256() == find_peer.record.id
+                && crypto.verify(&find_peer.record.key, &find_peer).is_ok()
             {
                 sender.send(Verified(find_peer))
             } else {
-                eprintln!("fail to verify FindPeer");
+                warn!("fail to verify FindPeer");
                 Ok(())
             }
         }))
     }
 }
 
-impl<A: Addr> OnEvent<Verified<FindPeer<A>>> for Peer<A> {
+impl<A: Addr> OnEvent<Verified<FindPeer<A>, Signature>> for Peer<A> {
     fn on_event(
         &mut self,
-        Verified(find_peer): Verified<FindPeer<A>>,
+        Verified(find_peer): Verified<FindPeer<A>, Signature>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let find_peer = find_peer.into_inner();
@@ -513,10 +509,10 @@ impl<A: Addr> OnEvent<Verified<FindPeer<A>>> for Peer<A> {
     }
 }
 
-impl<A> OnEvent<Signed<FindPeerOk<A>>> for Peer<A> {
+impl<A> OnEvent<Signed<FindPeerOk<A>, Signature>> for Peer<A> {
     fn on_event(
         &mut self,
-        Signed(find_peer_ok): Signed<FindPeerOk<A>>,
+        Signed(find_peer_ok): Signed<FindPeerOk<A>, Signature>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let dest = self
@@ -537,27 +533,24 @@ impl<A: Addr> OnEvent<Recv<Verifiable<FindPeerOk<A>>>> for Peer<A> {
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
-            if crypto
-                .verify_with_public_key(
-                    Some(find_peer_ok.record.id),
-                    &find_peer_ok.record.key,
-                    &find_peer_ok,
-                )
-                .is_ok()
+            if find_peer_ok.record.key.sha256() == find_peer_ok.record.id
+                && crypto
+                    .verify(&find_peer_ok.record.key, &find_peer_ok)
+                    .is_ok()
             {
                 sender.send(Verified(find_peer_ok))
             } else {
-                eprintln!("fail to verify FindPeerOk");
+                warn!("fail to verify FindPeerOk");
                 Ok(())
             }
         }))
     }
 }
 
-impl<A: Addr> OnEvent<Verified<FindPeerOk<A>>> for Peer<A> {
+impl<A: Addr> OnEvent<Verified<FindPeerOk<A>, Signature>> for Peer<A> {
     fn on_event(
         &mut self,
-        Verified(find_peer_ok): Verified<FindPeerOk<A>>,
+        Verified(find_peer_ok): Verified<FindPeerOk<A>, Signature>,
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let find_peer_ok = find_peer_ok.into_inner();
@@ -837,6 +830,8 @@ proptest! {
 
 #[cfg(test)]
 mod tests {
+    use rand::thread_rng;
+
     use crate::net::IterAddr;
 
     use super::*;
@@ -863,9 +858,7 @@ mod tests {
     // into property test
     #[test]
     fn refresh_buckets() -> anyhow::Result<()> {
-        let secp = secp256k1::Secp256k1::signing_only();
-        let (_, public_key) = secp.generate_keypair(&mut rand::thread_rng());
-        let origin = PeerRecord::new(public_key, ());
+        let origin = PeerRecord::new(Crypto::new_random(&mut thread_rng()).public_key(), ());
         let buckets = Buckets::new(origin.clone());
         let mut peer = Peer::new(buckets, NullNet, NullUpcall, Worker::Null);
         peer.refresh_buckets()

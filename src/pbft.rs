@@ -242,7 +242,7 @@ pub struct Replica<S, A> {
 
     net: Box<dyn ToReplicaNet<A> + Send + Sync>,
     client_net: Box<dyn ToClientNet<A> + Send + Sync>,
-    crypto_worker: Worker<Crypto<u8>, dyn SendCryptoEvent<A> + Send + Sync>,
+    crypto_worker: Worker<Crypto, dyn SendCryptoEvent<A> + Send + Sync>,
 }
 
 #[derive(Debug)]
@@ -278,7 +278,7 @@ impl<S, A> Replica<S, A> {
         app: S,
         net: impl ToReplicaNet<A> + Send + Sync + 'static,
         client_net: impl ToClientNet<A> + Send + Sync + 'static,
-        crypto_worker: Worker<Crypto<u8>, dyn SendCryptoEvent<A> + Send + Sync>,
+        crypto_worker: Worker<Crypto, dyn SendCryptoEvent<A> + Send + Sync>,
         num_replica: usize,
         num_faulty: usize,
     ) -> Self {
@@ -406,10 +406,10 @@ impl<S, A: Addr> OnEvent<Recv<(Verifiable<PrePrepare>, Vec<Request<A>>)>> for Re
         // a decent implementation probably should throttle here (as well as for prepares and
         // commits) in order to mitigate faulty proposals
         // omitted since it makes no difference in normal path
-        let replica_id = (pre_prepare.view_num as usize % self.num_replica) as _;
+        let replica_id = pre_prepare.view_num as usize % self.num_replica;
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
             if requests.sha256() == pre_prepare.digest
-                && crypto.verify(&replica_id, &pre_prepare).is_ok()
+                && crypto.verify(replica_id, &pre_prepare).is_ok()
             {
                 sender.send((Verified(pre_prepare), requests))
             } else {
@@ -514,7 +514,7 @@ impl<S, A> Replica<S, A> {
             }
         }
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
-            if crypto.verify(&prepare.replica_id, &prepare).is_ok() {
+            if crypto.verify(prepare.replica_id, &prepare).is_ok() {
                 sender.send(Verified(prepare))
             } else {
                 Ok(())
@@ -645,7 +645,7 @@ impl<S, A> Replica<S, A> {
             }
         }
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
-            if crypto.verify(&commit.replica_id, &commit).is_ok() {
+            if crypto.verify(commit.replica_id, &commit).is_ok() {
                 sender.send(Verified(commit))
             } else {
                 Ok(())
