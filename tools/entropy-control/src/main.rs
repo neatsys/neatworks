@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
         control_client,
         &instances,
         &category,
-        1 << 20,
+        100,
         32.try_into().unwrap(),
         80.try_into().unwrap(),
         88.try_into().unwrap(),

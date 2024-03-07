@@ -1,4 +1,6 @@
-use std::{fmt::Debug, io::ErrorKind, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::VecDeque, fmt::Debug, io::ErrorKind, net::SocketAddr, sync::Arc, time::Duration,
+};
 
 use bincode::Options;
 use lru::LruCache;
@@ -11,7 +13,7 @@ use tokio::{
     sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
     time::Instant,
 };
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::event::{erased::OnEvent, OnTimer, SendEvent, Timer};
 
@@ -106,12 +108,13 @@ pub struct TcpControl<B, F> {
     connections: LruCache<SocketAddr, Connection<B>>,
     on_buf: F,
     preamble: bytes::Bytes,
+    evict_instants: VecDeque<Instant>,
 }
 
 #[derive(Debug)]
 struct Connection<B> {
     sender: UnboundedSender<B>,
-    used_at: Instant,
+    // used_at: Instant,
 }
 
 type Preamble = Option<SocketAddr>;
@@ -126,6 +129,7 @@ impl<B, F> TcpControl<B, F> {
             connections: LruCache::new(TCP_MAX_CONNECTION_NUM.try_into().unwrap()),
             on_buf,
             preamble: preamble.into(),
+            evict_instants: Default::default(),
         })
     }
 }
@@ -212,10 +216,7 @@ impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnE
     ) -> anyhow::Result<()> {
         if let Some(connection) = self.connections.get_mut(&remote) {
             match connection.sender.send(buf) {
-                Ok(()) => {
-                    connection.used_at = Instant::now();
-                    return Ok(());
-                }
+                Ok(()) => return Ok(()),
                 Err(err) => {
                     self.connections.pop(&remote);
                     buf = err.0
@@ -223,20 +224,28 @@ impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnE
             }
         }
         while self.connections.len() >= TCP_MAX_CONNECTION_NUM {
-            if self
-                .connections
-                .peek_lru()
-                .as_ref()
-                .unwrap()
-                .1
-                .used_at
-                .elapsed()
-                < Duration::from_secs(15)
-            {
-                warn!("explicit drop egress message due to reaching maximum concurrent connection number");
-                return Ok(());
+            // 60s = default TIME_WAIT
+            // one eviction = at most one active shutdown = at most one TIME_WAIT
+            // if we keep evicting when this condition holds, the number of TIME_WAIT connections
+            // is potentially unbounded
+
+            // for unknown reason, there seems to be at most 32768 connections in TIME_WAIT
+            // so we should better keep the number bounded by 32768, not just bounded
+            // notice that bulk service also generates TIME_WAIT connections
+
+            // notice that there will be large amount of connection get into TIME_WAIT when the
+            // `TcpControl` is dropped, potentially more than 32768
+            // so to be safe entropy evaluation runs must have more than 1min interval
+            if self.evict_instants.len() == 32768.min(TCP_MAX_CONNECTION_NUM) {
+                if self.evict_instants.front().unwrap().elapsed() < Duration::from_secs(60) {
+                    warn!("explicit drop egress message due to reaching maximum concurrent connection number");
+                    return Ok(());
+                }
+                self.evict_instants.pop_front();
             }
-            self.connections.pop_lru();
+            self.evict_instants.push_back(Instant::now());
+            let (remote, _) = self.connections.pop_lru().unwrap();
+            info!("evicting connection to {remote}")
         }
         let (sender, receiver) = unbounded_channel::<B>();
         let preamble = self.preamble.clone();
@@ -262,13 +271,7 @@ impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnE
         if sender.send(buf).is_err() {
             warn!(">=> {remote} new connection immediately fail")
         } else {
-            self.connections.push(
-                remote,
-                Connection {
-                    sender,
-                    used_at: Instant::now(),
-                },
-            );
+            self.connections.push(remote, Connection { sender });
         }
         Ok(())
     }
@@ -287,16 +290,12 @@ impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnE
         if let Some(remote) = preamble {
             let (sender, receiver) = unbounded_channel::<B>();
             tokio::spawn(Self::write_task(write, receiver, remote));
-            let replaced = self.connections.put(
-                remote,
-                Connection {
-                    sender,
-                    used_at: Instant::now(),
-                },
-            );
+            let replaced = self.connections.put(remote, Connection { sender });
             if replaced.is_some() {
                 warn!("<<< {remote} replacing previous connection")
             }
+        } else {
+            // write.forget()
         }
         Ok(())
     }
