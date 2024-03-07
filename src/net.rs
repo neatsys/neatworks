@@ -1,3 +1,17 @@
+// core network abstractions
+//
+// the central network trait `SendMessage<A, M>`, reads as sending a message M
+// to address A. the model is rather oneshot: no concept of connection or
+// persistent pipe is exposing to user. in this codebase this is a proper model
+// for many p2p/fault tolerance protocols: even if the protocols have stronger
+// access/control to the underlying details, they hardly benefit from that. That
+// said, a connection-oriented interface can be added alongside
+// `SendMessage<_, _>` if desired
+//
+// this fact causes a rather thick adapting layer when impl SendMessage<_, _>
+// over network stack like TCP. there are many details user cannot specify, but
+// they probably do not care anyway if they are happy with SendMessage<_, _>
+
 pub mod blocking;
 pub mod kademlia;
 pub mod session;

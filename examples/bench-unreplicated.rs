@@ -7,6 +7,7 @@
 // bench-unreplicated blocking dual
 // => 617318.2 ops/sec
 // taskset -c 0 bench-unreplicated tcp (with bench-unreplicated client tcp)
+// taskset -c 0 bench-unreplicated tcp simplex
 // => 178405.7 ops/sec
 
 use std::{
