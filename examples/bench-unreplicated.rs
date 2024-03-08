@@ -232,8 +232,7 @@ async fn main() -> anyhow::Result<()> {
     if flag_tcp {
         let listener = TcpListener::bind("0.0.0.0:4000").await?;
         if flag_simplex {
-            let raw_net = simplex::Tcp::new()?;
-            let mut state = Unify(Replica::new(Null, ToClientMessageNet::new(raw_net)));
+            let mut state = Unify(Replica::new(Null, ToClientMessageNet::new(simplex::Tcp)));
             let mut state_session = Session::new();
             let mut state_sender = state_session.sender();
             let mut tcp_control = TcpControl::<bytes::Bytes, _>::new(

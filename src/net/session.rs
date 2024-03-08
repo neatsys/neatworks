@@ -44,7 +44,11 @@ impl<B: Buf> SendMessage<SocketAddr, B> for Udp {
         // alternatively, collect sending tasks into a `JoinSet`
         // however that cannot be owned by `impl OnEvent`, which does not have a chance to poll
         // so not an ideal alternation and not conducted for now
-        tokio::spawn(async move { socket.send_to(buf.as_ref(), dest).await.unwrap() });
+        tokio::spawn(async move {
+            if let Err(err) = socket.send_to(buf.as_ref(), dest).await {
+                warn!("{:?} >>> {dest} {err}", socket.local_addr())
+            }
+        });
         Ok(())
     }
 }
@@ -78,13 +82,16 @@ const TCP_PREAMBLE_LEN: usize = 16;
 // essential for p2p stress test. also this strategy is also taken by libp2p,
 // makes it more fair comparison between protocol in this codebase and in libp2p
 //
-// for better performance, consider `simplex::Tcp` which inlines the
-// `TcpControl` into `impl SendMessage` and saves the first queuing. the
-// tradeoff is that it cannot accept incoming connections anymore, you can use
-// a second `TcpControl` that wrapped as
+// `simplex::Tcp` provides a stateless `impl SendMessage` which initiate an
+// ephemeral tcp connection for every message. the performance will be bad, and
+// it cannot accept incoming connections anymore. you can use a second
+// `TcpControl` that wrapped as
 //   Inline(&mut control, &mut UnreachableTimer)
 // to `impl SendEvent<Incoming>` and pass into `tcp_accept_session` for incoming
-// connections. check unreplicated benchmark for demonstration
+// connections. check unreplicated benchmark for demonstration. the simplex
+// variant is compatible with the default duplex one i.e. it is ok to have
+// messages sent by simplex tcp net to be received with a duplex one, and vice
+// versa
 //
 // TODO consider generalize this connection over underlying transportation
 // protocols to be reused e.g. for QUIC
@@ -325,54 +332,6 @@ impl<E: SendEvent<Outgoing<B>>, B: Buf> SendMessage<IterAddr<'_, SocketAddr>, B>
     }
 }
 
-pub mod simplex {
-    use std::net::SocketAddr;
-
-    use tracing::warn;
-
-    use crate::{
-        event::{erased::Inline, UnreachableTimer},
-        net::{Buf, IterAddr, SendMessage},
-    };
-
-    #[allow(clippy::type_complexity)]
-    pub struct Tcp<B>(super::TcpControl<B, fn(&[u8]) -> anyhow::Result<()>>);
-
-    impl<B> Tcp<B> {
-        pub fn new() -> anyhow::Result<Self> {
-            let on_buf = (|_: &_| {
-                warn!("ignore ingress message of simplex connection");
-                Ok(())
-            }) as _;
-            Ok(Self(super::TcpControl::new(on_buf, None)?))
-        }
-    }
-
-    impl<B: Buf> SendMessage<SocketAddr, B> for Tcp<B> {
-        fn send(&mut self, dest: SocketAddr, message: B) -> anyhow::Result<()> {
-            SendMessage::send(
-                &mut super::Tcp(Inline(&mut self.0, &mut UnreachableTimer)),
-                dest,
-                message,
-            )
-        }
-    }
-
-    impl<B: Buf> SendMessage<IterAddr<'_, SocketAddr>, B> for Tcp<B> {
-        fn send(&mut self, dest: IterAddr<'_, SocketAddr>, message: B) -> anyhow::Result<()> {
-            SendMessage::send(
-                &mut super::Tcp(Inline(&mut self.0, &mut UnreachableTimer)),
-                dest,
-                message,
-            )
-        }
-    }
-
-    // impl<B, F> super::TcpControl<B, F> {
-    //     pub fn new_accept(on_buf: F) -> Inline<'??
-    // }
-}
-
 pub async fn tcp_accept_session(
     listener: TcpListener,
     mut sender: impl SendEvent<Incoming>,
@@ -399,4 +358,101 @@ pub async fn tcp_accept_session(
         // println!("{peer_addr} -> {remote}");
         sender.send(Incoming(remote, stream))?
     }
+}
+
+pub mod simplex {
+    use std::net::SocketAddr;
+
+    use bincode::Options;
+    use tokio::{io::AsyncWriteExt, net::TcpStream};
+    use tracing::warn;
+
+    use crate::net::{Buf, IterAddr, SendMessage};
+
+    use super::{Preamble, TCP_PREAMBLE_LEN};
+
+    #[allow(clippy::type_complexity)]
+    pub struct Tcp;
+
+    impl<B: Buf> SendMessage<SocketAddr, B> for Tcp {
+        fn send(&mut self, dest: SocketAddr, message: B) -> anyhow::Result<()> {
+            tokio::spawn(async move {
+                if let Err(err) = async {
+                    let mut stream = TcpStream::connect(dest).await?;
+                    let mut preamble = bincode::options().serialize(&Preamble::None)?;
+                    preamble.resize(TCP_PREAMBLE_LEN, Default::default());
+                    stream.write_all(&preamble).await?;
+                    stream.write_u64(message.as_ref().len() as _).await?;
+                    stream.write_all(message.as_ref()).await?;
+                    stream.flush().await?;
+                    anyhow::Result::<_>::Ok(())
+                }
+                .await
+                {
+                    warn!("simplex >>> {dest} {err}")
+                }
+            });
+            Ok(())
+        }
+    }
+
+    impl<B: Buf> SendMessage<IterAddr<'_, SocketAddr>, B> for Tcp {
+        fn send(&mut self, dest: IterAddr<'_, SocketAddr>, message: B) -> anyhow::Result<()> {
+            for addr in dest.0 {
+                self.send(addr, message.clone())?
+            }
+            Ok(())
+        }
+    }
+
+    // currently very similar to the approach commented above
+    // just save for future case
+
+    // use std::io::ErrorKind;
+
+    // use bincode::Options as _;
+    // use tokio::{io::AsyncReadExt as _, net::TcpListener};
+    // use tracing::warn;
+
+    // use super::{Preamble, TCP_MAX_BUF_LEN, TCP_PREAMBLE_LEN};
+
+    // pub async fn tcp_accept_session(
+    //     listener: TcpListener,
+    //     on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
+    // ) -> anyhow::Result<()> {
+    //     let local_addr = listener.local_addr()?;
+    //     loop {
+    //         let (mut stream, peer_addr) = listener.accept().await?;
+    //         let mut on_buf = on_buf.clone();
+    //         tokio::spawn(async move {
+    //             let mut preamble = None;
+    //             if let Err(err) = async {
+    //                 let mut buf = [0; TCP_PREAMBLE_LEN];
+    //                 stream.read_exact(&mut buf).await?;
+    //                 preamble = bincode::options()
+    //                     .allow_trailing_bytes()
+    //                     .deserialize::<Preamble>(&buf)?;
+    //                 loop {
+    //                     let len = match stream.read_u64().await {
+    //                         Ok(len) => len as _,
+    //                         Err(err) if matches!(err.kind(), ErrorKind::UnexpectedEof) => {
+    //                             break anyhow::Result::<_>::Ok(())
+    //                         }
+    //                         Err(err) => Err(err)?,
+    //                     };
+    //                     if len > TCP_MAX_BUF_LEN {
+    //                         anyhow::bail!("invalid buffer length {len}")
+    //                     }
+    //                     let mut buf = vec![0; len];
+    //                     stream.read_exact(&mut buf).await?;
+    //                     on_buf(&buf)?
+    //                 }
+    //             }
+    //             .await
+    //             {
+    //                 warn!("{peer_addr} (remote {preamble:?}) >>> {local_addr} {err}")
+    //             }
+    //         });
+    //     }
+    // }
 }

@@ -4,6 +4,11 @@
 // wrap `erased::OnEvent<_> + OnTimer` with `erased::Blanket(erased::Unify(_))`
 // wrap `erased::OnEventRichTimer<_>` with
 //   `erased::Blanket(erased::Buffered(_))`
+// TODO convert these newtypes into internal details, instead of exposed as part
+// of the interface
+// even myself already get tired of dealing with them (and related error
+// messages = =)
+// https://zhuanlan.zhihu.com/p/685275310
 
 pub mod blocking;
 pub mod linear;
