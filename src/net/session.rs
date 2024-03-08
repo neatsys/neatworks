@@ -162,13 +162,21 @@ impl<P, B, F> OnEvent<Init> for Dispatch<P, B, F> {
     }
 }
 
-trait Protocol {
+pub trait Protocol {
     fn connect<B: Buf>(
         &self,
         remote: SocketAddr,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
         receiver: UnboundedReceiver<B>,
     );
+
+    type Incoming;
+
+    fn accept<B: Buf>(
+        connection: Self::Incoming,
+        on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
+        receiver: UnboundedReceiver<B>,
+    ) -> Option<SocketAddr>;
 }
 
 pub struct Outgoing<B>(SocketAddr, B);
@@ -225,6 +233,33 @@ impl<P: Protocol, B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send +
                     using: true,
                 },
             );
+        }
+        Ok(())
+    }
+}
+
+pub struct Incoming<T>(T);
+
+impl<P: Protocol, B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static>
+    OnEvent<Incoming<P::Incoming>> for Dispatch<P, B, F>
+{
+    fn on_event(
+        &mut self,
+        Incoming(event): Incoming<P::Incoming>,
+        _: &mut impl Timer,
+    ) -> anyhow::Result<()> {
+        let (sender, receiver) = unbounded_channel::<B>();
+        if let Some(remote) = P::accept(event, self.on_buf.clone(), receiver) {
+            let replaced = self.connections.insert(
+                remote,
+                Connection {
+                    sender,
+                    using: false,
+                },
+            );
+            if replaced.is_some() {
+                warn!("<<< {remote} replacing previous connection")
+            }
         }
         Ok(())
     }
@@ -333,43 +368,28 @@ impl Protocol for Tcp {
             tokio::spawn(Self::write_task(write, receiver, remote));
         });
     }
-}
 
-pub struct TcpIncoming(Preamble, TcpStream);
+    type Incoming = (Preamble, TcpStream);
 
-impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnEvent<TcpIncoming>
-    for Dispatch<Tcp, B, F>
-{
-    fn on_event(
-        &mut self,
-        TcpIncoming(preamble, stream): TcpIncoming,
-        _: &mut impl Timer,
-    ) -> anyhow::Result<()> {
+    fn accept<B: Buf>(
+        (preamble, stream): Self::Incoming,
+        on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
+        receiver: UnboundedReceiver<B>,
+    ) -> Option<SocketAddr> {
         let (read, write) = stream.into_split();
-        tokio::spawn(Tcp::read_task(read, self.on_buf.clone(), preamble));
+        tokio::spawn(Tcp::read_task(read, on_buf, preamble));
         if let Some(remote) = preamble {
-            let (sender, receiver) = unbounded_channel::<B>();
             tokio::spawn(Tcp::write_task(write, receiver, remote));
-            let replaced = self.connections.insert(
-                remote,
-                Connection {
-                    sender,
-                    using: false,
-                },
-            );
-            if replaced.is_some() {
-                warn!("<<< {remote} replacing previous connection")
-            }
         } else {
             // write.forget()
         }
-        Ok(())
+        preamble
     }
 }
 
 pub async fn tcp_accept_session(
     listener: TcpListener,
-    mut sender: impl SendEvent<TcpIncoming>,
+    mut sender: impl SendEvent<Incoming<(Preamble, TcpStream)>>,
 ) -> anyhow::Result<()> {
     loop {
         let (mut stream, peer_addr) = listener.accept().await?;
@@ -391,7 +411,7 @@ pub async fn tcp_accept_session(
             }
         };
         // println!("{peer_addr} -> {remote}");
-        sender.send(TcpIncoming(preamble, stream))?
+        sender.send(Incoming((preamble, stream)))?
     }
 }
 
@@ -526,34 +546,27 @@ impl Protocol for Quic {
             tokio::spawn(Self::write_task(connection, receiver));
         });
     }
+
+    type Incoming = quinn::Connection;
+
+    fn accept<B: Buf>(
+        connection: Self::Incoming,
+        on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
+        receiver: UnboundedReceiver<B>,
+    ) -> Option<SocketAddr> {
+        let remote = connection.remote_address();
+        tokio::spawn(Quic::read_task(connection.clone(), on_buf));
+        tokio::spawn(Quic::write_task(connection, receiver));
+        Some(remote)
+    }
 }
 
-pub struct QuicIncoming(quinn::Connection);
-
-impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnEvent<QuicIncoming>
-    for Dispatch<Quic, B, F>
-{
-    fn on_event(
-        &mut self,
-        QuicIncoming(connection): QuicIncoming,
-        _: &mut impl Timer,
-    ) -> anyhow::Result<()> {
-        tokio::spawn(Quic::read_task(connection.clone(), self.on_buf.clone()));
-        let (sender, receiver) = unbounded_channel::<B>();
-        let replaced = self.connections.insert(
-            connection.remote_address(),
-            Connection {
-                sender,
-                using: false,
-            },
-        );
-        if replaced.is_some() {
-            warn!(
-                "<<< {} replacing previous connection",
-                connection.remote_address()
-            )
-        }
-        tokio::spawn(Quic::write_task(connection, receiver));
-        Ok(())
+pub async fn quic_accept_session(
+    Quic(endpoint): Quic,
+    mut sender: impl SendEvent<Incoming<quinn::Connection>>,
+) -> anyhow::Result<()> {
+    while let Some(conn) = endpoint.accept().await {
+        sender.send(Incoming(conn.await?))?
     }
+    Ok(())
 }

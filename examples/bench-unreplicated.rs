@@ -68,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("unknown arguments {args:?}")
     }
     #[allow(clippy::nonminimal_bool)]
-    if flag_client && (flag_dyn || flag_blocking || flag_simplex)
+    if flag_client && (flag_dyn || flag_blocking)
         || flag_tcp && (flag_blocking || flag_dyn)
         || flag_dual && !flag_blocking
         || flag_simplex && !flag_tcp
