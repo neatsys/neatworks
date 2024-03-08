@@ -19,6 +19,7 @@ use augustus::{
     },
     event::{
         erased::{
+            events::Init,
             session::{Buffered, Sender},
             Blanket, Session, Unify,
         },
@@ -320,6 +321,7 @@ async fn start_peer(
     let kademlia_control_session = kademlia_control_session.run(&mut kademlia_control);
     let fs_session = entropy::fs::session(path, fs_receiver, Sender::from(peer_session.sender()));
     let peer_session = peer_session.run(&mut peer);
+    Sender::from(tcp_control_session.sender()).send(Init)?;
     let tcp_control_session = tcp_control_session.run(&mut tcp_control);
 
     tokio::select! {

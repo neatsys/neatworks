@@ -11,6 +11,7 @@ use augustus::{
     crypto::{Crypto, CryptoFlavor},
     event::{
         erased::{
+            events::Init,
             session::{Buffered, Sender},
             Blanket, Event, Session, Unify,
         },
@@ -323,7 +324,7 @@ where
         let latencies = latencies.clone();
         let barrier = barrier.clone();
         sessions.spawn(async move {
-            close_loop.launch()?;
+            Sender::from(close_loop_session.sender()).send(Init)?;
             tokio::select! {
                 result = close_loop_session.run(&mut close_loop) => result?,
                 () = stop.cancelled() => {}

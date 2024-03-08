@@ -1,9 +1,9 @@
 use std::{
-    collections::VecDeque, fmt::Debug, io::ErrorKind, net::SocketAddr, sync::Arc, time::Duration,
+    collections::HashMap, fmt::Debug, io::ErrorKind, mem::replace, net::SocketAddr, sync::Arc,
+    time::Duration,
 };
 
 use bincode::Options;
-use lru::LruCache;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{
@@ -11,11 +11,13 @@ use tokio::{
         TcpListener, TcpStream,
     },
     sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-    time::Instant,
 };
 use tracing::{info, warn};
 
-use crate::event::{erased::OnEvent, OnTimer, SendEvent, Timer};
+use crate::event::{
+    erased::{events::Init, OnEvent},
+    OnTimer, SendEvent, Timer,
+};
 
 use super::{Buf, IterAddr, SendMessage};
 
@@ -62,30 +64,66 @@ impl<B: Buf> SendMessage<IterAddr<'_, SocketAddr>, B> for Udp {
     }
 }
 
-const TCP_MAX_CONNECTION_NUM: usize = 1024;
-
 const TCP_MAX_BUF_LEN: usize = 1 << 20;
 
 const TCP_PREAMBLE_LEN: usize = 16;
 
-// a construction that enables connection reusing and thottling
+// a construction that enables connection reusing
 // the client side of a connection informs its server address to the connected
 // server with preamble, so if later a message need to be delivered in the
 // opposite direction, it can go through the existing connection
+// a few design choice has been explored, and here i note the rationale for
+// current tradeoffs
+// there's no aggressive throttling/eviction strategy built into this connection
+// management. if the net is asked for concurrently sending to 10K addresses,
+// then 10K connections will be established and kept inside connection table.
+// this level is not the most, or even is the worst proper place to do resource
+// management. current `SendMessage<_, _>` interface is too simple for passing
+// down any user intent (e.g. whether the sending address will be sent again in
+// near future), while it is not "low-level" enough to assume exclusive access
+// to system network resource. it's hard to do anything useful when there's e.g.
+// bulk service out there taking up unknown yet significant amount of network.
+// as the result, i just give up
+// nevertheless, under current design there's unlikely port leaking, and i
+// haven't seen warning from connection workers for a while. i guess the only
+// remaining concern is that there's too many TIME_WAIT connections out there
+// exceeding the amount kernel would like to keep i.e. 32768, so there may be
+// unexpected fast recycling which causes corruption. i don't expect that to
+// happen with noticeable probablity, and switching to QUIC should workaround
+// the issue quiet nicely
+// if there's no active reclaiming, how should we decide when to relaim a
+// connection? unlike us, libp2p actually expose a more complex connection based
+// interface to upper layer, and a connection is closed when application does
+// not refer to it anymore, so we cannot mirror its behavior into our stateless
+// inteface. does application itself know when it should keep a connection open
+// and when it should release? in kademlia it might know, but in entropy the
+// message pattern may be more in a unidirectional oneshot style. not sure
+// whether that's inherent difference among protocols or it just libp2p's
+// implementation conforms its network interface
+// anyway, we have to define our own reclaiming policy. tentatively a connection
+// is reclaimed if it has no outgoing traffic for one whole second. the
+// rationale is that
+// * network communication is usually ping-pong style. if we haven't sent to
+//   some address for one whole second, then it probably is not sending to us
+//   for a while either
+// * even if it is an unidirectional traffic, in current implementation
+//   reclaiming the outgoing traffic worker does not affect the incoming
+//   processing
+// * one second is a seemingly short but actually reasonable timeout for session
+//   ending. a session is a period that each side of the connection response to
+//   each other's latest message almost immediately, and all exchanged messages
+//   are around the same topic/context. we guarantee to never interrupt a
+//   session, but we don't try to predict when the next session will come
 //
-// this is not a solution optimized for performance: each outgoing message must
-// go through two channels, the first one for getting into `TcpControl` and the
+// this solution comes with inherint overhead: each outgoing message must go
+// through two channels, the first one for getting into `TcpControl` and the
 // second one for dispatching into corresponding `write_task`. the first queuing
 // is necessary for keeping all mutation to connection cache inside
-// `TcpControl`. after all, the highest priority goal is to ensure bounded
-// OS resource (mostly number of occupied ephemeral ports) usage, which is
-// essential for p2p stress test. also this strategy is also taken by libp2p,
-// makes it more fair comparison between protocol in this codebase and in libp2p
-//
+// `TcpControl`. the performance is not comparable to udp net
 // `simplex::Tcp` provides a stateless `impl SendMessage` which initiate an
-// ephemeral tcp connection for every message. the performance will be bad, and
-// it cannot accept incoming connections anymore. you can use a second
-// `TcpControl` that wrapped as
+// ephemeral tcp connection for every message. this results in a setup closer to
+// udp, but the performance will be even worse, and it cannot accept incoming
+// connections anymore. you can use a second `TcpControl` that wrapped as
 //   Inline(&mut control, &mut UnreachableTimer)
 // to `impl SendEvent<Incoming>` and pass into `tcp_accept_session` for incoming
 // connections. check unreplicated benchmark for demonstration. the simplex
@@ -97,31 +135,15 @@ const TCP_PREAMBLE_LEN: usize = 16;
 // protocols to be reused e.g. for QUIC
 #[derive(Debug)]
 pub struct TcpControl<B, F> {
-    // cached connections based on the last *outgoing* traffic
-    // the incoming messages does not prompt a connection in this cache. if an incoming connection
-    // is not being reused for egressing for a while, it may get evicted from this cache even if the
-    // connection is still actively receiving messages
-    // this does not affect the incoming traffic. even if the connection is evicted, only the
-    // `write_task` exits (due to the dropped egress sender). `read_task` will still be alive and
-    // forward incoming messages by calling `on_buf`
-    // if afterward there's outgoing messages to the remote address, a new connection will be
-    // created and pushed into the cache, the connection will be accepted by remote as an incoming
-    // stream, which will be unconditionally `put` into the cache, replace the previous egress
-    // sender and cause further outgoing traffic (on remote side, incoming traffic on local side)
-    // migrate to the new connection. as the result, (eventually) there's at most one connection
-    // between each pair of addresses
-    // even if i find a way to easily promote connections on incoming messages, this strategy is
-    // still necessary to eliminate duplicated connections between same pair of addresses
-    connections: LruCache<SocketAddr, Connection<B>>,
+    connections: HashMap<SocketAddr, Connection<B>>,
     on_buf: F,
     preamble: bytes::Bytes,
-    evict_instants: VecDeque<Instant>,
 }
 
 #[derive(Debug)]
 struct Connection<B> {
     sender: UnboundedSender<B>,
-    // used_at: Instant,
+    using: bool,
 }
 
 type Preamble = Option<SocketAddr>;
@@ -133,11 +155,17 @@ impl<B, F> TcpControl<B, F> {
         assert!(preamble.len() < TCP_PREAMBLE_LEN);
         preamble.resize(TCP_PREAMBLE_LEN, Default::default());
         Ok(Self {
-            connections: LruCache::new(TCP_MAX_CONNECTION_NUM.try_into().unwrap()),
+            connections: HashMap::new(),
             on_buf,
             preamble: preamble.into(),
-            evict_instants: Default::default(),
         })
+    }
+}
+
+impl<B, F> OnEvent<Init> for TcpControl<B, F> {
+    fn on_event(&mut self, Init: Init, timer: &mut impl Timer) -> anyhow::Result<()> {
+        timer.set(Duration::from_secs(1))?;
+        Ok(())
     }
 }
 
@@ -148,38 +176,28 @@ impl<B, F: FnMut(&[u8]) -> anyhow::Result<()>> TcpControl<B, F> {
         remote: impl Into<Option<SocketAddr>>,
     ) {
         let remote = remote.into();
-        loop {
-            let len = match stream.read_u64().await {
-                Ok(len) => len as _,
-                Err(err) => {
-                    if !matches!(err.kind(), ErrorKind::UnexpectedEof) {
-                        warn!(
-                            "{:?} (remote {remote:?}) >>> {:?} {err}",
-                            stream.peer_addr(),
-                            stream.local_addr()
-                        )
-                    }
-                    break;
-                }
-            };
-            if let Err(err) = async {
+        if let Err(err) = async {
+            loop {
+                let len = match stream.read_u64().await {
+                    Ok(len) => len as _,
+                    Err(err) if matches!(err.kind(), ErrorKind::UnexpectedEof) => break Ok(()),
+                    Err(err) => Err(err)?,
+                };
                 if len > TCP_MAX_BUF_LEN {
                     anyhow::bail!("invalid buffer length {len}")
                 }
                 let mut buf = vec![0; len];
                 stream.read_exact(&mut buf).await?;
-                on_buf(&buf)?;
-                Ok(())
+                on_buf(&buf)?
             }
-            .await
-            {
-                warn!(
-                    "{:?} (remote {remote:?}) >>> {:?} {err}",
-                    stream.peer_addr(),
-                    stream.local_addr()
-                );
-                break;
-            }
+        }
+        .await
+        {
+            warn!(
+                "{:?} (remote {remote:?}) >>> {:?} {err}",
+                stream.peer_addr(),
+                stream.local_addr()
+            );
         }
     }
 }
@@ -225,34 +243,10 @@ impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnE
             match connection.sender.send(buf) {
                 Ok(()) => return Ok(()),
                 Err(err) => {
-                    self.connections.pop(&remote);
+                    self.connections.remove(&remote);
                     buf = err.0
                 }
             }
-        }
-        while self.connections.len() >= TCP_MAX_CONNECTION_NUM {
-            // 60s = default TIME_WAIT
-            // one eviction = at most one active shutdown = at most one TIME_WAIT
-            // if we keep evicting when this condition holds, the number of TIME_WAIT connections
-            // is potentially unbounded
-
-            // for unknown reason, there seems to be at most 32768 connections in TIME_WAIT
-            // so we should better keep the number bounded by 32768, not just bounded
-            // notice that bulk service also generates TIME_WAIT connections
-
-            // notice that there will be large amount of connection get into TIME_WAIT when the
-            // `TcpControl` is dropped, potentially more than 32768
-            // so to be safe entropy evaluation runs must have more than 1min interval
-            if self.evict_instants.len() == 32768.min(TCP_MAX_CONNECTION_NUM) {
-                if self.evict_instants.front().unwrap().elapsed() < Duration::from_secs(60) {
-                    warn!("explicit drop egress message due to reaching maximum concurrent connection number");
-                    return Ok(());
-                }
-                self.evict_instants.pop_front();
-            }
-            self.evict_instants.push_back(Instant::now());
-            let (remote, _) = self.connections.pop_lru().unwrap();
-            info!("evicting connection to {remote}")
         }
         let (sender, receiver) = unbounded_channel::<B>();
         let preamble = self.preamble.clone();
@@ -278,7 +272,13 @@ impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnE
         if sender.send(buf).is_err() {
             warn!(">=> {remote} new connection immediately fail")
         } else {
-            self.connections.push(remote, Connection { sender });
+            self.connections.insert(
+                remote,
+                Connection {
+                    sender,
+                    using: true,
+                },
+            );
         }
         Ok(())
     }
@@ -297,7 +297,13 @@ impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnE
         if let Some(remote) = preamble {
             let (sender, receiver) = unbounded_channel::<B>();
             tokio::spawn(Self::write_task(write, receiver, remote));
-            let replaced = self.connections.put(remote, Connection { sender });
+            let replaced = self.connections.insert(
+                remote,
+                Connection {
+                    sender,
+                    using: false,
+                },
+            );
             if replaced.is_some() {
                 warn!("<<< {remote} replacing previous connection")
             }
@@ -310,7 +316,11 @@ impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnE
 
 impl<B, F> OnTimer for TcpControl<B, F> {
     fn on_timer(&mut self, _: crate::event::TimerId, _: &mut impl Timer) -> anyhow::Result<()> {
-        unreachable!()
+        self.connections.retain(|_, connection| {
+            replace(&mut connection.using, false) && !connection.sender.is_closed()
+        });
+        info!("retaining {} connections", self.connections.len());
+        Ok(())
     }
 }
 
@@ -348,15 +358,15 @@ pub async fn tcp_accept_session(
                     .deserialize(&preamble)?,
             )
         };
-        let remote = match task.await {
-            Ok(remote) => remote,
+        let preamble = match task.await {
+            Ok(preamble) => preamble,
             Err(err) => {
                 warn!("{peer_addr} {err}");
                 continue;
             }
         };
         // println!("{peer_addr} -> {remote}");
-        sender.send(Incoming(remote, stream))?
+        sender.send(Incoming(preamble, stream))?
     }
 }
 

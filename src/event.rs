@@ -407,6 +407,11 @@ pub mod erased {
 
     pub use session::Session;
 
+    pub mod events {
+        #[derive(Debug)]
+        pub struct Init;
+    }
+
     pub mod session {
         use crate::event::session::SessionTimer;
 

@@ -353,7 +353,9 @@ pub mod check {
     use crate::{
         app::KVStore,
         event::{
-            erased::OnEvent, linear::Timer, OnTimer as _, TimerId, Transient, UnreachableTimer,
+            erased::{events::Init, OnEvent},
+            linear::Timer,
+            OnTimer as _, TimerId, Transient, UnreachableTimer,
         },
         message::Request,
         net::{events::Recv, SendMessage},
@@ -584,7 +586,7 @@ pub mod check {
     impl<W: Workload> State<W> {
         pub fn launch(&mut self) -> anyhow::Result<()> {
             for client in &mut self.clients {
-                client.close_loop.launch()?
+                client.close_loop.on_event(Init, &mut UnreachableTimer)?
             }
             self.flush()
         }

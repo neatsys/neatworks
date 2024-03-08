@@ -12,7 +12,10 @@ use std::{
 };
 
 use crate::{
-    event::{erased::OnEvent, OnTimer, SendEvent, Timer},
+    event::{
+        erased::{events::Init, OnEvent},
+        OnTimer, SendEvent, Timer,
+    },
     message::Payload,
 };
 
@@ -297,8 +300,8 @@ where
     }
 }
 
-impl<W: Workload, E: SendEvent<Invoke>> CloseLoop<W, E> {
-    pub fn launch(&mut self) -> anyhow::Result<()> {
+impl<W: Workload, E: SendEvent<Invoke>> OnEvent<Init> for CloseLoop<W, E> {
+    fn on_event(&mut self, Init: Init, _: &mut impl Timer) -> anyhow::Result<()> {
         let (op, attach) = self
             .workload
             .next_op()?
