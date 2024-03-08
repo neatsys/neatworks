@@ -64,7 +64,7 @@ impl<B: Buf> SendMessage<IterAddr<'_, SocketAddr>, B> for Udp {
     }
 }
 
-const TCP_MAX_BUF_LEN: usize = 1 << 20;
+const MAX_BUF_LEN: usize = 1 << 20;
 
 const TCP_PREAMBLE_LEN: usize = 16;
 
@@ -264,7 +264,7 @@ impl Tcp {
                     Err(err) if matches!(err.kind(), ErrorKind::UnexpectedEof) => break Ok(()),
                     Err(err) => Err(err)?,
                 };
-                if len > TCP_MAX_BUF_LEN {
+                if len > MAX_BUF_LEN {
                     anyhow::bail!("invalid buffer length {len}")
                 }
                 let mut buf = vec![0; len];
@@ -438,5 +438,122 @@ pub mod simplex {
             }
             Ok(())
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Quic(pub quinn::Endpoint);
+
+fn configure_server() -> anyhow::Result<(quinn::ServerConfig, Vec<u8>)> {
+    let cert = rcgen::generate_simple_self_signed(vec!["neatworks".into()]).unwrap();
+    let cert_der = cert.serialize_der().unwrap();
+    let priv_key = cert.serialize_private_key_der();
+    let priv_key = rustls::PrivateKey(priv_key);
+    let cert_chain = vec![rustls::Certificate(cert_der.clone())];
+
+    let server_config = quinn::ServerConfig::with_single_cert(cert_chain, priv_key)?;
+    // let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
+    // transport_config.max_concurrent_uni_streams(0_u8.into());
+
+    Ok((server_config, cert_der))
+}
+
+impl Quic {
+    pub fn new(addr: SocketAddr) -> anyhow::Result<Self> {
+        let (config, _) = configure_server()?;
+        Ok(Self(quinn::Endpoint::server(config, addr)?))
+    }
+
+    async fn read_task(
+        connection: quinn::Connection,
+        mut on_buf: impl FnMut(&[u8]) -> anyhow::Result<()>,
+    ) {
+        if let Err(err) = async {
+            loop {
+                let mut stream = match connection.accept_uni().await {
+                    Ok(stream) => stream,
+                    // TODO
+                    Err(quinn::ConnectionError::ConnectionClosed(_)) => {
+                        break anyhow::Result::<_>::Ok(())
+                    }
+                    Err(err) => Err(err)?,
+                };
+                // determine incomplete stream?
+                on_buf(&stream.read_to_end(MAX_BUF_LEN).await?)?
+            }
+        }
+        .await
+        {
+            warn!("<<< {} {err}", connection.remote_address())
+        }
+    }
+
+    async fn write_task<B: Buf>(connection: quinn::Connection, mut receiver: UnboundedReceiver<B>) {
+        if let Err(err) = async {
+            while let Some(buf) = receiver.recv().await {
+                connection.open_uni().await?.write_all(buf.as_ref()).await?
+            }
+            anyhow::Result::<_>::Ok(())
+        }
+        .await
+        {
+            warn!(">>> {} {err}", connection.remote_address())
+        }
+    }
+}
+
+impl Protocol for Quic {
+    fn connect<B: Buf>(
+        &self,
+        remote: SocketAddr,
+        on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
+        receiver: UnboundedReceiver<B>,
+    ) {
+        let endpoint = self.0.clone();
+        tokio::spawn(async move {
+            let connection = match async {
+                anyhow::Result::<_>::Ok(endpoint.connect(remote, "neatworks")?.await?)
+            }
+            .await
+            {
+                Ok(connection) => connection,
+                Err(err) => {
+                    warn!(">>> {remote} {err}");
+                    return;
+                }
+            };
+            tokio::spawn(Self::read_task(connection.clone(), on_buf));
+            tokio::spawn(Self::write_task(connection, receiver));
+        });
+    }
+}
+
+pub struct QuicIncoming(quinn::Connection);
+
+impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnEvent<QuicIncoming>
+    for Dispatch<Quic, B, F>
+{
+    fn on_event(
+        &mut self,
+        QuicIncoming(connection): QuicIncoming,
+        _: &mut impl Timer,
+    ) -> anyhow::Result<()> {
+        tokio::spawn(Quic::read_task(connection.clone(), self.on_buf.clone()));
+        let (sender, receiver) = unbounded_channel::<B>();
+        let replaced = self.connections.insert(
+            connection.remote_address(),
+            Connection {
+                sender,
+                using: false,
+            },
+        );
+        if replaced.is_some() {
+            warn!(
+                "<<< {} replacing previous connection",
+                connection.remote_address()
+            )
+        }
+        tokio::spawn(Quic::write_task(connection, receiver));
+        Ok(())
     }
 }

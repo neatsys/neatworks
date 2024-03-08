@@ -70,5 +70,7 @@ tokio-util = "0.7.10"
 replication-control-messages = { version = "0.1.0", path = "tools/replication-control-messages" }
 schnorrkel = { version = "0.11.4", features = ["serde"] }
 quinn = "0.10.2"
+rcgen = "0.12.1"
+rustls = { version = "0.21.0", default-features = false, features = ["quic"] }
 [dev-dependencies]
 proptest = "1.4.0"
