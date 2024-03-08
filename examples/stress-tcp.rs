@@ -9,9 +9,12 @@ use std::{
 };
 
 use augustus::{
-    event::erased::{session::Sender, Blanket, Session, Unify},
+    event::{
+        erased::{events::Init, session::Sender, Blanket, Session, Unify},
+        SendEvent,
+    },
     net::{
-        session::{tcp_accept_session, Tcp, TcpControl},
+        session::{tcp_accept_session, Dispatch, DispatchNet, Tcp},
         SendMessage,
     },
 };
@@ -35,24 +38,24 @@ async fn main() -> anyhow::Result<()> {
     for i in 0..num_peer {
         let listener = TcpListener::bind(format!("0.0.0.0:{}", 3000 + i)).await?;
 
-        let mut control = Blanket(Unify(TcpControl::new(
-            {
-                let count = count.clone();
-                move |_: &_| {
-                    count.fetch_add(1, SeqCst);
-                    Ok(())
-                }
-            },
-            None,
-        )?));
+        let mut control = Blanket(Unify(Dispatch::new(Tcp::new(None)?, {
+            let count = count.clone();
+            move |_: &_| {
+                count.fetch_add(1, SeqCst);
+                Ok(())
+            }
+        })?));
 
         let mut control_session = Session::new();
         sessions.spawn(tcp_accept_session(
             listener,
             Sender::from(control_session.sender()),
         ));
-        let mut net = Tcp(Sender::from(control_session.sender()));
-        sessions.spawn(async move { control_session.run(&mut control).await });
+        let mut net = DispatchNet(Sender::from(control_session.sender()));
+        sessions.spawn(async move {
+            Sender::from(control_session.sender()).send(Init)?;
+            control_session.run(&mut control).await
+        });
         sessions.spawn(async move {
             for j in 0..multiplier {
                 for k in 0..num_peer {

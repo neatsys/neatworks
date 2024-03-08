@@ -28,7 +28,7 @@ use augustus::{
     kademlia::{self, Buckets, PeerRecord},
     net::{
         kademlia::{Control, PeerNet},
-        session::{tcp_accept_session, Tcp, TcpControl},
+        session::{tcp_accept_session, Dispatch, DispatchNet, Tcp},
     },
     worker::erased::Worker,
 };
@@ -269,7 +269,7 @@ async fn start_peer(
     let mut kademlia_peer = Blanket(Buffered::from(kademlia::Peer::new(
         buckets,
         // MessageNet::new(socket_net.clone()),
-        MessageNet::new(Tcp(Sender::from(tcp_control_session.sender()))),
+        MessageNet::new(DispatchNet(Sender::from(tcp_control_session.sender()))),
         Sender::from(kademlia_control_session.sender()),
         Worker::new_inline(
             crypto.clone(),
@@ -278,7 +278,7 @@ async fn start_peer(
     )));
     let mut kademlia_control = Blanket(Buffered::from(Control::new(
         // socket_net.clone(),
-        Tcp(Sender::from(tcp_control_session.sender())),
+        DispatchNet(Sender::from(tcp_control_session.sender())),
         Sender::from(kademlia_session.sender()),
     )));
     let mut peer = Blanket(Buffered::from(Peer::new(
@@ -294,21 +294,18 @@ async fn start_peer(
         Worker::new_inline((), Box::new(Sender::from(peer_session.sender()))),
         fs_sender,
     )));
-    let mut tcp_control = Blanket(Unify(TcpControl::new(
-        {
-            let mut peer_sender = Sender::from(peer_session.sender());
-            let mut kademlia_sender = Sender::from(kademlia_session.sender());
-            move |buf: &_| {
-                entropy::on_buf(
-                    buf,
-                    &mut peer_sender,
-                    &mut kademlia_sender,
-                    &mut blob_sender,
-                )
-            }
-        },
-        listener.local_addr()?,
-    )?));
+    let mut tcp_control = Blanket(Unify(Dispatch::new(Tcp::new(listener.local_addr()?)?, {
+        let mut peer_sender = Sender::from(peer_session.sender());
+        let mut kademlia_sender = Sender::from(kademlia_session.sender());
+        move |buf: &_| {
+            entropy::on_buf(
+                buf,
+                &mut peer_sender,
+                &mut kademlia_sender,
+                &mut blob_sender,
+            )
+        }
+    })?));
 
     let socket_session = tcp_accept_session(listener, Sender::from(tcp_control_session.sender()));
     let kademlia_session = kademlia_session.run(&mut kademlia_peer);

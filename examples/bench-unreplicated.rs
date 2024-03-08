@@ -28,7 +28,7 @@ use augustus::{
         Inline, OnTimer, SendEvent as _, Session, Unify, UnreachableTimer,
     },
     net::{
-        session::{simplex, tcp_accept_session, Tcp, TcpControl, Udp},
+        session::{simplex, tcp_accept_session, Dispatch, DispatchNet, Tcp, Udp},
         IndexNet,
     },
     unreplicated::{
@@ -107,9 +107,9 @@ async fn main() -> anyhow::Result<()> {
                             erased::session::Sender::from(close_loop_session.sender()),
                         ));
                         let mut state_sender = state_session.sender();
-                        let mut tcp_control = TcpControl::<bytes::Bytes, _>::new(
+                        let mut tcp_control = Dispatch::<_, bytes::Bytes, _>::new(
+                            Tcp::new(None)?,
                             move |buf: &_| to_client_on_buf(buf, &mut state_sender),
-                            None,
                         )?;
                         let mut timer = UnreachableTimer;
                         sessions.spawn_on(
@@ -128,7 +128,8 @@ async fn main() -> anyhow::Result<()> {
                         );
                     } else {
                         let mut tcp_session = erased::Session::new();
-                        let raw_net = Tcp(erased::session::Sender::from(tcp_session.sender()));
+                        let raw_net =
+                            DispatchNet(erased::session::Sender::from(tcp_session.sender()));
                         let mut state = Unify(Client::new(
                             id,
                             listener.local_addr()?,
@@ -140,9 +141,9 @@ async fn main() -> anyhow::Result<()> {
                             erased::session::Sender::from(close_loop_session.sender()),
                         ));
                         let mut state_sender = state_session.sender();
-                        let mut tcp_control = Blanket(erased::Unify(TcpControl::new(
+                        let mut tcp_control = Blanket(erased::Unify(Dispatch::new(
+                            Tcp::new(listener.local_addr()?)?,
                             move |buf: &_| to_client_on_buf(buf, &mut state_sender),
-                            listener.local_addr()?,
                         )?));
 
                         let tcp_sender = erased::session::Sender::from(tcp_session.sender());
@@ -272,10 +273,10 @@ async fn main() -> anyhow::Result<()> {
             let mut state = Unify(Replica::new(Null, ToClientMessageNet::new(simplex::Tcp)));
             let mut state_session = Session::new();
             let mut state_sender = state_session.sender();
-            let mut tcp_control = TcpControl::<bytes::Bytes, _>::new(
-                move |buf: &_| to_replica_on_buf(buf, &mut state_sender),
-                None,
-            )?;
+            let mut tcp_control =
+                Dispatch::<_, bytes::Bytes, _>::new(Tcp::new(None)?, move |buf: &_| {
+                    to_replica_on_buf(buf, &mut state_sender)
+                })?;
             let mut timer = UnreachableTimer;
             let accept_session =
                 tcp_accept_session(listener, erased::Inline(&mut tcp_control, &mut timer));
@@ -284,13 +285,13 @@ async fn main() -> anyhow::Result<()> {
         }
 
         let mut tcp_session = erased::Session::new();
-        let raw_net = Tcp(erased::session::Sender::from(tcp_session.sender()));
+        let raw_net = DispatchNet(erased::session::Sender::from(tcp_session.sender()));
         let mut state = Unify(Replica::new(Null, ToClientMessageNet::new(raw_net)));
         let mut state_session = Session::new();
         let mut state_sender = state_session.sender();
-        let mut tcp_control = Blanket(erased::Unify(TcpControl::new(
+        let mut tcp_control = Blanket(erased::Unify(Dispatch::new(
+            Tcp::new(listener.local_addr()?)?,
             move |buf: &_| to_replica_on_buf(buf, &mut state_sender),
-            listener.local_addr()?,
         )?));
 
         let accept_session = tcp_accept_session(

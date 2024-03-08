@@ -130,14 +130,11 @@ const TCP_PREAMBLE_LEN: usize = 16;
 // variant is compatible with the default duplex one i.e. it is ok to have
 // messages sent by simplex tcp net to be received with a duplex one, and vice
 // versa
-//
-// TODO consider generalize this connection over underlying transportation
-// protocols to be reused e.g. for QUIC
 #[derive(Debug)]
-pub struct TcpControl<B, F> {
+pub struct Dispatch<P, B, F> {
+    protocol: P,
     connections: HashMap<SocketAddr, Connection<B>>,
     on_buf: F,
-    preamble: bytes::Bytes,
 }
 
 #[derive(Debug)]
@@ -148,31 +145,115 @@ struct Connection<B> {
 
 type Preamble = Option<SocketAddr>;
 
-impl<B, F> TcpControl<B, F> {
-    pub fn new(on_buf: F, addr: impl Into<Option<SocketAddr>>) -> anyhow::Result<Self> {
-        let addr = addr.into();
-        let mut preamble = bincode::options().serialize(&addr)?;
-        assert!(preamble.len() < TCP_PREAMBLE_LEN);
-        preamble.resize(TCP_PREAMBLE_LEN, Default::default());
+impl<P, B, F> Dispatch<P, B, F> {
+    pub fn new(protocol: P, on_buf: F) -> anyhow::Result<Self> {
         Ok(Self {
+            protocol,
             connections: HashMap::new(),
             on_buf,
-            preamble: preamble.into(),
         })
     }
 }
 
-impl<B, F> OnEvent<Init> for TcpControl<B, F> {
+impl<P, B, F> OnEvent<Init> for Dispatch<P, B, F> {
     fn on_event(&mut self, Init: Init, timer: &mut impl Timer) -> anyhow::Result<()> {
         timer.set(Duration::from_secs(1))?;
         Ok(())
     }
 }
 
-impl<B, F: FnMut(&[u8]) -> anyhow::Result<()>> TcpControl<B, F> {
+trait Protocol {
+    fn connect<B: Buf>(
+        &self,
+        remote: SocketAddr,
+        on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
+        receiver: UnboundedReceiver<B>,
+    );
+}
+
+pub struct Outgoing<B>(SocketAddr, B);
+
+#[derive(Clone)]
+pub struct DispatchNet<E>(pub E);
+
+impl<E: SendEvent<Outgoing<B>>, B> SendMessage<SocketAddr, B> for DispatchNet<E> {
+    fn send(&mut self, dest: SocketAddr, message: B) -> anyhow::Result<()> {
+        self.0.send(Outgoing(dest, message))
+    }
+}
+
+impl<E: SendEvent<Outgoing<B>>, B: Buf> SendMessage<IterAddr<'_, SocketAddr>, B>
+    for DispatchNet<E>
+{
+    fn send(&mut self, dest: IterAddr<'_, SocketAddr>, message: B) -> anyhow::Result<()> {
+        for addr in dest.0 {
+            SendMessage::send(self, addr, message.clone())?
+        }
+        Ok(())
+    }
+}
+
+impl<P: Protocol, B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static>
+    OnEvent<Outgoing<B>> for Dispatch<P, B, F>
+{
+    fn on_event(
+        &mut self,
+        Outgoing(remote, mut buf): Outgoing<B>,
+        _: &mut impl Timer,
+    ) -> anyhow::Result<()> {
+        if let Some(connection) = self.connections.get_mut(&remote) {
+            match connection.sender.send(buf) {
+                Ok(()) => {
+                    connection.using = true;
+                    return Ok(());
+                }
+                Err(err) => {
+                    self.connections.remove(&remote);
+                    buf = err.0
+                }
+            }
+        }
+        let (sender, receiver) = unbounded_channel::<B>();
+        self.protocol.connect(remote, self.on_buf.clone(), receiver);
+        if sender.send(buf).is_err() {
+            warn!(">=> {remote} new connection immediately fail")
+        } else {
+            self.connections.insert(
+                remote,
+                Connection {
+                    sender,
+                    using: true,
+                },
+            );
+        }
+        Ok(())
+    }
+}
+
+impl<P, B, F> OnTimer for Dispatch<P, B, F> {
+    fn on_timer(&mut self, _: crate::event::TimerId, _: &mut impl Timer) -> anyhow::Result<()> {
+        self.connections.retain(|_, connection| {
+            replace(&mut connection.using, false) && !connection.sender.is_closed()
+        });
+        info!("retaining {} connections", self.connections.len());
+        Ok(())
+    }
+}
+
+pub struct Tcp(bytes::Bytes);
+
+impl Tcp {
+    pub fn new(addr: impl Into<Option<SocketAddr>>) -> anyhow::Result<Self> {
+        let addr = addr.into();
+        let mut preamble = bincode::options().serialize(&addr)?;
+        assert!(preamble.len() < TCP_PREAMBLE_LEN);
+        preamble.resize(TCP_PREAMBLE_LEN, Default::default());
+        Ok(Self(preamble.into()))
+    }
+
     async fn read_task(
         mut stream: OwnedReadHalf,
-        mut on_buf: F,
+        mut on_buf: impl FnMut(&[u8]) -> anyhow::Result<()>,
         remote: impl Into<Option<SocketAddr>>,
     ) {
         let remote = remote.into();
@@ -200,10 +281,8 @@ impl<B, F: FnMut(&[u8]) -> anyhow::Result<()>> TcpControl<B, F> {
             );
         }
     }
-}
 
-impl<B: Buf, F> TcpControl<B, F> {
-    async fn write_task(
+    async fn write_task<B: Buf>(
         mut stream: OwnedWriteHalf,
         mut receiver: UnboundedReceiver<B>,
         remote: SocketAddr,
@@ -227,30 +306,14 @@ impl<B: Buf, F> TcpControl<B, F> {
     }
 }
 
-pub struct Outgoing<B>(SocketAddr, B);
-
-pub struct Incoming(Preamble, TcpStream);
-
-impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnEvent<Outgoing<B>>
-    for TcpControl<B, F>
-{
-    fn on_event(
-        &mut self,
-        Outgoing(remote, mut buf): Outgoing<B>,
-        _: &mut impl Timer,
-    ) -> anyhow::Result<()> {
-        if let Some(connection) = self.connections.get_mut(&remote) {
-            match connection.sender.send(buf) {
-                Ok(()) => return Ok(()),
-                Err(err) => {
-                    self.connections.remove(&remote);
-                    buf = err.0
-                }
-            }
-        }
-        let (sender, receiver) = unbounded_channel::<B>();
-        let preamble = self.preamble.clone();
-        let on_buf = self.on_buf.clone();
+impl Protocol for Tcp {
+    fn connect<B: Buf>(
+        &self,
+        remote: SocketAddr,
+        on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
+        receiver: UnboundedReceiver<B>,
+    ) {
+        let preamble = self.0.clone();
         tokio::spawn(async move {
             let task = async {
                 let mut stream = TcpStream::connect(remote).await?;
@@ -269,34 +332,24 @@ impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnE
             tokio::spawn(Self::read_task(read, on_buf, remote));
             tokio::spawn(Self::write_task(write, receiver, remote));
         });
-        if sender.send(buf).is_err() {
-            warn!(">=> {remote} new connection immediately fail")
-        } else {
-            self.connections.insert(
-                remote,
-                Connection {
-                    sender,
-                    using: true,
-                },
-            );
-        }
-        Ok(())
     }
 }
 
-impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnEvent<Incoming>
-    for TcpControl<B, F>
+pub struct TcpIncoming(Preamble, TcpStream);
+
+impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnEvent<TcpIncoming>
+    for Dispatch<Tcp, B, F>
 {
     fn on_event(
         &mut self,
-        Incoming(preamble, stream): Incoming,
+        TcpIncoming(preamble, stream): TcpIncoming,
         _: &mut impl Timer,
     ) -> anyhow::Result<()> {
         let (read, write) = stream.into_split();
-        tokio::spawn(Self::read_task(read, self.on_buf.clone(), preamble));
+        tokio::spawn(Tcp::read_task(read, self.on_buf.clone(), preamble));
         if let Some(remote) = preamble {
             let (sender, receiver) = unbounded_channel::<B>();
-            tokio::spawn(Self::write_task(write, receiver, remote));
+            tokio::spawn(Tcp::write_task(write, receiver, remote));
             let replaced = self.connections.insert(
                 remote,
                 Connection {
@@ -314,37 +367,9 @@ impl<B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static> OnE
     }
 }
 
-impl<B, F> OnTimer for TcpControl<B, F> {
-    fn on_timer(&mut self, _: crate::event::TimerId, _: &mut impl Timer) -> anyhow::Result<()> {
-        self.connections.retain(|_, connection| {
-            replace(&mut connection.using, false) && !connection.sender.is_closed()
-        });
-        info!("retaining {} connections", self.connections.len());
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-pub struct Tcp<E>(pub E);
-
-impl<E: SendEvent<Outgoing<B>>, B> SendMessage<SocketAddr, B> for Tcp<E> {
-    fn send(&mut self, dest: SocketAddr, message: B) -> anyhow::Result<()> {
-        self.0.send(Outgoing(dest, message))
-    }
-}
-
-impl<E: SendEvent<Outgoing<B>>, B: Buf> SendMessage<IterAddr<'_, SocketAddr>, B> for Tcp<E> {
-    fn send(&mut self, dest: IterAddr<'_, SocketAddr>, message: B) -> anyhow::Result<()> {
-        for addr in dest.0 {
-            SendMessage::send(self, addr, message.clone())?
-        }
-        Ok(())
-    }
-}
-
 pub async fn tcp_accept_session(
     listener: TcpListener,
-    mut sender: impl SendEvent<Incoming>,
+    mut sender: impl SendEvent<TcpIncoming>,
 ) -> anyhow::Result<()> {
     loop {
         let (mut stream, peer_addr) = listener.accept().await?;
@@ -366,7 +391,7 @@ pub async fn tcp_accept_session(
             }
         };
         // println!("{peer_addr} -> {remote}");
-        sender.send(Incoming(preamble, stream))?
+        sender.send(TcpIncoming(preamble, stream))?
     }
 }
 
@@ -414,55 +439,4 @@ pub mod simplex {
             Ok(())
         }
     }
-
-    // currently very similar to the approach commented above
-    // just save for future case
-
-    // use std::io::ErrorKind;
-
-    // use bincode::Options as _;
-    // use tokio::{io::AsyncReadExt as _, net::TcpListener};
-    // use tracing::warn;
-
-    // use super::{Preamble, TCP_MAX_BUF_LEN, TCP_PREAMBLE_LEN};
-
-    // pub async fn tcp_accept_session(
-    //     listener: TcpListener,
-    //     on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
-    // ) -> anyhow::Result<()> {
-    //     let local_addr = listener.local_addr()?;
-    //     loop {
-    //         let (mut stream, peer_addr) = listener.accept().await?;
-    //         let mut on_buf = on_buf.clone();
-    //         tokio::spawn(async move {
-    //             let mut preamble = None;
-    //             if let Err(err) = async {
-    //                 let mut buf = [0; TCP_PREAMBLE_LEN];
-    //                 stream.read_exact(&mut buf).await?;
-    //                 preamble = bincode::options()
-    //                     .allow_trailing_bytes()
-    //                     .deserialize::<Preamble>(&buf)?;
-    //                 loop {
-    //                     let len = match stream.read_u64().await {
-    //                         Ok(len) => len as _,
-    //                         Err(err) if matches!(err.kind(), ErrorKind::UnexpectedEof) => {
-    //                             break anyhow::Result::<_>::Ok(())
-    //                         }
-    //                         Err(err) => Err(err)?,
-    //                     };
-    //                     if len > TCP_MAX_BUF_LEN {
-    //                         anyhow::bail!("invalid buffer length {len}")
-    //                     }
-    //                     let mut buf = vec![0; len];
-    //                     stream.read_exact(&mut buf).await?;
-    //                     on_buf(&buf)?
-    //                 }
-    //             }
-    //             .await
-    //             {
-    //                 warn!("{peer_addr} (remote {preamble:?}) >>> {local_addr} {err}")
-    //             }
-    //         });
-    //     }
-    // }
 }
