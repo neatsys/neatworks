@@ -16,13 +16,16 @@ async fn main() -> anyhow::Result<()> {
     let control_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .build()?;
-    let instances = terraform_instances().await?;
+    let instances = if category == "test" {
+        vec![entropy_control::TerraformOutputInstance {
+            public_ip: [127, 0, 0, 1].into(),
+            private_ip: [127, 0, 0, 1].into(),
+            public_dns: "localhost".into(),
+        }]
+    } else {
+        terraform_instances().await?
+    };
     // let instances = vec![instances[0].clone()];
-    // let instances = vec![entropy_control::TerraformOutputInstance {
-    //     public_ip: [127, 0, 0, 1].into(),
-    //     private_ip: [127, 0, 0, 1].into(),
-    //     public_dns: "localhost".into(),
-    // }];
     latency_benchmark(
         control_client,
         &instances,

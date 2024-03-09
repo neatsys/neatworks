@@ -51,7 +51,7 @@ crossbeam-queue = "0.3.11"
 dashmap = "5.5.3"
 rustc-hash = "1.1.0"
 tikv-jemallocator = "0.5.4"
-# net controls
+# kademlia net
 lru = "0.12.2"
 # kademlia and 32-byte types (digest, peer id, etc)
 primitive-types = "0.12.2"
@@ -60,17 +60,21 @@ rand_distr = "0.4.3"
 # app::sqlite
 rusqlite = { version = "0.31.0", features = ["bundled"] }
 # crypto
+schnorrkel = { version = "0.11.4", features = ["serde"] }
 secp256k1 = { version = "0.28.1", features = ["rand-std", "serde"] }
 sha2 = "0.10.8"
 # human readable op/result of some apps
 serde_json = "1.0.114"
 # bulk and artifacts
 tokio-util = "0.7.10"
+# QUIC net
+quinn = "0.10.2"
+# certificate
+rcgen = { version = "0.13.0", git = "https://github.com/rustls/rcgen", features = [
+    "x509-parser",
+] }
+rustls = { version = "0.21.0", default-features = false, features = ["quic"] }
 
 replication-control-messages = { version = "0.1.0", path = "tools/replication-control-messages" }
-schnorrkel = { version = "0.11.4", features = ["serde"] }
-quinn = "0.10.2"
-rcgen = { version = "0.13.0", git = "https://github.com/rustls/rcgen", features = ["x509-parser"] }
-rustls = { version = "0.21.0", default-features = false, features = ["quic"] }
 [dev-dependencies]
 proptest = "1.4.0"
