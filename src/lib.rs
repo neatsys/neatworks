@@ -71,7 +71,7 @@ pub mod workload;
 // software engineering or whatever reason. ideally there suppose to be one big
 // `src/` that every single line of code lives in. (until it spends whole night
 // to finish compiling.)
-// T_{`cargo build` after no-op update e.g. editing this note} = 9.23s
+// T_{`cargo build` after no-op update e.g. editing this note} = 10.59s
 //
 // the reason to have a separate `tools` is because those code are for distinct
 // purpose. the main part of this codebase is distributed code, that should be

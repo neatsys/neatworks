@@ -120,16 +120,6 @@ const TCP_PREAMBLE_LEN: usize = 16;
 // second one for dispatching into corresponding `write_task`. the first queuing
 // is necessary for keeping all mutation to connection cache inside
 // `TcpControl`. the performance is not comparable to udp net
-// `simplex::Tcp` provides a stateless `impl SendMessage` which initiate an
-// ephemeral tcp connection for every message. this results in a setup closer to
-// udp, but the performance will be even worse, and it cannot accept incoming
-// connections anymore. you can use a second `TcpControl` that wrapped as
-//   Inline(&mut control, &mut UnreachableTimer)
-// to `impl SendEvent<Incoming>` and pass into `tcp_accept_session` for incoming
-// connections. check unreplicated benchmark for demonstration. the simplex
-// variant is compatible with the default duplex one i.e. it is ok to have
-// messages sent by simplex tcp net to be received with a duplex one, and vice
-// versa
 #[derive(Debug)]
 pub struct Dispatch<P, B, F> {
     protocol: P,
@@ -267,6 +257,9 @@ impl<P: Protocol, B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send +
 
 impl<P, B, F> OnTimer for Dispatch<P, B, F> {
     fn on_timer(&mut self, _: crate::event::TimerId, _: &mut impl Timer) -> anyhow::Result<()> {
+        if self.connections.is_empty() {
+            return Ok(());
+        }
         self.connections.retain(|_, connection| {
             replace(&mut connection.using, false) && !connection.sender.is_closed()
         });
@@ -415,25 +408,39 @@ pub async fn tcp_accept_session(
     }
 }
 
+// `simplex::Tcp` provides a stateless `impl SendMessage` which initiate an
+// ephemeral tcp connection for every message. this results in a setup closer to
+// udp, but the performance will be even worse, and it cannot accept incoming
+// connections anymore. you can use a second `TcpControl` that wrapped as
+//   Inline(&mut control, &mut UnreachableTimer)
+// to `impl SendEvent<Incoming>` and pass into `tcp_accept_session` for incoming
+// connections. check unreplicated benchmark for demonstration. the simplex
+// variant is compatible with the default duplex one i.e. it is ok to have
+// messages sent by simplex tcp net to be received with a duplex one, and vice
+// versa
 pub mod simplex {
     use std::net::SocketAddr;
 
     use bincode::Options;
-    use tokio::{io::AsyncWriteExt, net::TcpStream};
+    use tokio::io::AsyncWriteExt;
     use tracing::warn;
 
     use crate::net::{Buf, IterAddr, SendMessage};
 
     use super::{Preamble, TCP_PREAMBLE_LEN};
 
-    #[allow(clippy::type_complexity)]
     pub struct Tcp;
 
     impl<B: Buf> SendMessage<SocketAddr, B> for Tcp {
         fn send(&mut self, dest: SocketAddr, message: B) -> anyhow::Result<()> {
             tokio::spawn(async move {
                 if let Err(err) = async {
-                    let mut stream = TcpStream::connect(dest).await?;
+                    // have to enable REUSEADDR otherwise port number exhausted after sending to
+                    // same `dest` 28K messages within 1min
+                    // let mut stream = TcpStream::connect(dest).await?;
+                    let socket = tokio::net::TcpSocket::new_v4()?;
+                    socket.set_reuseaddr(true)?;
+                    let mut stream = socket.connect(dest).await?;
                     let mut preamble = bincode::options().serialize(&Preamble::None)?;
                     preamble.resize(TCP_PREAMBLE_LEN, Default::default());
                     stream.write_all(&preamble).await?;

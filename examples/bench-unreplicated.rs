@@ -28,7 +28,9 @@ use augustus::{
         Inline, OnTimer, SendEvent as _, Session, Unify, UnreachableTimer,
     },
     net::{
-        session::{simplex, tcp_accept_session, Dispatch, DispatchNet, Tcp, Udp},
+        session::{
+            quic_accept_session, simplex, tcp_accept_session, Dispatch, DispatchNet, Quic, Tcp, Udp,
+        },
         IndexNet,
     },
     unreplicated::{
@@ -56,6 +58,8 @@ use tokio_util::sync::CancellationToken;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    let replica_addr = SocketAddr::from(([127, 0, 0, 1], 4000));
+    let client_addr = SocketAddr::from(([127, 0, 0, 101], 0));
     tracing_subscriber::fmt::init();
     let mut args = args().skip(1).collect::<HashSet<_>>();
     let flag_client = args.remove("client");
@@ -64,12 +68,13 @@ async fn main() -> anyhow::Result<()> {
     let flag_dyn = args.remove("dyn");
     let flag_blocking = args.remove("blocking");
     let flag_dual = args.remove("dual");
+    let flag_quic = args.remove("quic");
     if !args.is_empty() {
         anyhow::bail!("unknown arguments {args:?}")
     }
     #[allow(clippy::nonminimal_bool)]
     if flag_client && (flag_dyn || flag_blocking)
-        || flag_tcp && (flag_blocking || flag_dyn)
+        || (flag_tcp || flag_quic) && (flag_blocking || flag_dyn)
         || flag_dual && !flag_blocking
         || flag_simplex && !flag_tcp
     {
@@ -77,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if flag_client {
-        let replica_addrs = vec![SocketAddr::new([10, 0, 0, 7].into(), 4000)];
+        let replica_addrs = vec![replica_addr];
         let mut sessions = JoinSet::new();
         let (count_sender, mut count_receiver) = unbounded_channel();
         let cancel = CancellationToken::new();
@@ -94,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
                 )));
 
                 if flag_tcp {
-                    let listener = runtime.spawn(TcpListener::bind("10.0.0.8:0")).await??;
+                    let listener = runtime.spawn(TcpListener::bind(client_addr)).await??;
                     if flag_simplex {
                         let mut state = Unify(Client::new(
                             id,
@@ -161,8 +166,41 @@ async fn main() -> anyhow::Result<()> {
                             runtime.handle(),
                         );
                     }
+                } else if flag_quic {
+                    let mut quic_session = erased::Session::new();
+                    let raw_net = DispatchNet(erased::session::Sender::from(quic_session.sender()));
+                    let quic = Quic::new(client_addr)?;
+                    let mut state = Unify(Client::new(
+                        id,
+                        quic.0.local_addr()?,
+                        ToReplicaMessageNet::new(IndexNet::new(
+                            raw_net.clone(),
+                            replica_addrs.clone(),
+                            None,
+                        )),
+                        erased::session::Sender::from(close_loop_session.sender()),
+                    ));
+                    let mut state_sender = state_session.sender();
+                    let mut quic_control = Blanket(erased::Unify(Dispatch::new(
+                        quic.clone(),
+                        move |buf: &_| to_client_on_buf(buf, &mut state_sender),
+                    )?));
+
+                    let quic_sender = erased::session::Sender::from(quic_session.sender());
+                    sessions.spawn_on(quic_accept_session(quic, quic_sender), runtime.handle());
+                    sessions.spawn_on(
+                        async move {
+                            erased::session::Sender::from(quic_session.sender()).send(Init)?;
+                            quic_session.run(&mut quic_control).await
+                        },
+                        runtime.handle(),
+                    );
+                    sessions.spawn_on(
+                        async move { state_session.run(&mut state).await },
+                        runtime.handle(),
+                    );
                 } else {
-                    let socket = runtime.spawn(UdpSocket::bind("10.0.0.8:0")).await??;
+                    let socket = runtime.spawn(UdpSocket::bind(client_addr)).await??;
                     let addr = socket.local_addr()?;
                     let raw_net = Udp(socket.into());
                     let mut state = Unify(Client::new(
@@ -228,7 +266,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     if flag_blocking {
-        let socket = std::net::UdpSocket::bind("0.0.0.0:4000")?;
+        let socket = std::net::UdpSocket::bind(replica_addr)?;
         let raw_net = augustus::net::blocking::Udp(socket.into());
         let net = ToClientMessageNet::new(raw_net.clone());
 
@@ -268,7 +306,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if flag_tcp {
-        let listener = TcpListener::bind("0.0.0.0:4000").await?;
+        let listener = TcpListener::bind(replica_addr).await?;
         if flag_simplex {
             let mut state = Unify(Replica::new(Null, ToClientMessageNet::new(simplex::Tcp)));
             let mut state_session = Session::new();
@@ -315,7 +353,7 @@ async fn main() -> anyhow::Result<()> {
         .await;
     }
 
-    let socket = UdpSocket::bind("0.0.0.0:4000").await?;
+    let socket = UdpSocket::bind(replica_addr).await?;
     let raw_net = Udp(socket.into());
     let net = ToClientMessageNet::new(raw_net.clone());
     if flag_dyn {

@@ -23,7 +23,10 @@
 //
 // without further consideration, this service can also be used to avoid head of
 // line blocking. exclude large transfer from the ordinary connection can help
-// to keep latency low and stable
+// to keep latency low and stable. it's kind of like poor man's QUIC
+// TODO generalize so it can reuse the underlying `net` to send bulk data if
+// `net` happens to base on QUIC
+// will not be significant improvement anyway
 
 use std::{
     collections::HashMap,
