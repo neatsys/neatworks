@@ -7,8 +7,11 @@
 // bench-unreplicated blocking dual
 // => 617318.2 ops/sec
 // taskset -c 0 bench-unreplicated tcp (with bench-unreplicated client tcp)
+// => 181476.8 ops/sec
 // taskset -c 0 bench-unreplicated tcp simplex
-// => 178405.7 ops/sec
+// => (WIP)
+// taskset -c 0 bench-unreplicated quic (with bench-unreplicated client quic)
+// => 59191.5 ops/sec
 
 use std::{
     collections::HashSet,
@@ -57,11 +60,13 @@ use tokio_util::sync::CancellationToken;
 // static GLOBAL: Jemalloc = Jemalloc;
 
 #[tokio::main(flavor = "current_thread")]
+// #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
-    let replica_addr = SocketAddr::from(([127, 0, 0, 1], 4000));
-    let client_addr = SocketAddr::from(([127, 0, 0, 101], 0));
+    let replica_addr = SocketAddr::from(([10, 0, 0, 7], 4000));
+    let client_addr = SocketAddr::from(([10, 0, 0, 8], 0));
     tracing_subscriber::fmt::init();
     let mut args = args().skip(1).collect::<HashSet<_>>();
+    let flag_latency = args.remove("latency");
     let flag_client = args.remove("client");
     let flag_tcp = args.remove("tcp");
     let flag_simplex = args.remove("simplex");
@@ -73,7 +78,8 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("unknown arguments {args:?}")
     }
     #[allow(clippy::nonminimal_bool)]
-    if flag_client && (flag_dyn || flag_blocking)
+    if flag_latency && !flag_client
+        || flag_client && (flag_dyn || flag_blocking)
         || (flag_tcp || flag_quic) && (flag_blocking || flag_dyn)
         || flag_dual && !flag_blocking
         || flag_simplex && !flag_tcp
@@ -87,9 +93,9 @@ async fn main() -> anyhow::Result<()> {
         let (count_sender, mut count_receiver) = unbounded_channel();
         let cancel = CancellationToken::new();
         let mut runtimes = Vec::new();
-        for _ in 0..5 {
+        for _ in 0..if flag_latency { 1 } else { 5 } {
             let runtime = runtime::Builder::new_multi_thread().enable_all().build()?;
-            for id in repeat_with(rand::random).take(8) {
+            for id in repeat_with(rand::random).take(if flag_latency { 1 } else { 8 }) {
                 let mut state_session = Session::<unreplicated::ClientEvent>::new();
                 let mut close_loop_session = erased::Session::new();
 
@@ -346,6 +352,37 @@ async fn main() -> anyhow::Result<()> {
                 tokio::select! {
                     result = accept_session => result,
                     result = tcp_session => result,
+                }
+            },
+            state_session,
+        )
+        .await;
+    }
+
+    if flag_quic {
+        let mut quic_session = erased::Session::new();
+        let raw_net = DispatchNet(erased::session::Sender::from(quic_session.sender()));
+        let mut state = Unify(Replica::new(Null, ToClientMessageNet::new(raw_net)));
+        let mut state_session = Session::new();
+        let mut state_sender = state_session.sender();
+        let quic = Quic::new(replica_addr)?;
+        let mut quic_control = Blanket(erased::Unify(Dispatch::new(
+            quic.clone(),
+            move |buf: &_| to_replica_on_buf(buf, &mut state_sender),
+        )?));
+
+        let accept_session =
+            quic_accept_session(quic, erased::session::Sender::from(quic_session.sender()));
+        erased::session::Sender::from(quic_session.sender()).send(Init)?;
+        let quic_session = quic_session.run(&mut quic_control);
+        let state_session = state_session.run(&mut state);
+        return run(
+            async {
+                // mulplex the two sessions probably does not hurt performance since
+                // `accept_session` pending forever ever since all client connections established
+                tokio::select! {
+                    result = accept_session => result,
+                    result = quic_session => result,
                 }
             },
             state_session,

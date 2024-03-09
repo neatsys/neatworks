@@ -4,6 +4,7 @@ use std::{
 };
 
 use bincode::Options;
+use rustls::RootCertStore;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{
@@ -471,24 +472,38 @@ pub mod simplex {
 #[derive(Debug, Clone)]
 pub struct Quic(pub quinn::Endpoint);
 
-fn configure_server() -> anyhow::Result<(quinn::ServerConfig, Vec<u8>)> {
-    let cert = rcgen::generate_simple_self_signed(vec!["neatworks".into()]).unwrap();
-    let cert_der = cert.serialize_der().unwrap();
-    let priv_key = cert.serialize_private_key_der();
-    let priv_key = rustls::PrivateKey(priv_key);
-    let cert_chain = vec![rustls::Certificate(cert_der.clone())];
+fn quic_config() -> anyhow::Result<(quinn::ServerConfig, quinn::ClientConfig)> {
+    let issuer_key = rcgen::KeyPair::from_pem(include_str!("../key.pem"))?;
+    let issuer = rcgen::Certificate::generate_self_signed(
+        rcgen::CertificateParams::from_ca_cert_pem(include_str!("../cert.pem"))?,
+        &issuer_key,
+    )?;
+    let priv_key = rcgen::KeyPair::generate()?;
+    let cert = rcgen::Certificate::generate(
+        rcgen::CertificateParams::new(vec!["neatworks.quic".into()])?,
+        &priv_key,
+        &issuer,
+        &issuer_key,
+    )?;
+    let priv_key = rustls::PrivateKey(priv_key.serialize_der());
+    let cert_chain = vec![rustls::Certificate(cert.der().to_vec())];
 
     let server_config = quinn::ServerConfig::with_single_cert(cert_chain, priv_key)?;
     // let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
     // transport_config.max_concurrent_uni_streams(0_u8.into());
 
-    Ok((server_config, cert_der))
+    let mut roots = RootCertStore::empty();
+    roots.add_parsable_certificates(&[issuer.der()]);
+    let client_config = quinn::ClientConfig::with_root_certificates(roots);
+    Ok((server_config, client_config))
 }
 
 impl Quic {
     pub fn new(addr: SocketAddr) -> anyhow::Result<Self> {
-        let (config, _) = configure_server()?;
-        Ok(Self(quinn::Endpoint::server(config, addr)?))
+        let (server_config, client_config) = quic_config()?;
+        let mut endpoint = quinn::Endpoint::server(server_config, addr)?;
+        endpoint.set_default_client_config(client_config);
+        Ok(Self(endpoint))
     }
 
     async fn read_task(
@@ -539,7 +554,7 @@ impl Protocol for Quic {
         let endpoint = self.0.clone();
         tokio::spawn(async move {
             let connection = match async {
-                anyhow::Result::<_>::Ok(endpoint.connect(remote, "neatworks")?.await?)
+                anyhow::Result::<_>::Ok(endpoint.connect(remote, "neatworks.quic")?.await?)
             }
             .await
             {
@@ -573,7 +588,15 @@ pub async fn quic_accept_session(
     mut sender: impl SendEvent<Incoming<quinn::Connection>>,
 ) -> anyhow::Result<()> {
     while let Some(conn) = endpoint.accept().await {
-        sender.send(Incoming(conn.await?))?
+        let remote_addr = conn.remote_address();
+        let conn = match conn.await {
+            Ok(conn) => conn,
+            Err(err) => {
+                warn!("<<< {remote_addr} {err}");
+                continue;
+            }
+        };
+        sender.send(Incoming(conn))?
     }
     Ok(())
 }
