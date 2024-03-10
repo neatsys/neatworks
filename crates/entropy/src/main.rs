@@ -28,7 +28,7 @@ use augustus::{
     kademlia::{self, Buckets, PeerRecord},
     net::{
         kademlia::{Control, PeerNet},
-        session::{quic_accept_session, Dispatch, DispatchNet, Quic},
+        session::{tcp_accept_session, Dispatch, DispatchNet, Tcp},
     },
     worker::erased::Worker,
 };
@@ -68,19 +68,7 @@ enum Upcall {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    use tracing_subscriber::{
-        filter::Targets, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt as _,
-    };
-    use tracing::Level;
-    tracing_subscriber::fmt()
-        .with_span_events(FmtSpan::ENTER | FmtSpan::CLOSE)
-        .with_file(true)
-        .with_line_number(true)
-        .with_max_level(Level::DEBUG)
-        .finish()
-        .with("entropy,augustus".parse::<Targets>()?)
-        .init();
-
+    tracing_subscriber::fmt::init();
     let mut rlimit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
     if rlimit.current.is_some() && rlimit.current < rlimit.maximum {
         rlimit.current = rlimit.maximum;
@@ -256,11 +244,10 @@ async fn start_peer(
 ) -> anyhow::Result<()> {
     let peer_id = record.id;
     let path = format!("/tmp/entropy-{:x}", H256(peer_id));
-    let path = std::path::Path::new(&path).to_owned();
-    let _ = remove_dir_all(&path).await;
-    create_dir(&path).await?;
-    // let listener = TcpListener::bind(SocketAddr::from(([0; 4], record.addr.port()))).await?;
-    let quic = Quic::new(SocketAddr::from(([0; 4], record.addr.port())))?;
+    let path = std::path::Path::new(&path);
+    let _ = remove_dir_all(path).await;
+    create_dir(path).await?;
+    let listener = TcpListener::bind(SocketAddr::from(([0; 4], record.addr.port()))).await?;
 
     let ip = record.addr.ip();
     let mut buckets = Buckets::new(record);
@@ -277,12 +264,12 @@ async fn start_peer(
     let mut kademlia_control_session = Session::new();
     let (mut blob_sender, blob_receiver) = unbounded_channel();
     let (fs_sender, fs_receiver) = unbounded_channel();
-    let mut quic_session = Session::new();
+    let mut tcp_control_session = Session::new();
 
     let mut kademlia_peer = Blanket(Buffered::from(kademlia::Peer::new(
         buckets,
         // MessageNet::new(socket_net.clone()),
-        MessageNet::new(DispatchNet(Sender::from(quic_session.sender()))),
+        MessageNet::new(DispatchNet(Sender::from(tcp_control_session.sender()))),
         Sender::from(kademlia_control_session.sender()),
         Worker::new_inline(
             crypto.clone(),
@@ -291,7 +278,7 @@ async fn start_peer(
     )));
     let mut kademlia_control = Blanket(Buffered::from(Control::new(
         // socket_net.clone(),
-        DispatchNet(Sender::from(quic_session.sender())),
+        DispatchNet(Sender::from(tcp_control_session.sender())),
         Sender::from(kademlia_session.sender()),
     )));
     let mut peer = Blanket(Buffered::from(Peer::new(
@@ -307,7 +294,7 @@ async fn start_peer(
         Worker::new_inline((), Box::new(Sender::from(peer_session.sender()))),
         fs_sender,
     )));
-    let mut quic_control = Blanket(Unify(Dispatch::new(quic.clone(), {
+    let mut tcp_control = Blanket(Unify(Dispatch::new(Tcp::new(listener.local_addr()?)?, {
         let mut peer_sender = Sender::from(peer_session.sender());
         let mut kademlia_sender = Sender::from(kademlia_session.sender());
         move |buf: &_| {
@@ -320,29 +307,28 @@ async fn start_peer(
         }
     })?));
 
-    let socket_session = quic_accept_session(quic, Sender::from(quic_session.sender()));
-    let kademlia_session = async move { kademlia_session.run(&mut kademlia_peer).await };
+    let socket_session = tcp_accept_session(listener, Sender::from(tcp_control_session.sender()));
+    let kademlia_session = kademlia_session.run(&mut kademlia_peer);
     let blob_session = bulk::session(
         ip,
         blob_receiver,
         MessageNet::<_, SocketAddr>::new(PeerNet(Sender::from(kademlia_control_session.sender()))),
         Sender::from(peer_session.sender()),
     );
-    let kademlia_control_session =
-        async move { kademlia_control_session.run(&mut kademlia_control).await };
+    let kademlia_control_session = kademlia_control_session.run(&mut kademlia_control);
     let fs_session = entropy::fs::session(path, fs_receiver, Sender::from(peer_session.sender()));
-    let peer_session = async move { peer_session.run(&mut peer).await };
-    // Sender::from(quic_session.sender()).send(Init)?;
-    let tcp_control_session = async move { quic_session.run(&mut quic_control).await };
+    let peer_session = peer_session.run(&mut peer);
+    Sender::from(tcp_control_session.sender()).send(Init)?;
+    let tcp_control_session = tcp_control_session.run(&mut tcp_control);
 
     tokio::select! {
-        result = tokio::spawn(socket_session) => result??,
-        result = tokio::spawn(kademlia_session) => result??,
-        result = tokio::spawn(kademlia_control_session) => result??,
-        result = tokio::spawn(blob_session) => result??,
-        result = tokio::spawn(fs_session) => result??,
-        result = tokio::spawn(peer_session) => result??,
-        result = tokio::spawn(tcp_control_session) => result??,
+        result = socket_session => result?,
+        result = kademlia_session => result?,
+        result = kademlia_control_session => result?,
+        result = blob_session => result?,
+        result = fs_session => result?,
+        result = peer_session => result?,
+        result = tcp_control_session => result?,
     }
     Err(anyhow::anyhow!("unexpected shutdown"))
 }

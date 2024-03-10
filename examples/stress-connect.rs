@@ -14,13 +14,12 @@ use augustus::{
         SendEvent,
     },
     net::{
-        session::{tcp_accept_session, Dispatch, DispatchNet, Tcp},
+        session::{Dispatch, DispatchNet},
         SendMessage,
     },
 };
 
 use tokio::{
-    net::TcpListener,
     task::JoinSet,
     time::{sleep, timeout_at, Instant},
 };
@@ -36,21 +35,36 @@ async fn main() -> anyhow::Result<()> {
     let count = Arc::new(AtomicU32::new(0));
     let mut sessions = JoinSet::new();
     for i in 0..num_peer {
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", 3000 + i)).await?;
+        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", 3000 + i)).await?;
+        // let quic = augustus::net::session::Quic::new(SocketAddr::from(([0, 0, 0, 0], 3000 + i)))?;
 
-        let mut control = Blanket(Unify(Dispatch::new(Tcp::new(None)?, {
-            let count = count.clone();
-            move |_: &_| {
-                count.fetch_add(1, SeqCst);
-                Ok(())
-            }
-        })?));
+        let mut control = Blanket(Unify(Dispatch::new(
+            augustus::net::session::Tcp::new(None)?,
+            {
+                let count = count.clone();
+                move |_: &_| {
+                    count.fetch_add(1, SeqCst);
+                    Ok(())
+                }
+            },
+        )?));
+        // let mut control = Blanket(Unify(Dispatch::new(quic.clone(), {
+        //     let count = count.clone();
+        //     move |_: &_| {
+        //         count.fetch_add(1, SeqCst);
+        //         Ok(())
+        //     }
+        // })?));
 
         let mut control_session = Session::new();
-        sessions.spawn(tcp_accept_session(
+        sessions.spawn(augustus::net::session::tcp_accept_session(
             listener,
             Sender::from(control_session.sender()),
         ));
+        // sessions.spawn(augustus::net::session::quic_accept_session(
+        //     quic,
+        //     Sender::from(control_session.sender()),
+        // ));
         let mut net = DispatchNet(Sender::from(control_session.sender()));
         sessions.spawn(async move {
             Sender::from(control_session.sender()).send(Init)?;

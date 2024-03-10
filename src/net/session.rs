@@ -609,7 +609,11 @@ impl Protocol for Quic {
         tokio::spawn(Self::read_task(connection.clone(), on_buf));
         tokio::spawn(Self::write_task(connection, receiver));
         // tracing::debug!("{remote}");
-        Some(remote)
+        if remote.ip().is_unspecified() {
+            None
+        } else {
+            Some(remote)
+        }
     }
 }
 
