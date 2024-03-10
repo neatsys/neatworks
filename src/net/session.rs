@@ -1,5 +1,10 @@
 use std::{
-    collections::HashMap, fmt::Debug, io::ErrorKind, mem::replace, net::SocketAddr, sync::Arc,
+    collections::{hash_map::Entry, HashMap},
+    fmt::Debug,
+    io::ErrorKind,
+    mem::replace,
+    net::SocketAddr,
+    sync::Arc,
     time::Duration,
 };
 
@@ -13,7 +18,7 @@ use tokio::{
     },
     sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
 };
-use tracing::{info, warn};
+use tracing::{info, warn, Instrument};
 
 use crate::event::{
     erased::{events::Init, OnEvent},
@@ -66,8 +71,6 @@ impl<B: Buf> SendMessage<IterAddr<'_, SocketAddr>, B> for Udp {
 }
 
 const MAX_BUF_LEN: usize = 1 << 20;
-
-const TCP_PREAMBLE_LEN: usize = 16;
 
 // a construction that enables connection reusing
 // the client side of a connection informs its server address to the connected
@@ -207,12 +210,13 @@ impl<P: Protocol, B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send +
                     return Ok(());
                 }
                 Err(err) => {
+                    warn!(">=> {remote} reconnecting: {err}");
                     self.connections.remove(&remote);
                     buf = err.0
                 }
             }
         }
-        let (sender, receiver) = unbounded_channel::<B>();
+        let (sender, receiver) = unbounded_channel();
         self.protocol.connect(remote, self.on_buf.clone(), receiver);
         if sender.send(buf).is_err() {
             warn!(">=> {remote} new connection immediately fail")
@@ -239,17 +243,28 @@ impl<P: Protocol, B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send +
         Incoming(event): Incoming<P::Incoming>,
         _: &mut impl Timer,
     ) -> anyhow::Result<()> {
-        let (sender, receiver) = unbounded_channel::<B>();
+        let (sender, receiver) = unbounded_channel();
         if let Some(remote) = P::accept(event, self.on_buf.clone(), receiver) {
-            let replaced = self.connections.insert(
-                remote,
-                Connection {
+            // let replaced = self.connections.insert(
+            //     remote,
+            //     Connection {
+            //         sender,
+            //         using: true,
+            //     },
+            // );
+            // if replaced.is_some() {
+            //     warn!("<<< {remote} replacing previous connection")
+            // }
+            // always prefer to keep the connection created locally
+            // the connection in `self.connections` may not be created locally, but the incoming
+            // connection is definitely created remotely
+            if let Entry::Vacant(entry) = self.connections.entry(remote) {
+                entry.insert(Connection {
                     sender,
-                    using: false,
-                },
-            );
-            if replaced.is_some() {
-                warn!("<<< {remote} replacing previous connection")
+                    using: true,
+                });
+            } else {
+                warn!("<<< {remote} skip inserting incoming connection")
             }
         }
         Ok(())
@@ -270,6 +285,8 @@ impl<P, B, F> OnTimer for Dispatch<P, B, F> {
 }
 
 pub struct Tcp(bytes::Bytes);
+
+const TCP_PREAMBLE_LEN: usize = 16;
 
 impl Tcp {
     pub fn new(addr: impl Into<Option<SocketAddr>>) -> anyhow::Result<Self> {
@@ -488,9 +505,10 @@ fn quic_config() -> anyhow::Result<(quinn::ServerConfig, quinn::ClientConfig)> {
     let priv_key = rustls::PrivateKey(priv_key.serialize_der());
     let cert_chain = vec![rustls::Certificate(cert.der().to_vec())];
 
-    let server_config = quinn::ServerConfig::with_single_cert(cert_chain, priv_key)?;
-    // let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
+    let mut server_config = quinn::ServerConfig::with_single_cert(cert_chain, priv_key)?;
+    let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
     // transport_config.max_concurrent_uni_streams(0_u8.into());
+    transport_config.max_concurrent_uni_streams(65536u32.into());
 
     let mut roots = RootCertStore::empty();
     roots.add_parsable_certificates(&[issuer.der()]);
@@ -510,14 +528,17 @@ impl Quic {
         connection: quinn::Connection,
         mut on_buf: impl FnMut(&[u8]) -> anyhow::Result<()>,
     ) {
+        // tokio::time::sleep(Duration::from_millis(10)).await;
         if let Err(err) = async {
             loop {
                 let mut stream = match connection.accept_uni().await {
                     Ok(stream) => stream,
                     // TODO
-                    Err(quinn::ConnectionError::ConnectionClosed(_)) => {
-                        break anyhow::Result::<_>::Ok(())
-                    }
+                    Err(
+                        quinn::ConnectionError::ConnectionClosed(_)
+                        | quinn::ConnectionError::LocallyClosed
+                        | quinn::ConnectionError::TimedOut,
+                    ) => break anyhow::Result::<_>::Ok(()),
                     Err(err) => Err(err)?,
                 };
                 // determine incomplete stream?
@@ -541,6 +562,7 @@ impl Quic {
         {
             warn!(">>> {} {err}", connection.remote_address())
         }
+        // connection.close(Default::default(), Default::default())
     }
 }
 
@@ -552,12 +574,19 @@ impl Protocol for Quic {
         receiver: UnboundedReceiver<B>,
     ) {
         let endpoint = self.0.clone();
+        // tracing::debug!("{:?} connect {remote}", endpoint.local_addr());
         tokio::spawn(async move {
-            let connection = match async {
-                anyhow::Result::<_>::Ok(endpoint.connect(remote, "neatworks.quic")?.await?)
-            }
-            .await
-            {
+            let task = async {
+                let span = tracing::debug_span!("connecting", local = ?endpoint.local_addr(), remote = ?remote).entered();
+                let connecting = endpoint.connect(remote, "neatworks.quic")?;
+                drop(span);
+                anyhow::Result::<_>::Ok(
+                    connecting
+                        .instrument(tracing::debug_span!("connect", local = ?endpoint.local_addr(), remote = ?remote))
+                        .await?,
+                )
+            };
+            let connection = match task.await {
                 Ok(connection) => connection,
                 Err(err) => {
                     warn!(">>> {remote} {err}");
@@ -577,26 +606,34 @@ impl Protocol for Quic {
         receiver: UnboundedReceiver<B>,
     ) -> Option<SocketAddr> {
         let remote = connection.remote_address();
-        tokio::spawn(Quic::read_task(connection.clone(), on_buf));
-        tokio::spawn(Quic::write_task(connection, receiver));
+        tokio::spawn(Self::read_task(connection.clone(), on_buf));
+        tokio::spawn(Self::write_task(connection, receiver));
+        // tracing::debug!("{remote}");
         Some(remote)
     }
 }
 
 pub async fn quic_accept_session(
     Quic(endpoint): Quic,
-    mut sender: impl SendEvent<Incoming<quinn::Connection>>,
+    sender: impl SendEvent<Incoming<quinn::Connection>> + Clone + Send + 'static,
 ) -> anyhow::Result<()> {
     while let Some(conn) = endpoint.accept().await {
         let remote_addr = conn.remote_address();
-        let conn = match conn.await {
-            Ok(conn) => conn,
-            Err(err) => {
-                warn!("<<< {remote_addr} {err}");
-                continue;
-            }
-        };
-        sender.send(Incoming(conn))?
+        tracing::debug!(
+            "remote {remote_addr} >>> {:?} accept",
+            endpoint.local_addr()
+        );
+        let mut sender = sender.clone();
+        tokio::spawn(async move {
+            let conn = match conn.await {
+                Ok(conn) => conn,
+                Err(err) => {
+                    warn!("<<< {remote_addr} {err}");
+                    return;
+                }
+            };
+            let _ = sender.send(Incoming(conn));
+        });
     }
     Ok(())
 }
