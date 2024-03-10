@@ -137,8 +137,6 @@ struct Connection<B> {
     using: bool,
 }
 
-type Preamble = Option<SocketAddr>;
-
 impl<P, B, F> Dispatch<P, B, F> {
     pub fn new(protocol: P, on_buf: F) -> anyhow::Result<Self> {
         Ok(Self {
@@ -264,7 +262,7 @@ impl<P: Protocol, B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send +
                     using: true,
                 });
             } else {
-                warn!("<<< {remote} skip inserting incoming connection")
+                info!("<<< {remote} skip inserting incoming connection")
             }
         }
         Ok(())
@@ -285,6 +283,8 @@ impl<P, B, F> OnTimer for Dispatch<P, B, F> {
 }
 
 pub struct Tcp(bytes::Bytes);
+
+type TcpPreamble = Option<SocketAddr>;
 
 const TCP_PREAMBLE_LEN: usize = 16;
 
@@ -380,7 +380,7 @@ impl Protocol for Tcp {
         });
     }
 
-    type Incoming = (Preamble, TcpStream);
+    type Incoming = (TcpPreamble, TcpStream);
 
     fn accept<B: Buf>(
         (preamble, stream): Self::Incoming,
@@ -400,7 +400,7 @@ impl Protocol for Tcp {
 
 pub async fn tcp_accept_session(
     listener: TcpListener,
-    mut sender: impl SendEvent<Incoming<(Preamble, TcpStream)>>,
+    mut sender: impl SendEvent<Incoming<(TcpPreamble, TcpStream)>>,
 ) -> anyhow::Result<()> {
     loop {
         let (mut stream, peer_addr) = listener.accept().await?;
@@ -445,7 +445,7 @@ pub mod simplex {
 
     use crate::net::{Buf, IterAddr, SendMessage};
 
-    use super::{Preamble, TCP_PREAMBLE_LEN};
+    use super::{TcpPreamble, TCP_PREAMBLE_LEN};
 
     pub struct Tcp;
 
@@ -459,7 +459,7 @@ pub mod simplex {
                     let socket = tokio::net::TcpSocket::new_v4()?;
                     socket.set_reuseaddr(true)?;
                     let mut stream = socket.connect(dest).await?;
-                    let mut preamble = bincode::options().serialize(&Preamble::None)?;
+                    let mut preamble = bincode::options().serialize(&TcpPreamble::None)?;
                     preamble.resize(TCP_PREAMBLE_LEN, Default::default());
                     stream.write_all(&preamble).await?;
                     stream.write_u64(message.as_ref().len() as _).await?;
@@ -508,7 +508,8 @@ fn quic_config() -> anyhow::Result<(quinn::ServerConfig, quinn::ClientConfig)> {
     let mut server_config = quinn::ServerConfig::with_single_cert(cert_chain, priv_key)?;
     let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
     // transport_config.max_concurrent_uni_streams(0_u8.into());
-    transport_config.max_concurrent_uni_streams(65536u32.into());
+    transport_config.max_concurrent_uni_streams(4096u32.into());
+    transport_config.max_idle_timeout(Some(Duration::from_millis(2500).try_into()?));
 
     let mut roots = RootCertStore::empty();
     roots.add_parsable_certificates(&[issuer.der()]);
@@ -526,41 +527,51 @@ impl Quic {
 
     async fn read_task(
         connection: quinn::Connection,
-        mut on_buf: impl FnMut(&[u8]) -> anyhow::Result<()>,
+        on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
     ) {
-        // tokio::time::sleep(Duration::from_millis(10)).await;
-        if let Err(err) = async {
-            loop {
-                let mut stream = match connection.accept_uni().await {
-                    Ok(stream) => stream,
-                    // TODO
-                    Err(
-                        quinn::ConnectionError::ConnectionClosed(_)
-                        | quinn::ConnectionError::LocallyClosed
-                        | quinn::ConnectionError::TimedOut,
-                    ) => break anyhow::Result::<_>::Ok(()),
-                    Err(err) => Err(err)?,
-                };
-                // determine incomplete stream?
-                on_buf(&stream.read_to_end(MAX_BUF_LEN).await?)?
-            }
-        }
-        .await
-        {
-            warn!("<<< {} {err}", connection.remote_address())
+        let remote_addr = connection.remote_address();
+        loop {
+            let mut stream = match connection.accept_uni().await {
+                Ok(stream) => stream,
+                // TODO
+                Err(
+                    quinn::ConnectionError::ConnectionClosed(_)
+                    | quinn::ConnectionError::LocallyClosed
+                    | quinn::ConnectionError::TimedOut,
+                ) => break,
+                Err(err) => {
+                    warn!("<<< {remote_addr} {err}");
+                    break;
+                }
+            };
+            let mut on_buf = on_buf.clone();
+            tokio::spawn(async move {
+                if let Err(err) = async {
+                    // determine incomplete stream?
+                    on_buf(&stream.read_to_end(MAX_BUF_LEN).await?)?;
+                    anyhow::Result::<_>::Ok(())
+                }
+                .await
+                {
+                    warn!("<<< {remote_addr} {err}")
+                }
+            });
         }
     }
 
     async fn write_task<B: Buf>(connection: quinn::Connection, mut receiver: UnboundedReceiver<B>) {
-        if let Err(err) = async {
-            while let Some(buf) = receiver.recv().await {
-                connection.open_uni().await?.write_all(buf.as_ref()).await?
-            }
-            anyhow::Result::<_>::Ok(())
-        }
-        .await
-        {
-            warn!(">>> {} {err}", connection.remote_address())
+        while let Some(buf) = receiver.recv().await {
+            let connection = connection.clone();
+            tokio::spawn(async move {
+                if let Err(err) = async {
+                    connection.open_uni().await?.write_all(buf.as_ref()).await?;
+                    anyhow::Result::<_>::Ok(())
+                }
+                .await
+                {
+                    warn!(">>> {} {err}", connection.remote_address())
+                }
+            });
         }
         // connection.close(Default::default(), Default::default())
     }
@@ -629,14 +640,14 @@ pub async fn quic_accept_session(
         );
         let mut sender = sender.clone();
         tokio::spawn(async move {
-            let conn = match conn.await {
-                Ok(conn) => conn,
-                Err(err) => {
-                    warn!("<<< {remote_addr} {err}");
-                    return;
-                }
-            };
-            let _ = sender.send(Incoming(conn));
+            if let Err(err) = async {
+                sender.send(Incoming(conn.await?))?;
+                anyhow::Result::<_>::Ok(())
+            }
+            .await
+            {
+                warn!("<<< {remote_addr} {err}")
+            }
         });
     }
     Ok(())
