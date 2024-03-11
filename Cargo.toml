@@ -68,12 +68,12 @@ serde_json = "1.0.114"
 # bulk and artifacts
 tokio-util = "0.7.10"
 # QUIC net
-quinn = "0.10.2"
+quinn = { git = "https://github.com/quinn-rs/quinn", version = "0.11.0" }
+rustls = { version = "0.21.0", default-features = false, features = ["quic"] }
 # certificate
-rcgen = { version = "0.13.0", git = "https://github.com/rustls/rcgen", features = [
+rcgen = { git = "https://github.com/rustls/rcgen", version = "0.13.0", features = [
     "x509-parser",
 ] }
-rustls = { version = "0.21.0", default-features = false, features = ["quic"] }
 
 replication-control-messages = { version = "0.1.0", path = "tools/replication-control-messages" }
 [dev-dependencies]

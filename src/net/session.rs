@@ -589,8 +589,11 @@ impl Protocol for Quic {
         tokio::spawn(async move {
             let task = async {
                 let span = tracing::debug_span!("connecting", local = ?endpoint.local_addr(), remote = ?remote).entered();
-                let connecting = endpoint.connect(remote, "neatworks.quic")?;
-                drop(span);
+                let connecting = {
+                    let _s = tracing::debug_span!(parent: None, "dummy detached").entered();
+                    endpoint.connect(remote, "neatworks.quic")
+                }?;
+                drop(span.exit());
                 anyhow::Result::<_>::Ok(
                     connecting
                         .instrument(tracing::debug_span!("connect", local = ?endpoint.local_addr(), remote = ?remote))
@@ -634,7 +637,7 @@ pub async fn quic_accept_session(
 ) -> anyhow::Result<()> {
     while let Some(conn) = endpoint.accept().await {
         let remote_addr = conn.remote_address();
-        tracing::debug!(
+        tracing::trace!(
             "remote {remote_addr} >>> {:?} accept",
             endpoint.local_addr()
         );

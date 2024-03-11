@@ -23,10 +23,22 @@ use tokio::{
     task::JoinSet,
     time::{sleep, timeout_at, Instant},
 };
+use tracing::Level;
+use tracing_subscriber::{
+    filter::Targets, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt as _,
+};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_span_events(FmtSpan::CLOSE)
+        .with_max_level(Level::DEBUG)
+        // .with_ansi(false)
+        .finish()
+        // .with("augustus=debug".parse::<Targets>()?)
+        .with("warn".parse::<Targets>()?)
+        .init();
+
     let num_peer = args().nth(1).map(|n| n.parse::<u16>()).unwrap_or(Ok(50))?;
     let multiplier = args().nth(2).map(|n| n.parse::<u8>()).unwrap_or(Ok(200))?;
     let expected = num_peer as u32 * num_peer as u32 * multiplier as u32;
@@ -83,13 +95,13 @@ async fn main() -> anyhow::Result<()> {
             Ok(None) => break,
             Ok(Some(Ok(Ok(())))) => {}
             Ok(Some(result)) => {
-                println!("{result:?}");
+                eprintln!("{result:?}");
                 break;
             }
             Err(_) => {
                 let count = count.swap(0, SeqCst);
                 finished += count;
-                println!("{finished:6}/{expected:6} {count} messages/s");
+                eprintln!("{finished:6}/{expected:6} {count} messages/s");
                 deadline += Duration::from_secs(1)
             }
         }
