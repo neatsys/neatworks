@@ -8,6 +8,7 @@ rust-version = "1.75.0"
 members = [
     ".",
     "crates/entropy",
+    "crates/boson",
     "tools/replication-control",
     "tools/replication-control-messages",
     "tools/entropy-control",
