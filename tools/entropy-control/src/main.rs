@@ -285,7 +285,8 @@ async fn latency_benchmark(
             n,
             &mut out,
         )
-        .await?
+        .await?;
+        sleep(Duration::from_secs(1)).await
     }
 
     if !category.starts_with("ipfs") {

@@ -367,7 +367,10 @@ impl Protocol for Tcp {
                 stream.write_all(&preamble).await?;
                 anyhow::Result::<_>::Ok(stream)
             };
-            let stream = match task.await {
+            let stream = match task
+                .instrument(tracing::debug_span!("connect", ?remote))
+                .await
+            {
                 Ok(stream) => stream,
                 Err(err) => {
                     warn!(">=> {remote} {err}");
