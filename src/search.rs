@@ -328,7 +328,7 @@ enum SearchWorkerResult<S, E> {
     SpaceExhausted,
 }
 
-fn breath_first_worker<S: State, T, I, G, P>(
+fn breath_first_worker<S, T, I, G, P>(
     settings: Settings<I, G, P>,
     discovered: Arc<Discovered<T, S::Event>>,
     mut queue: Arc<SegQueue<(S, Arc<T>)>>,
@@ -337,7 +337,7 @@ fn breath_first_worker<S: State, T, I, G, P>(
     depth_barrier: Arc<Barrier>,
     search_finished: SearchFinished<SearchWorkerResult<S, S::Event>>,
 ) where
-    S: Into<T>,
+    S: State + Into<T>,
     S::Event: Clone,
     T: Eq + Hash,
     I: Fn(&S) -> anyhow::Result<()>,
@@ -430,14 +430,14 @@ fn breath_first_worker<S: State, T, I, G, P>(
     // println!("worker exit");
 }
 
-fn random_depth_first_worker<S: State, T, I, G, P>(
+fn random_depth_first_worker<S, T, I, G, P>(
     settings: Settings<I, G, P>,
     initial_state: S,
     num_probe: Arc<AtomicU32>,
     num_state: Arc<AtomicU32>,
     search_finished: SearchFinished<SearchResult<S, T, S::Event>>,
 ) where
-    S: Into<T>,
+    S: State + Into<T>,
     S::Event: Clone,
     T: Eq + Hash,
     I: Fn(&S) -> anyhow::Result<()>,

@@ -115,7 +115,7 @@ impl Iterator for InfinitePutGet {
                 .take(8)
                 .map(char::from)
                 .collect::<String>();
-            self.values[index] = value.clone();
+            self.values[index].clone_from(&value);
             (
                 Op::Put(format!("{}-{index}", self.namespace), value),
                 Result::PutOk,

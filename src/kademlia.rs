@@ -158,9 +158,7 @@ impl<K: Clone, A: Addr, const BITS: usize> Buckets<K, A, BITS> {
     pub fn remove(&mut self, id: &PeerId) -> Option<PeerRecord<K, A>> {
         let index = self.index(id);
         let bucket = &mut self.distances[index];
-        let Some(bucket_index) = bucket.records.iter().position(|record| &record.id == id) else {
-            return None;
-        };
+        let bucket_index = bucket.records.iter().position(|record| &record.id == id)?;
         let record = bucket.records.remove(bucket_index);
         if let Some(cache_record) = bucket.cached_records.pop() {
             bucket.records.push(cache_record)

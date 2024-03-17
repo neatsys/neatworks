@@ -337,7 +337,7 @@ impl<R> Workload<R> {
             .to_string();
         let mut pre_key = String::from("user");
         for _ in 0..self.settings.zero_padding - key.len() {
-            pre_key += &"0"
+            pre_key += "0"
         }
         pre_key + &key
     }
