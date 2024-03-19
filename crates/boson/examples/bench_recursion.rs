@@ -23,8 +23,6 @@ use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use structopt::StructOpt;
 use tracing::info;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, EnvFilter};
 
 type ProofTuple<F, C, const D: usize> = (
     ProofWithPublicInputs<F, C, D>,
@@ -35,13 +33,13 @@ type ProofTuple<F, C, const D: usize> = (
 #[derive(Clone, StructOpt, Debug)]
 #[structopt(name = "bench_recursion")]
 struct Options {
-    /// Verbose mode (-v, -vv, -vvv, etc.)
-    #[structopt(short, long, parse(from_occurrences))]
-    verbose: usize,
+    // /// Verbose mode (-v, -vv, -vvv, etc.)
+    // #[structopt(short, long, parse(from_occurrences))]
+    // verbose: usize,
 
-    /// Apply an env_filter compatible log filter
-    #[structopt(long, env, default_value)]
-    log_filter: String,
+    // /// Apply an env_filter compatible log filter
+    // #[structopt(long, env, default_value)]
+    // log_filter: String,
 
     /// Random seed for deterministic runs.
     /// If not specified a new seed is generated from OS entropy.
@@ -343,21 +341,7 @@ fn main() -> Result<()> {
     // Parse command line arguments, see `--help` for details.
     let options = Options::from_args_safe()?;
     // Initialize logging
-    let builder = tracing_subscriber::fmt();
-    let builder = match options.verbose {
-        0 => builder.with_max_level(LevelFilter::ERROR),
-        1 => builder.with_max_level(LevelFilter::INFO),
-        2 => builder.with_max_level(LevelFilter::DEBUG),
-        _ => builder.with_max_level(LevelFilter::TRACE),
-    };
-    builder
-        .finish()
-        .with(
-            EnvFilter::builder()
-                .with_default_directive(LevelFilter::TRACE.into())
-                .parse_lossy(options.log_filter),
-        )
-        .init();
+    tracing_subscriber::fmt::init();
 
     // Initialize randomness source
     let rng_seed = options.seed.unwrap_or_else(|| OsRng.next_u64());

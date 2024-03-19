@@ -24,8 +24,8 @@ opt-level = 3
 [profile.artifact]
 inherits = "release"
 # debug = true
-strip = true
-lto = true
+# strip = true
+# lto = true
 
 [dependencies]
 anyhow = { version = "1.0.79", features = ["backtrace"] }
