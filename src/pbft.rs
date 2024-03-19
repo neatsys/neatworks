@@ -381,7 +381,9 @@ impl<S, A: Addr> OnEvent<(Signed<PrePrepare>, Vec<Request<A>>)> for Replica<S, A
             .replace(pre_prepare.clone());
         assert!(replaced.is_none());
         self.log[pre_prepare.op_num as usize].view_num = self.view_num;
-        self.log[pre_prepare.op_num as usize].requests.clone_from(&requests);
+        self.log[pre_prepare.op_num as usize]
+            .requests
+            .clone_from(&requests);
         self.net.send(All, (pre_prepare, requests))
     }
 }

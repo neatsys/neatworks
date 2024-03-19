@@ -40,7 +40,6 @@ struct Options {
     // /// Apply an env_filter compatible log filter
     // #[structopt(long, env, default_value)]
     // log_filter: String,
-
     /// Random seed for deterministic runs.
     /// If not specified a new seed is generated from OS entropy.
     #[structopt(long, parse(try_from_str = parse_hex_u64))]

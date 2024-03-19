@@ -18,11 +18,44 @@ fn main() -> anyhow::Result<()> {
                 16
             );
 
-            let circuit = ClockCircuit::new(4, config)?;
-            let mut clock = Clock::genesis(&circuit);
-            for i in 0..10 {
-                clock = clock.increment(0, F::from_canonical_usize(i + 1), &circuit)?;
-                clock.verify(&circuit)?
+            let max_depth = 32;
+            let circuits = ClockCircuit::precompted(4, max_depth, config)?;
+            let clock = Clock::genesis(&circuits)?;
+            clock.verify(&circuits)?;
+            let mut clocks = Vec::new();
+            for index in 0..4 {
+                clocks.push(clock.clone());
+                // for i in 0..max_depth {
+                for i in 0..8 {
+                    let clock = clocks.last().as_ref().unwrap().increment(
+                        index,
+                        F::from_canonical_usize(i + 1),
+                        &circuits,
+                    )?;
+                    clock.verify(&circuits)?;
+                    if index == 0 {
+                        info!(
+                            "proof length of depth {i} = {}",
+                            clock.proof.to_bytes().len()
+                        )
+                    }
+                    clocks.push(clock)
+                }
+            }
+            for _ in 0..1000 {
+                use rand::seq::SliceRandom;
+                let clock1 = clocks.choose(&mut rand::thread_rng()).unwrap();
+                let clock2 = clocks.choose(&mut rand::thread_rng()).unwrap();
+                info!(
+                    "merge {:?}@{} and {:?}@{}",
+                    clock1.counters(),
+                    clock1.depth,
+                    clock2.counters(),
+                    clock2.depth
+                );
+                let clock = clock1.merge(clock2, &circuits)?;
+                info!("merged into {:?}@{}", clock.counters(), clock.depth);
+                clocks.push(clock)
             }
             anyhow::Result::<_>::Ok(())
         })?;

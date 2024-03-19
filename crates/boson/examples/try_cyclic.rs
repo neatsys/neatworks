@@ -158,7 +158,7 @@ fn main() -> anyhow::Result<()> {
     pw.set_bool_target(condition, true);
     pw.set_proof_with_pis_target(&inner_cyclic_proof_with_pis, &proof);
     pw.set_verifier_data_target(&verifier_data_target, &cyclic_circuit_data.verifier_only);
-    let mut timing = TimingTree::new(&format!("iteration 1"), log::Level::Info);
+    let mut timing = TimingTree::new("iteration 1", log::Level::Info);
     let mut proof = prove(
         &cyclic_circuit_data.prover_only,
         &cyclic_circuit_data.common,
