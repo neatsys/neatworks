@@ -18,7 +18,7 @@ fn main() -> anyhow::Result<()> {
                 16
             );
 
-            let max_depth = 32;
+            let max_depth = 16;
             let circuits = ClockCircuit::precompted(4, max_depth, config)?;
             let clock = Clock::genesis(&circuits)?;
             clock.verify(&circuits)?;
@@ -36,7 +36,7 @@ fn main() -> anyhow::Result<()> {
                     if index == 0 {
                         info!(
                             "proof length of depth {i} = {}",
-                            clock.proof.to_bytes().len()
+                            clock.proof1.to_bytes().len()
                         )
                     }
                     clocks.push(clock)
