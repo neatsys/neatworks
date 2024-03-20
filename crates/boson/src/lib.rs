@@ -49,7 +49,7 @@ pub struct ClockCircuitTargets {
     verifier_data2: VerifierCircuitTarget,  // ...same to `verifier_data1`
     lt: Vec<BoolTarget>,                    // ...all false
 
-    enable2: BoolTarget,
+    // enable2: BoolTarget,
 }
 
 impl ClockCircuit {
@@ -87,14 +87,14 @@ impl ClockCircuit {
         builder.verify_proof::<C>(&proof1, &verifier_data1, &inner.data.common);
         let verifier_data2 =
             builder.add_virtual_verifier_data(inner.data.common.config.fri_config.cap_height);
-        // builder.verify_proof::<C>(&proof2, &verifier_data2, &inner.data.common);
-        let enable2 = builder.add_virtual_bool_target_safe();
-        builder.conditionally_verify_proof_or_dummy::<C>(
-            enable2,
-            &proof2,
-            &verifier_data2,
-            &inner.data.common,
-        )?;
+        builder.verify_proof::<C>(&proof2, &verifier_data2, &inner.data.common);
+        // let enable2 = builder.add_virtual_bool_target_safe();
+        // builder.conditionally_verify_proof_or_dummy::<C>(
+        //     enable2,
+        //     &proof2,
+        //     &verifier_data2,
+        //     &inner.data.common,
+        // )?;
         // builder.conditionally_verify_proof::<C>(
         //     enable2,
         //     &proof2,
@@ -145,8 +145,7 @@ impl ClockCircuit {
                 updated_index,
                 updated_counter,
                 lt,
-
-                enable2,
+                // enable2,
             }),
         })
     }
@@ -203,7 +202,7 @@ impl Clock {
         for target in &targets.lt {
             pw.set_bool_target(*target, false)
         }
-        pw.set_bool_target(targets.enable2, false);
+        // pw.set_bool_target(targets.enable2, false);
 
         let mut timing = TimingTree::new("prove increment", log::Level::Info);
         let proof = prove(
@@ -218,18 +217,18 @@ impl Clock {
             proof,
             depth: self.depth + 1,
         };
-        // assert!(clock
-        //     .counters()
-        //     .iter()
-        //     .zip(self.counters())
-        //     .enumerate()
-        //     .all(|(i, (output_counter, input_counter))| {
-        //         if i == index {
-        //             *output_counter == counter
-        //         } else {
-        //             output_counter == input_counter
-        //         }
-        //     }));
+        assert!(clock
+            .counters()
+            .iter()
+            .zip(self.counters())
+            .enumerate()
+            .all(|(i, (output_counter, input_counter))| {
+                if i == index {
+                    *output_counter == counter
+                } else {
+                    output_counter == input_counter
+                }
+            }));
         Ok(clock)
     }
 
@@ -272,8 +271,7 @@ impl Clock {
                 counter1.to_canonical_u64() < counter2.to_canonical_u64(),
             )
         }
-
-        pw.set_bool_target(targets.enable2, true);
+        // pw.set_bool_target(targets.enable2, true);
 
         let mut timing = TimingTree::new("prove merge", log::Level::Info);
         let proof = prove(
@@ -288,17 +286,17 @@ impl Clock {
             proof,
             depth: depth + 1,
         };
-        // assert!(clock
-        //     .counters()
-        //     .iter()
-        //     .zip(clock1.counters())
-        //     .zip(clock2.counters())
-        //     .all(|((output_counter, input_counter1), input_counter2)| {
-        //         output_counter.to_canonical_u64()
-        //             == input_counter1
-        //                 .to_canonical_u64()
-        //                 .max(input_counter2.to_canonical_u64())
-        //     }));
+        assert!(clock
+            .counters()
+            .iter()
+            .zip(clock1.counters())
+            .zip(clock2.counters())
+            .all(|((output_counter, input_counter1), input_counter2)| {
+                output_counter.to_canonical_u64()
+                    == input_counter1
+                        .to_canonical_u64()
+                        .max(input_counter2.to_canonical_u64())
+            }));
         Ok(clock)
     }
 
