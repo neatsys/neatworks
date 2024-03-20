@@ -21,7 +21,7 @@ pub type F = <C as GenericConfig<D>>::F;
 #[derive(Clone)]
 pub struct Clock {
     pub proof: ProofWithPublicInputs<F, C, D>,
-    pub depth: usize,
+    // pub depth: usize,
 }
 
 impl Clock {
@@ -49,7 +49,7 @@ pub struct ClockCircuitTargets {
     verifier_data2: VerifierCircuitTarget,  // ...same to `verifier_data1`
     lt: Vec<BoolTarget>,                    // ...all false
 
-    // enable2: BoolTarget,
+                                            // enable2: BoolTarget,
 }
 
 impl ClockCircuit {
@@ -57,10 +57,6 @@ impl ClockCircuit {
         let mut builder = CircuitBuilder::<F, D>::new(config);
         let output_counters = builder.constants(&vec![F::ZERO; num_counter]);
         builder.register_public_inputs(&output_counters);
-        // while builder.num_gates() < 1 << 13 {
-        //     builder.add_gate(NoopGate, vec![]);
-        // }
-        // builder.print_gate_counts(0);
         Self {
             data: builder.build(),
             targets: None,
@@ -95,14 +91,6 @@ impl ClockCircuit {
         //     &verifier_data2,
         //     &inner.data.common,
         // )?;
-        // builder.conditionally_verify_proof::<C>(
-        //     enable2,
-        //     &proof2,
-        //     &verifier_data2,
-        //     &proof1,
-        //     &verifier_data1,
-        //     &inner.data.common,
-        // );
 
         let output_counters = input_counters1
             .iter()
@@ -150,13 +138,9 @@ impl ClockCircuit {
         })
     }
 
-    pub fn precompted(
-        num_counter: usize,
-        max_depth: usize,
-        config: CircuitConfig,
-    ) -> anyhow::Result<Vec<Self>> {
+    pub fn precompted(num_counter: usize, config: CircuitConfig) -> anyhow::Result<Vec<Self>> {
         let mut circuits = vec![Self::new_genesis(num_counter, config.clone())];
-        for i in 0..max_depth {
+        for i in 0..8 {
             circuits.push(Self::new(num_counter, &circuits[i], config.clone())?)
         }
         Ok(circuits)
@@ -174,8 +158,17 @@ impl Clock {
             &mut timing,
         )?;
         timing.print();
-        let clock = Self { proof, depth: 0 };
+        let mut clock = Self {
+            proof,
+            // depth: 0
+        };
         assert!(clock.counters().iter().all(|counter| *counter == F::ZERO));
+        for window in circuits.windows(2) {
+            let [inner_circuit, circuit] = window else {
+                unreachable!()
+            };
+            clock = clock.merge_internal(&clock, circuit, inner_circuit)?;
+        }
         Ok(clock)
     }
 
@@ -185,18 +178,18 @@ impl Clock {
         counter: F,
         circuits: &[ClockCircuit],
     ) -> anyhow::Result<Self> {
-        let circuit = circuits
-            .get(self.depth + 1)
-            .ok_or(anyhow::anyhow!("depth {} out of bound", self.depth + 1))?;
-        let targets = circuit.targets.as_ref().unwrap();
-        let inner_circuit = &circuits[self.depth];
+        let fallback_circuit = circuits.last().ok_or(anyhow::anyhow!("empty circuits"))?;
+        // let circuit = circuits.get(self.depth + 1).unwrap_or(fallback_circuit);
+        // let inner_circuit = circuits.get(self.depth).unwrap_or(fallback_circuit);
+        let circuit = fallback_circuit;
+        let inner_circuit = fallback_circuit;
 
         let mut pw = PartialWitness::new();
+        let targets = circuit.targets.as_ref().unwrap();
         pw.set_proof_with_pis_target(&targets.proof1, &self.proof);
         pw.set_verifier_data_target(&targets.verifier_data1, &inner_circuit.data.verifier_only);
         pw.set_target(targets.updated_index, F::from_canonical_usize(index));
         pw.set_target(targets.updated_counter, counter);
-        // pw.set_bool_target(targets.enable2, false);
         pw.set_proof_with_pis_target(&targets.proof2, &self.proof);
         pw.set_verifier_data_target(&targets.verifier_data2, &inner_circuit.data.verifier_only);
         for target in &targets.lt {
@@ -215,7 +208,7 @@ impl Clock {
 
         let clock = Self {
             proof,
-            depth: self.depth + 1,
+            // depth: self.depth + 1,
         };
         assert!(clock
             .counters()
@@ -233,23 +226,20 @@ impl Clock {
     }
 
     pub fn merge(&self, other: &Self, circuits: &[ClockCircuit]) -> anyhow::Result<Self> {
-        let depth = self.depth.max(other.depth);
-        let mut clock1 = self.clone();
-        while clock1.depth < depth {
-            clock1 = clock1.merge(&clock1, circuits)?;
-        }
-        let mut clock2 = other.clone();
-        while clock2.depth < depth {
-            clock2 = clock2.merge(&clock2, circuits)?;
-        }
+        let circuit = circuits.last().ok_or(anyhow::anyhow!("empty circuits"))?;
+        self.merge_internal(other, circuit, circuit)
+    }
 
-        let circuit = circuits
-            .get(depth + 1)
-            .ok_or(anyhow::anyhow!("depth {} out of bound", depth + 1))?;
-        let targets = circuit.targets.as_ref().unwrap();
-        let inner_circuit = &circuits[depth];
-
+    fn merge_internal(
+        &self,
+        other: &Self,
+        circuit: &ClockCircuit,
+        inner_circuit: &ClockCircuit,
+    ) -> anyhow::Result<Self> {
+        let clock1 = self;
+        let clock2 = other;
         let mut pw = PartialWitness::new();
+        let targets = circuit.targets.as_ref().unwrap();
         pw.set_proof_with_pis_target(&targets.proof1, &clock1.proof);
         pw.set_verifier_data_target(&targets.verifier_data1, &inner_circuit.data.verifier_only);
         pw.set_proof_with_pis_target(&targets.proof2, &clock2.proof);
@@ -284,7 +274,7 @@ impl Clock {
 
         let clock = Self {
             proof,
-            depth: depth + 1,
+            // depth: self.depth.max(other.depth),
         };
         assert!(clock
             .counters()
@@ -302,8 +292,8 @@ impl Clock {
 
     pub fn verify(&self, circuits: &[ClockCircuit]) -> anyhow::Result<()> {
         circuits
-            .get(self.depth)
-            .ok_or(anyhow::anyhow!("depth {} out of bound", self.depth))?
+            .last()
+            .ok_or(anyhow::anyhow!("empty circuits"))?
             .data
             .verify(self.proof.clone())
             .map_err(Into::into)

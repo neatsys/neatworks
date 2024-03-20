@@ -26,15 +26,14 @@ fn main() -> anyhow::Result<()> {
             // let clock2 = clock11.merge(&clock12, &circuits)?;
             // println!("{:?}", clock2.counters());
 
-            let max_depth = 32;
-            let circuits = ClockCircuit::precompted(4, max_depth, config)?;
+            let circuits = ClockCircuit::precompted(4, config)?;
             let clock = Clock::genesis(&circuits)?;
             clock.verify(&circuits)?;
             let mut clocks = Vec::new();
             for index in 0..4 {
                 clocks.push(clock.clone());
                 // for i in 0..max_depth {
-                for i in 0..8 {
+                for i in 0..10 {
                     let clock = clocks.last().as_ref().unwrap().increment(
                         index,
                         F::from_canonical_usize(i + 1),
@@ -55,14 +54,15 @@ fn main() -> anyhow::Result<()> {
                 let clock1 = clocks.choose(&mut rand::thread_rng()).unwrap();
                 let clock2 = clocks.choose(&mut rand::thread_rng()).unwrap();
                 info!(
-                    "merge {:?}@{} and {:?}@{}",
+                    "merge {:?} and {:?}",
                     clock1.counters(),
-                    clock1.depth,
+                    // clock1.depth,
                     clock2.counters(),
-                    clock2.depth
+                    // clock2.depth
                 );
                 let clock = clock1.merge(clock2, &circuits)?;
-                info!("merged into {:?}@{}", clock.counters(), clock.depth);
+                info!("merged into {:?}", clock.counters());
+                clock.verify(&circuits)?;
                 clocks.push(clock)
             }
             anyhow::Result::<_>::Ok(())
