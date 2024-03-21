@@ -18,9 +18,9 @@ use plonky2::plonk::prover::prove;
 use plonky2::util::serialization::DefaultGateSerializer;
 use plonky2::util::timing::TimingTree;
 use plonky2_maybe_rayon::rayon;
-use rand::rngs::OsRng;
-use rand::{RngCore, SeedableRng};
-use rand_chacha::ChaCha8Rng;
+// use rand::rngs::OsRng;
+// use rand::{RngCore, SeedableRng};
+// use rand_chacha::ChaCha8Rng;
 use structopt::StructOpt;
 use tracing::info;
 
@@ -42,8 +42,8 @@ struct Options {
     // log_filter: String,
     /// Random seed for deterministic runs.
     /// If not specified a new seed is generated from OS entropy.
-    #[structopt(long, parse(try_from_str = parse_hex_u64))]
-    seed: Option<u64>,
+    // #[structopt(long, parse(try_from_str = parse_hex_u64))]
+    // seed: Option<u64>,
 
     /// Number of compute threads to use. Defaults to number of cores. Can be a single
     /// value or a rust style range.
@@ -343,9 +343,9 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     // Initialize randomness source
-    let rng_seed = options.seed.unwrap_or_else(|| OsRng.next_u64());
-    info!("Using random seed {rng_seed:16x}");
-    let _rng = ChaCha8Rng::seed_from_u64(rng_seed);
+    // let rng_seed = options.seed.unwrap_or_else(|| OsRng.next_u64());
+    // info!("Using random seed {rng_seed:16x}");
+    // let _rng = ChaCha8Rng::seed_from_u64(rng_seed);
     // TODO: Use `rng` to create deterministic runs
 
     let num_cpus = std::thread::available_parallelism()?.get();
