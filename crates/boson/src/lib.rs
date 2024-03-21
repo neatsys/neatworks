@@ -1,7 +1,7 @@
 use plonky2::{
     field::types::{Field as _, PrimeField64},
     iop::{
-        target::{BoolTarget, Target},
+        target::Target,
         witness::{PartialWitness, WitnessWrite},
     },
     plonk::{
@@ -12,6 +12,10 @@ use plonky2::{
         prover::prove,
     },
     util::timing::TimingTree,
+};
+use plonky2_u32::gadgets::{
+    arithmetic_u32::{CircuitBuilderU32, U32Target},
+    range_check::range_check_u32_circuit,
 };
 
 pub const D: usize = 2;
@@ -56,7 +60,6 @@ struct ClockCircuitTargets<const S: usize> {
     // merge inputs, when incrementing...
     proof2: ProofWithPublicInputsTarget<D>, // ...same to `proof1`
     verifier_data2: VerifierCircuitTarget,  // ...same to `verifier_data1`
-    lt: [BoolTarget; S],                    // ...all false
 }
 
 impl<const S: usize> ClockCircuit<S> {
@@ -81,7 +84,6 @@ impl<const S: usize> ClockCircuit<S> {
 
         let updated_index = builder.add_virtual_target();
         let updated_counter = builder.add_virtual_target();
-        let lt = [(); S].map(|()| builder.add_virtual_bool_target_safe());
 
         let verifier_data1 =
             builder.add_virtual_verifier_data(inner.data.common.config.fri_config.cap_height);
@@ -100,29 +102,22 @@ impl<const S: usize> ClockCircuit<S> {
         let output_counters = input_counters1
             .iter()
             .zip(input_counters2)
-            .zip(&lt)
             .enumerate()
-            .map(|(i, ((input_counter1, input_counter2), lt))| {
+            .map(|(i, (input_counter1, input_counter2))| {
                 let i = builder.constant(F::from_canonical_usize(i));
                 let is_updated = builder.is_equal(updated_index, i);
-                let x1 = builder.select(is_updated, updated_counter, *input_counter1);
-                let x2 = *input_counter2;
-                builder.range_check(x1, 31);
-                builder.range_check(x2, 31);
-                // diff = lt * x1 + -lt * x2
-                // (when lt == 1) = x1 - x2
-                // (when lt == -1) = x2 - x1
-                let diff = {
-                    let one = builder.one();
-                    let neg_one = builder.neg_one();
-                    let lt = builder.select(*lt, neg_one, one);
-                    let x1 = builder.mul(lt, x1);
-                    let gt = builder.neg(lt);
-                    let x2 = builder.mul(gt, x2);
-                    builder.add(x1, x2)
-                };
-                builder.range_check(diff, 31);
-                builder.select(*lt, x2, x1)
+                let x1 = U32Target(builder.select(is_updated, updated_counter, *input_counter1));
+                let x2 = U32Target(*input_counter2);
+                range_check_u32_circuit(&mut builder, vec![x1, x2]);
+                // max(x1, x2)
+                let zero = builder.zero_u32();
+                let (_, borrow) = builder.sub_u32(x1, x2, zero);
+                let lt = borrow; // lt == 1 <=> x1 < x2, otherwise 0
+                let one = builder.one_u32();
+                let (ge, _) = builder.sub_u32(one, lt, zero);
+                let (x1, _) = builder.mul_u32(ge, x1);
+                let (U32Target(output), _) = builder.mul_add_u32(lt, x2, x1);
+                output
             })
             .collect::<Vec<_>>();
 
@@ -137,7 +132,6 @@ impl<const S: usize> ClockCircuit<S> {
                 verifier_data2,
                 updated_index,
                 updated_counter,
-                lt,
                 // enable2,
             }),
         }
@@ -187,9 +181,6 @@ impl<const S: usize> Clock<S> {
         pw.set_target(targets.updated_counter, counter);
         pw.set_proof_with_pis_target(&targets.proof2, &self.proof);
         pw.set_verifier_data_target(&targets.verifier_data2, &inner_circuit.data.verifier_only);
-        for target in &targets.lt {
-            pw.set_bool_target(*target, false)
-        }
         // pw.set_bool_target(targets.enable2, false);
 
         let mut timing = TimingTree::new("prove increment", log::Level::Info);
@@ -240,15 +231,6 @@ impl<const S: usize> Clock<S> {
             F::from_canonical_usize(u32::MAX as _),
         );
         pw.set_target(targets.updated_counter, F::NEG_ONE);
-        for ((target, counter1), counter2) in targets
-            .lt
-            .iter()
-            .zip(clock1.counters())
-            .zip(clock2.counters())
-        {
-            // println!("{target:?} {counter1:?} {counter2:?}");
-            pw.set_bool_target(*target, counter1 < counter2)
-        }
         // pw.set_bool_target(targets.enable2, true);
 
         let mut timing = TimingTree::new("prove merge", log::Level::Info);
