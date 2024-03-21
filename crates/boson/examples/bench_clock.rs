@@ -6,7 +6,7 @@ use tracing::info;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
-    let config = CircuitConfig::standard_recursion_config();
+    let config = CircuitConfig::standard_ecc_config();
 
     rayon::ThreadPoolBuilder::new()
         .build()

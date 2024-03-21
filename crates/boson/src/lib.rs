@@ -31,8 +31,7 @@ use plonky2_ecdsa::{
     },
 };
 use plonky2_u32::gadgets::{
-    arithmetic_u32::{CircuitBuilderU32, U32Target},
-    multiple_comparison::list_le_u32_circuit,
+    arithmetic_u32::U32Target, multiple_comparison::list_le_u32_circuit,
     range_check::range_check_u32_circuit,
 };
 
@@ -72,7 +71,7 @@ struct ClockCircuitTargets<const S: usize> {
 
     // increment inputs, when merging...
     updated_index: Target,               // ...2^32
-    updated_counter: Target,             // ...F::NEG_ONE
+    updated_counter: BigUintTarget,      // ...F::NEG_ONE
     sig: (BigUintTarget, BigUintTarget), // ...sign F::NEG_ONE with DUMMY_KEY
 
     // enable2: BoolTarget,
@@ -107,7 +106,7 @@ impl<const S: usize> ClockCircuit<S> {
         let input_counters2 = &proof2.public_inputs[..S];
 
         let updated_index = builder.add_virtual_target();
-        let updated_counter = builder.add_virtual_target();
+        let updated_counter = builder.add_virtual_biguint_target(1);
         // although there is `add_virtual_nonnative_target`, but seems like currently it can only be
         // internally used by generators. there's no `set_nonnative_target` companion for witness
         let num_limbs = CircuitBuilder::<F, D>::num_nonnative_limbs::<Secp256K1Scalar>();
@@ -115,7 +114,7 @@ impl<const S: usize> ClockCircuit<S> {
             builder.add_virtual_biguint_target(num_limbs),
             builder.add_virtual_biguint_target(num_limbs),
         );
-        let sig = ECDSASignatureTarget {
+        let sig = ECDSASignatureTarget::<Secp256K1> {
             r: builder.biguint_to_nonnative(&r),
             s: builder.biguint_to_nonnative(&s),
         };
@@ -144,7 +143,11 @@ impl<const S: usize> ClockCircuit<S> {
                 let ECDSAPublicKey(key) = keys[i];
                 let i = builder.constant(F::from_canonical_usize(i));
                 let is_updated = builder.is_equal(updated_index, i);
-                let x1 = U32Target(builder.select(is_updated, updated_counter, *input_counter1));
+                let x1 = U32Target(builder.select(
+                    is_updated,
+                    updated_counter.get_limb(0).0,
+                    *input_counter1,
+                ));
 
                 let key = builder.constant_affine_point(key);
                 updated_key = builder.if_affine_point(is_updated, &key, &updated_key);
@@ -159,11 +162,7 @@ impl<const S: usize> ClockCircuit<S> {
             })
             .collect::<Vec<_>>();
 
-        let mut msg = BigUintTarget {
-            limbs: vec![U32Target(updated_counter)],
-        };
-        msg.limbs.resize_with(num_limbs, || builder.constant_u32(0));
-        let msg = builder.biguint_to_nonnative(&msg);
+        let msg = builder.biguint_to_nonnative::<Secp256K1Scalar>(&updated_counter);
         verify_message_circuit(&mut builder, msg, sig, ECDSAPublicKeyTarget(updated_key));
 
         builder.register_public_inputs(&output_counters);
@@ -207,7 +206,7 @@ impl<const S: usize> Clock<S> {
 
         let dummy_key = public_key(DUMMY_SECRET);
         let mut inner_circuit = circuit;
-        for _ in 0..3 {
+        for _ in 0..8 {
             circuit = ClockCircuit::new(&inner_circuit, &keys, dummy_key, config.clone());
             clock = clock.merge_internal(&clock, &circuit, &inner_circuit)?;
             inner_circuit = circuit;
@@ -226,7 +225,8 @@ impl<const S: usize> Clock<S> {
         let counter = self
             .counters()
             .nth(index)
-            .ok_or(anyhow::anyhow!("out of bound index {index}"))?;
+            .ok_or(anyhow::anyhow!("out of bound index {index}"))?
+            + 1;
         let inner_circuit = circuit;
 
         let mut pw = PartialWitness::new();
@@ -234,10 +234,11 @@ impl<const S: usize> Clock<S> {
         pw.set_proof_with_pis_target(&targets.proof1, &self.proof);
         pw.set_verifier_data_target(&targets.verifier_data1, &inner_circuit.data.verifier_only);
         pw.set_target(targets.updated_index, F::from_canonical_usize(index));
-        pw.set_target(targets.updated_counter, F::from_canonical_u32(counter));
+        pw.set_biguint_target(&targets.updated_counter, &counter.into());
 
         pw.set_proof_with_pis_target(&targets.proof2, &self.proof);
         pw.set_verifier_data_target(&targets.verifier_data2, &inner_circuit.data.verifier_only);
+
         let sig = sign_message(Secp256K1Scalar::from_canonical_u32(counter), secret);
         let (r, s) = &targets.sig;
         pw.set_biguint_target(r, &sig.r.to_canonical_biguint());
@@ -286,12 +287,9 @@ impl<const S: usize> Clock<S> {
         pw.set_verifier_data_target(&targets.verifier_data1, &inner_circuit.data.verifier_only);
         pw.set_proof_with_pis_target(&targets.proof2, &clock2.proof);
         pw.set_verifier_data_target(&targets.verifier_data2, &inner_circuit.data.verifier_only);
-        pw.set_target(
-            targets.updated_index,
-            F::from_canonical_usize(u32::MAX as _),
-        );
-        pw.set_target(targets.updated_counter, F::NEG_ONE);
-        let msg = Secp256K1Scalar::NEG_ONE;
+        pw.set_target(targets.updated_index, F::from_canonical_usize(S + 1));
+        pw.set_biguint_target(&targets.updated_counter, &u32::MAX.into());
+        let msg = Secp256K1Scalar::from_canonical_u32(u32::MAX);
         let sig = sign_message(msg, DUMMY_SECRET);
         let (r, s) = &targets.sig;
         pw.set_biguint_target(r, &sig.r.to_canonical_biguint());
