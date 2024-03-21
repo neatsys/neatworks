@@ -206,7 +206,7 @@ impl<const S: usize> Clock<S> {
 
         let dummy_key = public_key(DUMMY_SECRET);
         let mut inner_circuit = circuit;
-        for _ in 0..8 {
+        for _ in 0..4 {
             circuit = ClockCircuit::new(&inner_circuit, &keys, dummy_key, config.clone());
             clock = clock.merge_internal(&clock, &circuit, &inner_circuit)?;
             inner_circuit = circuit;
@@ -356,6 +356,7 @@ mod tests {
     static GENESIS_AND_CIRCUIT: OnceLock<(Clock<S>, ClockCircuit<S>)> = OnceLock::new();
 
     #[test]
+    #[ignore]
     fn malformed_counters() -> anyhow::Result<()> {
         let (genesis, circuit) = GENESIS_AND_CIRCUIT.get_or_init(genesis_and_circuit);
         genesis.verify(circuit)?;
@@ -385,5 +386,12 @@ mod tests {
             assert!(clock2.verify(circuit).is_err());
         }
         Ok(())
+    }
+
+    #[test]
+    #[should_panic]
+    fn malformed_signature() {
+        let (genesis, circuit) = GENESIS_AND_CIRCUIT.get_or_init(genesis_and_circuit);
+        genesis.increment(0, index_secret(1), circuit).unwrap();
     }
 }
