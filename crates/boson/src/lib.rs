@@ -19,43 +19,50 @@ pub type C = PoseidonGoldilocksConfig;
 pub type F = <C as GenericConfig<D>>::F;
 
 #[derive(Clone)]
-pub struct Clock {
+pub struct Clock<const S: usize> {
     pub proof: ProofWithPublicInputs<F, C, D>,
-    // pub depth: usize,
 }
 
-impl Clock {
-    pub fn counters(&self) -> &[F] {
-        &self.proof.public_inputs
+impl<const S: usize> Clock<S> {
+    pub fn counters(&self) -> impl Iterator<Item = u32> + '_ {
+        self.proof
+            .public_inputs
+            .iter()
+            .take(S)
+            .map(|counter| counter.to_canonical_u64() as _)
     }
 }
 
-pub struct ClockCircuit {
-    pub data: CircuitData<F, C, D>,
-    pub targets: Option<ClockCircuitTargets>,
+#[derive(Debug)]
+pub struct ClockCircuit<const S: usize> {
+    data: CircuitData<F, C, D>,
+    targets: Option<ClockCircuitTargets<S>>,
 }
 
-pub struct ClockCircuitTargets {
+#[derive(Debug)]
+struct ClockCircuitTargets<const S: usize> {
     // the only public input is the output clock, which is not expected to be set before proving
     // every target is witness
+
     // common inputs
     proof1: ProofWithPublicInputsTarget<D>,
     verifier_data1: VerifierCircuitTarget,
+
     // increment inputs, when merging set increment index to 2^32 and counter dangling
     updated_index: Target,
     updated_counter: Target,
+
+    // enable2: BoolTarget,
     // merge inputs, when incrementing...
     proof2: ProofWithPublicInputsTarget<D>, // ...same to `proof1`
     verifier_data2: VerifierCircuitTarget,  // ...same to `verifier_data1`
-    lt: Vec<BoolTarget>,                    // ...all false
-
-                                            // enable2: BoolTarget,
+    lt: [BoolTarget; S],                    // ...all false
 }
 
-impl ClockCircuit {
-    pub fn new_genesis(num_counter: usize, config: CircuitConfig) -> Self {
+impl<const S: usize> ClockCircuit<S> {
+    pub fn new_genesis(config: CircuitConfig) -> Self {
         let mut builder = CircuitBuilder::<F, D>::new(config);
-        let output_counters = builder.constants(&vec![F::ZERO; num_counter]);
+        let output_counters = builder.constants(&[F::ZERO; S]);
         builder.register_public_inputs(&output_counters);
         Self {
             data: builder.build(),
@@ -63,20 +70,18 @@ impl ClockCircuit {
         }
     }
 
-    pub fn new(num_counter: usize, inner: &Self, config: CircuitConfig) -> anyhow::Result<Self> {
+    pub fn new(inner: &Self, config: CircuitConfig) -> Self {
         let mut builder = CircuitBuilder::<F, D>::new(config);
 
         let proof1 = builder.add_virtual_proof_with_pis(&inner.data.common);
         // the slicing is not necessary for now, just in case we add more public inputs later
-        let input_counters1 = &proof1.public_inputs[..num_counter];
+        let input_counters1 = &proof1.public_inputs[..S];
         let proof2 = builder.add_virtual_proof_with_pis(&inner.data.common);
-        let input_counters2 = &proof2.public_inputs[..num_counter];
+        let input_counters2 = &proof2.public_inputs[..S];
 
         let updated_index = builder.add_virtual_target();
         let updated_counter = builder.add_virtual_target();
-        let lt = (0..num_counter)
-            .map(|_| builder.add_virtual_bool_target_safe())
-            .collect::<Vec<_>>();
+        let lt = [(); S].map(|()| builder.add_virtual_bool_target_safe());
 
         let verifier_data1 =
             builder.add_virtual_verifier_data(inner.data.common.config.fri_config.cap_height);
@@ -123,7 +128,7 @@ impl ClockCircuit {
 
         builder.register_public_inputs(&output_counters);
         builder.print_gate_counts(0);
-        Ok(Self {
+        Self {
             data: builder.build(),
             targets: Some(ClockCircuitTargets {
                 proof1,
@@ -135,21 +140,13 @@ impl ClockCircuit {
                 lt,
                 // enable2,
             }),
-        })
-    }
-
-    pub fn precompted(num_counter: usize, config: CircuitConfig) -> anyhow::Result<Vec<Self>> {
-        let mut circuits = vec![Self::new_genesis(num_counter, config.clone())];
-        for i in 0..8 {
-            circuits.push(Self::new(num_counter, &circuits[i], config.clone())?)
         }
-        Ok(circuits)
     }
 }
 
-impl Clock {
-    pub fn genesis(circuits: &[ClockCircuit]) -> anyhow::Result<Self> {
-        let circuit = circuits.first().ok_or(anyhow::anyhow!("empty circuits"))?;
+impl<const S: usize> Clock<S> {
+    pub fn genesis(config: CircuitConfig) -> anyhow::Result<(Self, ClockCircuit<S>)> {
+        let mut circuit = ClockCircuit::new_genesis(config.clone());
         let mut timing = TimingTree::new("prove genesis", log::Level::Info);
         let proof = prove(
             &circuit.data.prover_only,
@@ -162,27 +159,25 @@ impl Clock {
             proof,
             // depth: 0
         };
-        assert!(clock.counters().iter().all(|counter| *counter == F::ZERO));
-        for window in circuits.windows(2) {
-            let [inner_circuit, circuit] = window else {
-                unreachable!()
-            };
-            clock = clock.merge_internal(&clock, circuit, inner_circuit)?;
+
+        let mut inner_circuit = circuit;
+        for _ in 0..3 {
+            circuit = ClockCircuit::new(&inner_circuit, config.clone());
+            clock = clock.merge_internal(&clock, &circuit, &inner_circuit)?;
+            inner_circuit = circuit;
         }
-        Ok(clock)
+
+        assert!(clock.counters().all(|counter| counter == 0));
+        Ok((clock, inner_circuit))
     }
 
     pub fn increment(
         &self,
         index: usize,
         counter: F,
-        circuits: &[ClockCircuit],
+        circuit: &ClockCircuit<S>,
     ) -> anyhow::Result<Self> {
-        let fallback_circuit = circuits.last().ok_or(anyhow::anyhow!("empty circuits"))?;
-        // let circuit = circuits.get(self.depth + 1).unwrap_or(fallback_circuit);
-        // let inner_circuit = circuits.get(self.depth).unwrap_or(fallback_circuit);
-        let circuit = fallback_circuit;
-        let inner_circuit = fallback_circuit;
+        let inner_circuit = circuit;
 
         let mut pw = PartialWitness::new();
         let targets = circuit.targets.as_ref().unwrap();
@@ -210,31 +205,27 @@ impl Clock {
             proof,
             // depth: self.depth + 1,
         };
-        assert!(clock
-            .counters()
-            .iter()
-            .zip(self.counters())
-            .enumerate()
-            .all(|(i, (output_counter, input_counter))| {
+        assert!(clock.counters().zip(self.counters()).enumerate().all(
+            |(i, (output_counter, input_counter))| {
                 if i == index {
-                    *output_counter == counter
+                    output_counter == counter.to_canonical_u64() as _
                 } else {
                     output_counter == input_counter
                 }
-            }));
+            }
+        ));
         Ok(clock)
     }
 
-    pub fn merge(&self, other: &Self, circuits: &[ClockCircuit]) -> anyhow::Result<Self> {
-        let circuit = circuits.last().ok_or(anyhow::anyhow!("empty circuits"))?;
+    pub fn merge(&self, other: &Self, circuit: &ClockCircuit<S>) -> anyhow::Result<Self> {
         self.merge_internal(other, circuit, circuit)
     }
 
     fn merge_internal(
         &self,
         other: &Self,
-        circuit: &ClockCircuit,
-        inner_circuit: &ClockCircuit,
+        circuit: &ClockCircuit<S>,
+        inner_circuit: &ClockCircuit<S>,
     ) -> anyhow::Result<Self> {
         let clock1 = self;
         let clock2 = other;
@@ -256,10 +247,7 @@ impl Clock {
             .zip(clock2.counters())
         {
             // println!("{target:?} {counter1:?} {counter2:?}");
-            pw.set_bool_target(
-                *target,
-                counter1.to_canonical_u64() < counter2.to_canonical_u64(),
-            )
+            pw.set_bool_target(*target, counter1 < counter2)
         }
         // pw.set_bool_target(targets.enable2, true);
 
@@ -278,25 +266,16 @@ impl Clock {
         };
         assert!(clock
             .counters()
-            .iter()
             .zip(clock1.counters())
             .zip(clock2.counters())
             .all(|((output_counter, input_counter1), input_counter2)| {
-                output_counter.to_canonical_u64()
-                    == input_counter1
-                        .to_canonical_u64()
-                        .max(input_counter2.to_canonical_u64())
+                output_counter == input_counter1.max(input_counter2)
             }));
         Ok(clock)
     }
 
-    pub fn verify(&self, circuits: &[ClockCircuit]) -> anyhow::Result<()> {
-        circuits
-            .last()
-            .ok_or(anyhow::anyhow!("empty circuits"))?
-            .data
-            .verify(self.proof.clone())
-            .map_err(Into::into)
+    pub fn verify(&self, circuit: &ClockCircuit<S>) -> anyhow::Result<()> {
+        circuit.data.verify(self.proof.clone()).map_err(Into::into)
     }
 }
 
@@ -306,37 +285,41 @@ mod tests {
 
     use super::*;
 
-    fn circuits_and_genesis() -> (Vec<ClockCircuit>, Clock) {
-        let circuits =
-            ClockCircuit::precompted(4, CircuitConfig::standard_recursion_config()).unwrap();
-        let genesis = Clock::genesis(&circuits).unwrap();
-        (circuits, genesis)
+    const S: usize = 4;
+    fn genesis_and_circuit() -> (Clock<S>, ClockCircuit<S>) {
+        Clock::genesis(CircuitConfig::standard_recursion_config()).unwrap()
     }
 
-    static CIRCUITS_AND_GENESIS: OnceLock<(Vec<ClockCircuit>, Clock)> = OnceLock::new();
+    static GENESIS_AND_CIRCUIT: OnceLock<(Clock<S>, ClockCircuit<S>)> = OnceLock::new();
 
     #[test]
     fn malformed_counters() -> anyhow::Result<()> {
-        let (circuits, genesis) = CIRCUITS_AND_GENESIS.get_or_init(circuits_and_genesis);
-        genesis.verify(circuits)?;
+        let (genesis, circuit) = GENESIS_AND_CIRCUIT.get_or_init(genesis_and_circuit);
+        genesis.verify(circuit)?;
         {
             let mut genesis = genesis.clone();
             genesis.proof.public_inputs[0] = F::ONE;
-            assert!(genesis.verify(circuits).is_err());
+            assert!(genesis.verify(circuit).is_err());
         }
-        let clock1 = genesis.increment(0, F::ONE, circuits)?;
-        clock1.verify(circuits)?;
+        let clock1 = genesis.increment(0, F::ONE, circuit)?;
+        clock1.verify(circuit)?;
         {
             let mut clock1 = clock1.clone();
-            clock1.proof.public_inputs.clone_from(&genesis.proof.public_inputs);
-            assert!(clock1.verify(circuits).is_err());
+            clock1
+                .proof
+                .public_inputs
+                .clone_from(&genesis.proof.public_inputs);
+            assert!(clock1.verify(circuit).is_err());
         }
-        let clock2 = genesis.merge(&clock1, circuits)?;
-        clock2.verify(circuits)?;
+        let clock2 = genesis.merge(&clock1, circuit)?;
+        clock2.verify(circuit)?;
         {
             let mut clock2 = clock2.clone();
-            clock2.proof.public_inputs.clone_from(&genesis.proof.public_inputs);
-            assert!(clock2.verify(circuits).is_err());
+            clock2
+                .proof
+                .public_inputs
+                .clone_from(&genesis.proof.public_inputs);
+            assert!(clock2.verify(circuit).is_err());
         }
         Ok(())
     }

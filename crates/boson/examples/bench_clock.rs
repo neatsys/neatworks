@@ -1,5 +1,5 @@
 use anyhow::Context as _;
-use boson::{Clock, ClockCircuit, F};
+use boson::{Clock, F};
 use plonky2::{field::types::Field as _, plonk::circuit_data::CircuitConfig};
 use plonky2_maybe_rayon::rayon;
 use tracing::info;
@@ -18,17 +18,8 @@ fn main() -> anyhow::Result<()> {
                 16
             );
 
-            // let circuits = ClockCircuit::precompted(4, 2, config)?;
-            // let clock0 = Clock::genesis(&circuits)?;
-            // let clock11 = clock0.increment(0, F::ONE, &circuits)?;
-            // let clock12 = clock0.increment(1, F::ONE, &circuits)?;
-            // println!("{:?} {:?} ->", clock11.counters(), clock12.counters(),);
-            // let clock2 = clock11.merge(&clock12, &circuits)?;
-            // println!("{:?}", clock2.counters());
-
-            let circuits = ClockCircuit::precompted(4, config)?;
-            let clock = Clock::genesis(&circuits)?;
-            clock.verify(&circuits)?;
+            let (clock, circuit) = Clock::<1024>::genesis(config)?;
+            clock.verify(&circuit)?;
             let mut clocks = Vec::new();
             for index in 0..4 {
                 clocks.push(clock.clone());
@@ -37,9 +28,9 @@ fn main() -> anyhow::Result<()> {
                     let clock = clocks.last().as_ref().unwrap().increment(
                         index,
                         F::from_canonical_usize(i + 1),
-                        &circuits,
+                        &circuit,
                     )?;
-                    clock.verify(&circuits)?;
+                    clock.verify(&circuit)?;
                     if index == 0 {
                         info!(
                             "proof length of depth {i} = {}",
@@ -53,16 +44,14 @@ fn main() -> anyhow::Result<()> {
                 use rand::seq::SliceRandom;
                 let clock1 = clocks.choose(&mut rand::thread_rng()).unwrap();
                 let clock2 = clocks.choose(&mut rand::thread_rng()).unwrap();
-                info!(
-                    "merge {:?} and {:?}",
-                    clock1.counters(),
-                    // clock1.depth,
-                    clock2.counters(),
-                    // clock2.depth
-                );
-                let clock = clock1.merge(clock2, &circuits)?;
-                info!("merged into {:?}", clock.counters());
-                clock.verify(&circuits)?;
+                // info!(
+                //     "merge {:?} and {:?}",
+                //     clock1.counters().collect::<Vec<_>>(),
+                //     clock2.counters().collect::<Vec<_>>(),
+                // );
+                let clock = clock1.merge(clock2, &circuit)?;
+                // info!("merged into {:?}", clock.counters().collect::<Vec<_>>());
+                clock.verify(&circuit)?;
                 clocks.push(clock)
             }
             anyhow::Result::<_>::Ok(())
