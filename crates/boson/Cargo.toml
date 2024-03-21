@@ -11,6 +11,7 @@ plonky2 = "0.2.0"
 tracing = "0.1.40"
 log = "0.4.21"
 plonky2_u32 = { git = "https://github.com/sgdxbc/plonky2-u32", version = "0.1.0" }
+plonky2_ecdsa = { git = "https://github.com/sgdxbc/plonky2-ecdsa", version = "0.1.0", features = ["parallel"] }
 
 [dev-dependencies]
 itertools = "0.12.1"
