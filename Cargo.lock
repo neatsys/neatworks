@@ -1658,7 +1658,7 @@ checksum = "626dec3cac7cc0e1577a2ec3fc496277ec2baa084bebad95bb6fdbfae235f84c"
 [[package]]
 name = "plonky2"
 version = "0.2.1"
-source = "git+https://github.com/sgdxbc/plonky2#db433df34d76521601a97e7faccb096b79718ed5"
+source = "git+https://github.com/sgdxbc/plonky2#ef2d5b34dc8a47ce6747d2d98ecdce56c59ec038"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1682,7 +1682,7 @@ dependencies = [
 [[package]]
 name = "plonky2_ecdsa"
 version = "0.1.0"
-source = "git+https://github.com/sgdxbc/plonky2-ecdsa#621c9aaf35d8f7c1c9806cc10573f05641d12cec"
+source = "git+https://github.com/sgdxbc/plonky2-ecdsa#6a8603b9fed1c5739d0f035b5075d01e9d935553"
 dependencies = [
  "anyhow",
  "itertools 0.10.5",
@@ -1696,7 +1696,7 @@ dependencies = [
 [[package]]
 name = "plonky2_field"
 version = "0.2.1"
-source = "git+https://github.com/sgdxbc/plonky2#db433df34d76521601a97e7faccb096b79718ed5"
+source = "git+https://github.com/sgdxbc/plonky2#ef2d5b34dc8a47ce6747d2d98ecdce56c59ec038"
 dependencies = [
  "anyhow",
  "itertools 0.11.0",
@@ -1720,7 +1720,7 @@ dependencies = [
 [[package]]
 name = "plonky2_maybe_rayon"
 version = "0.2.0"
-source = "git+https://github.com/sgdxbc/plonky2#db433df34d76521601a97e7faccb096b79718ed5"
+source = "git+https://github.com/sgdxbc/plonky2#ef2d5b34dc8a47ce6747d2d98ecdce56c59ec038"
 dependencies = [
  "rayon",
 ]
@@ -1739,7 +1739,7 @@ dependencies = [
 [[package]]
 name = "plonky2_util"
 version = "0.2.0"
-source = "git+https://github.com/sgdxbc/plonky2#db433df34d76521601a97e7faccb096b79718ed5"
+source = "git+https://github.com/sgdxbc/plonky2#ef2d5b34dc8a47ce6747d2d98ecdce56c59ec038"
 
 [[package]]
 name = "powerfmt"

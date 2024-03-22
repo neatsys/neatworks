@@ -56,7 +56,7 @@ impl<const S: usize> Clock<S> {
 
 #[derive(Debug)]
 pub struct ClockCircuit<const S: usize> {
-    data: CircuitData<F, C, D>,
+    pub data: CircuitData<F, C, D>,
     targets: Option<ClockCircuitTargets<S>>,
 }
 
@@ -181,6 +181,12 @@ impl<const S: usize> ClockCircuit<S> {
             }),
         }
     }
+
+    // pub fn targets_to_bytes(&self) -> Vec<u8> {
+    //     let Some(targets) = &self.targets else {
+    //         return Default::default();
+    //     };
+    // }
 }
 
 const DUMMY_SECRET: ECDSASecretKey<Secp256K1> = ECDSASecretKey(Secp256K1Scalar::ONE);
