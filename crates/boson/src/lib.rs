@@ -1,3 +1,5 @@
+pub mod ser;
+
 use plonky2::{
     field::{
         secp256k1_scalar::Secp256K1Scalar,
@@ -182,11 +184,33 @@ impl<const S: usize> ClockCircuit<S> {
         }
     }
 
-    // pub fn targets_to_bytes(&self) -> Vec<u8> {
-    //     let Some(targets) = &self.targets else {
-    //         return Default::default();
-    //     };
-    // }
+    pub fn with_data(data: CircuitData<F, C, D>, config: CircuitConfig) -> Self {
+        Self {
+            targets: Some(ClockCircuitTargets::new(&data, config)),
+            data,
+        }
+    }
+}
+
+impl<const S: usize> ClockCircuitTargets<S> {
+    fn new(circuit: &CircuitData<F, C, D>, config: CircuitConfig) -> Self {
+        let mut builder = CircuitBuilder::new(config);
+        let num_limbs = CircuitBuilder::<F, D>::num_nonnative_limbs::<Secp256K1Scalar>();
+        Self {
+            proof1: builder.add_virtual_proof_with_pis(&circuit.common),
+            proof2: builder.add_virtual_proof_with_pis(&circuit.common),
+            updated_index: builder.add_virtual_target(),
+            updated_counter: builder.add_virtual_biguint_target(1),
+            sig: (
+                builder.add_virtual_biguint_target(num_limbs),
+                builder.add_virtual_biguint_target(num_limbs),
+            ),
+            verifier_data1: builder
+                .add_virtual_verifier_data(circuit.common.config.fri_config.cap_height),
+            verifier_data2: builder
+                .add_virtual_verifier_data(circuit.common.config.fri_config.cap_height),
+        }
+    }
 }
 
 const DUMMY_SECRET: ECDSASecretKey<Secp256K1> = ECDSASecretKey(Secp256K1Scalar::ONE);
@@ -220,6 +244,14 @@ impl<const S: usize> Clock<S> {
 
         assert!(clock.counters().all(|counter| counter == 0));
         Ok((clock, inner_circuit))
+    }
+
+    pub fn with_proof_and_circuit(
+        proof: ProofWithPublicInputs<F, C, D>,
+        data: CircuitData<F, C, D>,
+        config: CircuitConfig,
+    ) -> (Self, ClockCircuit<S>) {
+        (Self { proof }, ClockCircuit::with_data(data, config))
     }
 
     pub fn increment(
