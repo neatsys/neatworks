@@ -356,7 +356,6 @@ mod tests {
     static GENESIS_AND_CIRCUIT: OnceLock<(Clock<S>, ClockCircuit<S>)> = OnceLock::new();
 
     #[test]
-    #[ignore]
     fn malformed_counters() -> anyhow::Result<()> {
         let (genesis, circuit) = GENESIS_AND_CIRCUIT.get_or_init(genesis_and_circuit);
         genesis.verify(circuit)?;
@@ -393,5 +392,20 @@ mod tests {
     fn malformed_signature() {
         let (genesis, circuit) = GENESIS_AND_CIRCUIT.get_or_init(genesis_and_circuit);
         genesis.increment(0, index_secret(1), circuit).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn malformed_counters_recursive() {
+        let (genesis, circuit) = GENESIS_AND_CIRCUIT.get_or_init(genesis_and_circuit);
+        let clock1 = genesis.increment(0, index_secret(0), circuit);
+        let Ok(mut clock1) = clock1 else {
+            return; // to trigger `should_panic` failure
+        };
+        clock1
+            .proof
+            .public_inputs
+            .clone_from(&genesis.proof.public_inputs);
+        clock1.merge(&clock1, circuit).unwrap();
     }
 }
