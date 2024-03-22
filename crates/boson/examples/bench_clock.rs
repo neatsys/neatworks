@@ -48,10 +48,15 @@ fn main() -> anyhow::Result<()> {
                     .unwrap()
                     .increment(index, index_secret(index), &circuit)?;
             clock.verify(&circuit)?;
+            let compressed = clock.proof.clone().compress(
+                &circuit.data.verifier_only.circuit_digest,
+                &circuit.data.common,
+            )?;
             if index == 0 {
                 info!(
-                    "proof length of depth {i} = {}",
-                    clock.proof.to_bytes().len()
+                    "depth {i} proof size {} compressed {}",
+                    clock.proof.to_bytes().len(),
+                    compressed.to_bytes().len()
                 )
             }
             clocks.push(clock)

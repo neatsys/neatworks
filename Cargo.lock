@@ -352,7 +352,6 @@ dependencies = [
  "itertools 0.12.1",
  "log",
  "plonky2",
- "plonky2_ecdsa",
  "plonky2_u32",
  "rand",
  "structopt",
@@ -1669,7 +1668,7 @@ dependencies = [
  "log",
  "num",
  "plonky2_field",
- "plonky2_maybe_rayon 0.2.0 (git+https://github.com/sgdxbc/plonky2)",
+ "plonky2_maybe_rayon",
  "plonky2_util",
  "rand",
  "rand_chacha",
@@ -1677,20 +1676,6 @@ dependencies = [
  "static_assertions",
  "unroll",
  "web-time",
-]
-
-[[package]]
-name = "plonky2_ecdsa"
-version = "0.1.0"
-source = "git+https://github.com/sgdxbc/plonky2-ecdsa#6a8603b9fed1c5739d0f035b5075d01e9d935553"
-dependencies = [
- "anyhow",
- "itertools 0.10.5",
- "num",
- "plonky2",
- "plonky2_maybe_rayon 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "plonky2_u32",
- "serde",
 ]
 
 [[package]]
@@ -1706,15 +1691,6 @@ dependencies = [
  "serde",
  "static_assertions",
  "unroll",
-]
-
-[[package]]
-name = "plonky2_maybe_rayon"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92ff44a90aaca13e10e7ddf8fab815ba1b404c3f7c3ca82aaf11c46beabaa923"
-dependencies = [
- "rayon",
 ]
 
 [[package]]

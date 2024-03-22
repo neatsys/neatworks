@@ -1,9 +1,11 @@
 pub mod ser;
 
 use plonky2::{
-    field::{
-        secp256k1_scalar::Secp256K1Scalar,
-        types::{Field, PrimeField, PrimeField64},
+    field::types::{Field, PrimeField64},
+    hash::{
+        hash_types::{HashOut, HashOutTarget},
+        hashing::hash_n_to_hash_no_pad,
+        poseidon::{PoseidonHash, PoseidonPermutation},
     },
     iop::{
         target::Target,
@@ -17,20 +19,6 @@ use plonky2::{
         prover::prove,
     },
     util::timing::TimingTree,
-};
-use plonky2_ecdsa::{
-    curve::{
-        curve_types::{Curve as _, CurveScalar},
-        ecdsa::{sign_message, ECDSAPublicKey, ECDSASecretKey},
-        secp256k1::Secp256K1,
-    },
-    gadgets::{
-        biguint::{BigUintTarget, CircuitBuilderBiguint, WitnessBigUint},
-        curve::CircuitBuilderCurve,
-        curve_windowed_mul::CircuitBuilderWindowedMul,
-        ecdsa::{verify_message_circuit, ECDSAPublicKeyTarget, ECDSASignatureTarget},
-        nonnative::CircuitBuilderNonNative,
-    },
 };
 use plonky2_u32::gadgets::{
     arithmetic_u32::U32Target, multiple_comparison::list_le_u32_circuit,
@@ -72,9 +60,9 @@ struct ClockCircuitTargets<const S: usize> {
     verifier_data1: VerifierCircuitTarget,
 
     // increment inputs, when merging...
-    updated_index: Target,               // ...2^32
-    updated_counter: BigUintTarget,      // ...F::NEG_ONE
-    sig: (BigUintTarget, BigUintTarget), // ...sign F::NEG_ONE with DUMMY_KEY
+    updated_index: Target,   // ...2^32
+    updated_counter: Target, // ...F::NEG_ONE
+    sig: Target,             // ...sign F::NEG_ONE with DUMMY_KEY
 
     // enable2: BoolTarget,
     // merge inputs, when incrementing...
@@ -95,8 +83,8 @@ impl<const S: usize> ClockCircuit<S> {
 
     pub fn new(
         inner: &Self,
-        keys: &[ECDSAPublicKey<Secp256K1>; S],
-        ECDSAPublicKey(dummy_key): ECDSAPublicKey<Secp256K1>,
+        keys: &[HashOut<F>; S],
+        dummy_key: HashOut<F>,
         config: CircuitConfig,
     ) -> Self {
         let mut builder = CircuitBuilder::<F, D>::new(config);
@@ -108,18 +96,11 @@ impl<const S: usize> ClockCircuit<S> {
         let input_counters2 = &proof2.public_inputs[..S];
 
         let updated_index = builder.add_virtual_target();
-        let updated_counter = builder.add_virtual_biguint_target(1);
+        let updated_counter = builder.add_virtual_target();
         // although there is `add_virtual_nonnative_target`, but seems like currently it can only be
         // internally used by generators. there's no `set_nonnative_target` companion for witness
-        let num_limbs = CircuitBuilder::<F, D>::num_nonnative_limbs::<Secp256K1Scalar>();
-        let (r, s) = (
-            builder.add_virtual_biguint_target(num_limbs),
-            builder.add_virtual_biguint_target(num_limbs),
-        );
-        let sig = ECDSASignatureTarget::<Secp256K1> {
-            r: builder.biguint_to_nonnative(&r),
-            s: builder.biguint_to_nonnative(&s),
-        };
+        // let num_limbs = CircuitBuilder::<F, D>::num_nonnative_limbs::<Secp256K1Scalar>();
+        let sig = builder.add_virtual_target();
 
         let verifier_data1 =
             builder.add_virtual_verifier_data(inner.data.common.config.fri_config.cap_height);
@@ -135,24 +116,28 @@ impl<const S: usize> ClockCircuit<S> {
         //     &inner.data.common,
         // )?;
 
-        let mut updated_key = builder.constant_affine_point(dummy_key);
+        let mut updated_key = builder.constant_hash(dummy_key);
 
         let output_counters = input_counters1
             .iter()
             .zip(input_counters2)
             .enumerate()
             .map(|(i, (input_counter1, input_counter2))| {
-                let ECDSAPublicKey(key) = keys[i];
+                let key = keys[i];
                 let i = builder.constant(F::from_canonical_usize(i));
                 let is_updated = builder.is_equal(updated_index, i);
-                let x1 = U32Target(builder.select(
-                    is_updated,
-                    updated_counter.get_limb(0).0,
-                    *input_counter1,
-                ));
+                let x1 = U32Target(builder.select(is_updated, updated_counter, *input_counter1));
 
-                let key = builder.constant_affine_point(key);
-                updated_key = builder.if_affine_point(is_updated, &key, &updated_key);
+                let key = builder.constant_hash(key);
+                let elements = updated_key
+                    .elements
+                    .iter()
+                    .zip(&key.elements)
+                    .map(|(updated_target, target)| {
+                        builder.select(is_updated, *target, *updated_target)
+                    })
+                    .collect();
+                updated_key = HashOutTarget::from_vec(elements);
 
                 let x2 = U32Target(*input_counter2);
                 range_check_u32_circuit(&mut builder, vec![x1, x2]);
@@ -164,8 +149,10 @@ impl<const S: usize> ClockCircuit<S> {
             })
             .collect::<Vec<_>>();
 
-        let msg = builder.biguint_to_nonnative::<Secp256K1Scalar>(&updated_counter);
-        verify_message_circuit(&mut builder, msg, sig, ECDSAPublicKeyTarget(updated_key));
+        // let msg = builder.biguint_to_nonnative::<Secp256K1Scalar>(&updated_counter);
+        // verify_message_circuit(&mut builder, msg, sig, ECDSAPublicKeyTarget(updated_key));
+        let key = builder.hash_n_to_hash_no_pad::<PoseidonHash>(vec![sig]);
+        builder.connect_hashes(key, updated_key);
 
         builder.register_public_inputs(&output_counters);
         builder.print_gate_counts(0);
@@ -178,7 +165,7 @@ impl<const S: usize> ClockCircuit<S> {
                 verifier_data2,
                 updated_index,
                 updated_counter,
-                sig: (r, s),
+                sig,
                 // enable2,
             }),
         }
@@ -195,16 +182,13 @@ impl<const S: usize> ClockCircuit<S> {
 impl<const S: usize> ClockCircuitTargets<S> {
     fn new(circuit: &CircuitData<F, C, D>, config: CircuitConfig) -> Self {
         let mut builder = CircuitBuilder::new(config);
-        let num_limbs = CircuitBuilder::<F, D>::num_nonnative_limbs::<Secp256K1Scalar>();
+        // let num_limbs = CircuitBuilder::<F, D>::num_nonnative_limbs::<Secp256K1Scalar>();
         Self {
             proof1: builder.add_virtual_proof_with_pis(&circuit.common),
             proof2: builder.add_virtual_proof_with_pis(&circuit.common),
             updated_index: builder.add_virtual_target(),
-            updated_counter: builder.add_virtual_biguint_target(1),
-            sig: (
-                builder.add_virtual_biguint_target(num_limbs),
-                builder.add_virtual_biguint_target(num_limbs),
-            ),
+            updated_counter: builder.add_virtual_target(),
+            sig: builder.add_virtual_target(),
             verifier_data1: builder
                 .add_virtual_verifier_data(circuit.common.config.fri_config.cap_height),
             verifier_data2: builder
@@ -213,11 +197,11 @@ impl<const S: usize> ClockCircuitTargets<S> {
     }
 }
 
-const DUMMY_SECRET: ECDSASecretKey<Secp256K1> = ECDSASecretKey(Secp256K1Scalar::ONE);
+const DUMMY_SECRET: F = F::NEG_ONE;
 
 impl<const S: usize> Clock<S> {
     pub fn genesis(
-        keys: [ECDSAPublicKey<Secp256K1>; S],
+        keys: [HashOut<F>; S],
         config: CircuitConfig,
     ) -> anyhow::Result<(Self, ClockCircuit<S>)> {
         let mut circuit = ClockCircuit::new_genesis(config.clone());
@@ -257,7 +241,7 @@ impl<const S: usize> Clock<S> {
     pub fn increment(
         &self,
         index: usize,
-        secret: ECDSASecretKey<Secp256K1>,
+        secret: F,
         circuit: &ClockCircuit<S>,
     ) -> anyhow::Result<Self> {
         let counter = self
@@ -272,15 +256,13 @@ impl<const S: usize> Clock<S> {
         pw.set_proof_with_pis_target(&targets.proof1, &self.proof);
         pw.set_verifier_data_target(&targets.verifier_data1, &inner_circuit.data.verifier_only);
         pw.set_target(targets.updated_index, F::from_canonical_usize(index));
-        pw.set_biguint_target(&targets.updated_counter, &counter.into());
+        pw.set_target(targets.updated_counter, F::from_canonical_u32(counter));
 
         pw.set_proof_with_pis_target(&targets.proof2, &self.proof);
         pw.set_verifier_data_target(&targets.verifier_data2, &inner_circuit.data.verifier_only);
 
-        let sig = sign_message(Secp256K1Scalar::from_canonical_u32(counter), secret);
-        let (r, s) = &targets.sig;
-        pw.set_biguint_target(r, &sig.r.to_canonical_biguint());
-        pw.set_biguint_target(s, &sig.s.to_canonical_biguint());
+        // let sig = sign_message(Secp256K1Scalar::from_canonical_u32(counter), secret);
+        pw.set_target(targets.sig, secret);
 
         let mut timing = TimingTree::new("prove increment", log::Level::Info);
         let proof = prove(
@@ -326,12 +308,10 @@ impl<const S: usize> Clock<S> {
         pw.set_proof_with_pis_target(&targets.proof2, &clock2.proof);
         pw.set_verifier_data_target(&targets.verifier_data2, &inner_circuit.data.verifier_only);
         pw.set_target(targets.updated_index, F::from_canonical_usize(S + 1));
-        pw.set_biguint_target(&targets.updated_counter, &u32::MAX.into());
-        let msg = Secp256K1Scalar::from_canonical_u32(u32::MAX);
-        let sig = sign_message(msg, DUMMY_SECRET);
-        let (r, s) = &targets.sig;
-        pw.set_biguint_target(r, &sig.r.to_canonical_biguint());
-        pw.set_biguint_target(s, &sig.s.to_canonical_biguint());
+        pw.set_target(targets.updated_counter, F::from_canonical_u32(u32::MAX));
+        // let msg = Secp256K1Scalar::from_canonical_u32(u32::MAX);
+        // let sig = sign_message(msg, DUMMY_SECRET);
+        pw.set_target(targets.sig, DUMMY_SECRET);
 
         let mut timing = TimingTree::new("prove merge", log::Level::Info);
         let proof = prove(
@@ -361,12 +341,12 @@ impl<const S: usize> Clock<S> {
     }
 }
 
-pub fn index_secret(index: usize) -> ECDSASecretKey<Secp256K1> {
-    ECDSASecretKey(Secp256K1Scalar::from_canonical_usize(117418 + index))
+pub fn index_secret(index: usize) -> F {
+    F::from_canonical_usize(117418 + index)
 }
 
-pub fn public_key(ECDSASecretKey(secret): ECDSASecretKey<Secp256K1>) -> ECDSAPublicKey<Secp256K1> {
-    ECDSAPublicKey((CurveScalar(secret) * Secp256K1::GENERATOR_PROJECTIVE).to_affine())
+pub fn public_key(secret: F) -> HashOut<F> {
+    hash_n_to_hash_no_pad::<_, PoseidonPermutation<_>>(&[secret])
 }
 
 #[cfg(test)]

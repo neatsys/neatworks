@@ -1,6 +1,6 @@
 use plonky2::field::extension::Extendable;
-use plonky2::field::secp256k1_base::Secp256K1Base;
-use plonky2::field::secp256k1_scalar::Secp256K1Scalar;
+// use plonky2::field::secp256k1_base::Secp256K1Base;
+// use plonky2::field::secp256k1_scalar::Secp256K1Scalar;
 use plonky2::gates::arithmetic_base::ArithmeticGate;
 use plonky2::gates::arithmetic_extension::ArithmeticExtensionGate;
 use plonky2::gates::base_sum::BaseSumGate;
@@ -284,69 +284,69 @@ where
                 )?
                 .adapter(),
             ),
-            22 => WitnessGeneratorRef::new(
-                plonky2_ecdsa::gadgets::glv::GLVDecompositionGenerator::<F, D>::deserialize(
-                    buf,
-                    common_data,
-                )?
-                .adapter(),
-            ),
-            23 => WitnessGeneratorRef::new(
-                plonky2_ecdsa::gadgets::nonnative::NonNativeAdditionGenerator::<F, D, Secp256K1Base>::deserialize(
-                    buf,
-                    common_data,
-                )?
-                .adapter(),
-            ),
-            24 => WitnessGeneratorRef::new(
-                plonky2_ecdsa::gadgets::nonnative::NonNativeAdditionGenerator::<F, D, Secp256K1Scalar>::deserialize(
-                    buf,
-                    common_data,
-                )?
-                .adapter(),
-            ),
-            25 => WitnessGeneratorRef::new(
-                plonky2_ecdsa::gadgets::nonnative::NonNativeMultiplicationGenerator::<F, D, Secp256K1Base>::deserialize(
-                    buf,
-                    common_data,
-                )?
-                .adapter(),
-            ),
-            26 => WitnessGeneratorRef::new(
-                plonky2_ecdsa::gadgets::nonnative::NonNativeMultiplicationGenerator::<F, D, Secp256K1Scalar>::deserialize(
-                    buf,
-                    common_data,
-                )?
-                .adapter(),
-            ),
-            27 => WitnessGeneratorRef::new(
-                plonky2_ecdsa::gadgets::nonnative::NonNativeInverseGenerator::<F, D, Secp256K1Base>::deserialize(
-                    buf,
-                    common_data,
-                )?
-                .adapter(),
-            ),
-            28 => WitnessGeneratorRef::new(
-                plonky2_ecdsa::gadgets::nonnative::NonNativeInverseGenerator::<F, D, Secp256K1Scalar>::deserialize(
-                    buf,
-                    common_data,
-                )?
-                .adapter(),
-            ),
-            29 => WitnessGeneratorRef::new(
-                plonky2_ecdsa::gadgets::nonnative::NonNativeSubtractionGenerator::<F, D, Secp256K1Base>::deserialize(
-                    buf,
-                    common_data,
-                )?
-                .adapter(),
-            ),
-            30 => WitnessGeneratorRef::new(
-                plonky2_ecdsa::gadgets::nonnative::NonNativeSubtractionGenerator::<F, D, Secp256K1Scalar>::deserialize(
-                    buf,
-                    common_data,
-                )?
-                .adapter(),
-            ),
+            // 22 => WitnessGeneratorRef::new(
+            //     plonky2_ecdsa::gadgets::glv::GLVDecompositionGenerator::<F, D>::deserialize(
+            //         buf,
+            //         common_data,
+            //     )?
+            //     .adapter(),
+            // ),
+            // 23 => WitnessGeneratorRef::new(
+            //     plonky2_ecdsa::gadgets::nonnative::NonNativeAdditionGenerator::<F, D, Secp256K1Base>::deserialize(
+            //         buf,
+            //         common_data,
+            //     )?
+            //     .adapter(),
+            // ),
+            // 24 => WitnessGeneratorRef::new(
+            //     plonky2_ecdsa::gadgets::nonnative::NonNativeAdditionGenerator::<F, D, Secp256K1Scalar>::deserialize(
+            //         buf,
+            //         common_data,
+            //     )?
+            //     .adapter(),
+            // ),
+            // 25 => WitnessGeneratorRef::new(
+            //     plonky2_ecdsa::gadgets::nonnative::NonNativeMultiplicationGenerator::<F, D, Secp256K1Base>::deserialize(
+            //         buf,
+            //         common_data,
+            //     )?
+            //     .adapter(),
+            // ),
+            // 26 => WitnessGeneratorRef::new(
+            //     plonky2_ecdsa::gadgets::nonnative::NonNativeMultiplicationGenerator::<F, D, Secp256K1Scalar>::deserialize(
+            //         buf,
+            //         common_data,
+            //     )?
+            //     .adapter(),
+            // ),
+            // 27 => WitnessGeneratorRef::new(
+            //     plonky2_ecdsa::gadgets::nonnative::NonNativeInverseGenerator::<F, D, Secp256K1Base>::deserialize(
+            //         buf,
+            //         common_data,
+            //     )?
+            //     .adapter(),
+            // ),
+            // 28 => WitnessGeneratorRef::new(
+            //     plonky2_ecdsa::gadgets::nonnative::NonNativeInverseGenerator::<F, D, Secp256K1Scalar>::deserialize(
+            //         buf,
+            //         common_data,
+            //     )?
+            //     .adapter(),
+            // ),
+            // 29 => WitnessGeneratorRef::new(
+            //     plonky2_ecdsa::gadgets::nonnative::NonNativeSubtractionGenerator::<F, D, Secp256K1Base>::deserialize(
+            //         buf,
+            //         common_data,
+            //     )?
+            //     .adapter(),
+            // ),
+            // 30 => WitnessGeneratorRef::new(
+            //     plonky2_ecdsa::gadgets::nonnative::NonNativeSubtractionGenerator::<F, D, Secp256K1Scalar>::deserialize(
+            //         buf,
+            //         common_data,
+            //     )?
+            //     .adapter(),
+            // ),
             _ => {
                 tracing::error!("unsupported tag {tag}");
                 Err(IoError)?
