@@ -1,5 +1,4 @@
-// use anyhow::Context as _;
-use boson::{index_secret, public_key, Clock};
+use boson::{index_secret, Clock};
 use plonky2::plonk::circuit_data::CircuitConfig;
 // use plonky2_maybe_rayon::rayon;
 use tracing::info;
@@ -14,18 +13,23 @@ fn main() -> anyhow::Result<()> {
     //     16
     // );
 
-    const S: usize = 8;
+    const S: usize = 4;
     let (clock, circuit) = Clock::<S>::genesis(
         [(); S].map({
             let mut i = 0;
             move |()| {
                 let secret = index_secret(i);
                 i += 1;
-                public_key(secret)
+                boson::public_key(secret)
             }
         }),
         config,
     )?;
+    // let clock_bytes =
+    //     std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("genesis_clock4.bin"))?;
+    // let circuit_bytes = std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("circuit4.bin"))?;
+    // let (clock, circuit) = Clock::<S>::from_bytes(clock_bytes, &circuit_bytes, config)?;
+
     clock.verify(&circuit)?;
 
     // let clock10 = clock.increment(0, index_secret(0), &circuit)?;

@@ -1,4 +1,6 @@
 use plonky2::field::extension::Extendable;
+use plonky2::field::secp256k1_base::Secp256K1Base;
+use plonky2::field::secp256k1_scalar::Secp256K1Scalar;
 use plonky2::gates::arithmetic_base::ArithmeticGate;
 use plonky2::gates::arithmetic_extension::ArithmeticExtensionGate;
 use plonky2::gates::base_sum::BaseSumGate;
@@ -137,6 +139,209 @@ where
         let gen = match tag {
             1 => WitnessGeneratorRef::new(
                 plonky2::gates::arithmetic_base::ArithmeticBaseGenerator::<F, D>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            2 => WitnessGeneratorRef::new(
+                plonky2::gates::arithmetic_extension::ArithmeticExtensionGenerator::<F, D>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            3 => WitnessGeneratorRef::new(
+                plonky2::gates::base_sum::BaseSplitGenerator::<2>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            4 => WitnessGeneratorRef::new(
+                plonky2::gates::base_sum::BaseSplitGenerator::<4>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            5 => WitnessGeneratorRef::new(
+                plonky2_u32::gates::comparison::ComparisonGenerator::<F, D>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            6 => WitnessGeneratorRef::new(
+                plonky2::iop::generator::ConstantGenerator::<F>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            7 => WitnessGeneratorRef::new(
+                plonky2::gadgets::arithmetic::EqualityGenerator::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            8 => WitnessGeneratorRef::new(
+                plonky2::gates::coset_interpolation::InterpolationGenerator::<F, D>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            9 => WitnessGeneratorRef::new(
+                plonky2::gates::multiplication_extension::MulExtensionGenerator::<F, D>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            10 => WitnessGeneratorRef::new(
+                plonky2::gates::poseidon::PoseidonGenerator::<F, D>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            11 => WitnessGeneratorRef::new(
+                plonky2::gates::poseidon_mds::PoseidonMdsGenerator::<D>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            12 => WitnessGeneratorRef::new(
+                plonky2::gadgets::arithmetic_extension::QuotientGeneratorExtension::<D>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            13 => WitnessGeneratorRef::new(
+                plonky2::gates::random_access::RandomAccessGenerator::<F, D>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            14 => WitnessGeneratorRef::new(
+                plonky2::iop::generator::RandomValueGenerator::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            15 => WitnessGeneratorRef::new(
+                plonky2::gates::reducing_extension::ReducingGenerator::<D>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            16 => WitnessGeneratorRef::new(
+                plonky2::gates::reducing::ReducingGenerator::<D>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            17 => WitnessGeneratorRef::new(
+                plonky2_u32::gates::arithmetic_u32::U32ArithmeticGenerator::<F, D>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            18 => WitnessGeneratorRef::new(
+                plonky2_u32::gates::add_many_u32::U32AddManyGenerator::<F, D>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            19 => WitnessGeneratorRef::new(
+                plonky2_u32::gates::range_check_u32::U32RangeCheckGenerator::<F, D>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            20 => WitnessGeneratorRef::new(
+                plonky2_u32::gates::subtraction_u32::U32SubtractionGenerator::<F, D>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            21 => WitnessGeneratorRef::new(
+                plonky2::gadgets::split_join::WireSplitGenerator::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            22 => WitnessGeneratorRef::new(
+                plonky2_ecdsa::gadgets::glv::GLVDecompositionGenerator::<F, D>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            23 => WitnessGeneratorRef::new(
+                plonky2_ecdsa::gadgets::nonnative::NonNativeAdditionGenerator::<F, D, Secp256K1Base>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            24 => WitnessGeneratorRef::new(
+                plonky2_ecdsa::gadgets::nonnative::NonNativeAdditionGenerator::<F, D, Secp256K1Scalar>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            25 => WitnessGeneratorRef::new(
+                plonky2_ecdsa::gadgets::nonnative::NonNativeMultiplicationGenerator::<F, D, Secp256K1Base>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            26 => WitnessGeneratorRef::new(
+                plonky2_ecdsa::gadgets::nonnative::NonNativeMultiplicationGenerator::<F, D, Secp256K1Scalar>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            27 => WitnessGeneratorRef::new(
+                plonky2_ecdsa::gadgets::nonnative::NonNativeInverseGenerator::<F, D, Secp256K1Base>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            28 => WitnessGeneratorRef::new(
+                plonky2_ecdsa::gadgets::nonnative::NonNativeInverseGenerator::<F, D, Secp256K1Scalar>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            29 => WitnessGeneratorRef::new(
+                plonky2_ecdsa::gadgets::nonnative::NonNativeSubtractionGenerator::<F, D, Secp256K1Base>::deserialize(
+                    buf,
+                    common_data,
+                )?
+                .adapter(),
+            ),
+            30 => WitnessGeneratorRef::new(
+                plonky2_ecdsa::gadgets::nonnative::NonNativeSubtractionGenerator::<F, D, Secp256K1Scalar>::deserialize(
                     buf,
                     common_data,
                 )?
