@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = { version = "1.0.81", features = ["backtrace"] }
-plonky2 = "0.2.0"
+plonky2 = { git = "https://github.com/sgdxbc/plonky2", version = "0.2.1" }
 tracing = "0.1.40"
 log = "0.4.21"
 plonky2_u32 = { git = "https://github.com/sgdxbc/plonky2-u32", version = "0.1.0" }
@@ -15,7 +15,6 @@ plonky2_ecdsa = { git = "https://github.com/sgdxbc/plonky2-ecdsa", version = "0.
 
 [dev-dependencies]
 itertools = "0.12.1"
-plonky2_maybe_rayon = "0.2.0"
 rand = "0.8.5"
 structopt = "0.3.26"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }

@@ -353,7 +353,6 @@ dependencies = [
  "log",
  "plonky2",
  "plonky2_ecdsa",
- "plonky2_maybe_rayon",
  "plonky2_u32",
  "rand",
  "structopt",
@@ -1658,9 +1657,8 @@ checksum = "626dec3cac7cc0e1577a2ec3fc496277ec2baa084bebad95bb6fdbfae235f84c"
 
 [[package]]
 name = "plonky2"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b25deb9a4b9c2014c2f99cd36078f30e453d188d0ca8dd4c5ffd1d494b661ac1"
+version = "0.2.1"
+source = "git+https://github.com/sgdxbc/plonky2#db433df34d76521601a97e7faccb096b79718ed5"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1671,7 +1669,7 @@ dependencies = [
  "log",
  "num",
  "plonky2_field",
- "plonky2_maybe_rayon",
+ "plonky2_maybe_rayon 0.2.0 (git+https://github.com/sgdxbc/plonky2)",
  "plonky2_util",
  "rand",
  "rand_chacha",
@@ -1684,22 +1682,21 @@ dependencies = [
 [[package]]
 name = "plonky2_ecdsa"
 version = "0.1.0"
-source = "git+https://github.com/sgdxbc/plonky2-ecdsa#fe1a3af29a0da294c272168a0a83db54a2215ec3"
+source = "git+https://github.com/sgdxbc/plonky2-ecdsa#621c9aaf35d8f7c1c9806cc10573f05641d12cec"
 dependencies = [
  "anyhow",
  "itertools 0.10.5",
  "num",
  "plonky2",
- "plonky2_maybe_rayon",
+ "plonky2_maybe_rayon 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "plonky2_u32",
  "serde",
 ]
 
 [[package]]
 name = "plonky2_field"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "465a741ba134485af571152aab5086457a470aa8893391186cf78dd389694440"
+version = "0.2.1"
+source = "git+https://github.com/sgdxbc/plonky2#db433df34d76521601a97e7faccb096b79718ed5"
 dependencies = [
  "anyhow",
  "itertools 0.11.0",
@@ -1721,9 +1718,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "plonky2_maybe_rayon"
+version = "0.2.0"
+source = "git+https://github.com/sgdxbc/plonky2#db433df34d76521601a97e7faccb096b79718ed5"
+dependencies = [
+ "rayon",
+]
+
+[[package]]
 name = "plonky2_u32"
 version = "0.1.0"
-source = "git+https://github.com/sgdxbc/plonky2-u32#89143df7292d041704b9008284b69124d3258d80"
+source = "git+https://github.com/sgdxbc/plonky2-u32#2195fd22f149d06d7b5be04efcafa532fd2d99f3"
 dependencies = [
  "anyhow",
  "itertools 0.10.5",
@@ -1734,8 +1739,7 @@ dependencies = [
 [[package]]
 name = "plonky2_util"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b16136f5f3019c1e83035af76cccddd56d789a5e2933306270185c3f99f12259"
+source = "git+https://github.com/sgdxbc/plonky2#db433df34d76521601a97e7faccb096b79718ed5"
 
 [[package]]
 name = "powerfmt"
