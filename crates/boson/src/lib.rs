@@ -8,7 +8,7 @@ use plonky2::{
         poseidon::{PoseidonHash, PoseidonPermutation},
     },
     iop::{
-        target::Target,
+        target::{BoolTarget, Target},
         witness::{PartialWitness, WitnessWrite},
     },
     plonk::{
@@ -54,10 +54,11 @@ pub struct ClockCircuit<const S: usize> {
 struct ClockCircuitTargets<const S: usize> {
     // the only public input is the output clock, which is not expected to be set before proving
     // every target is witness
+    is_genesis: BoolTarget,
+    verifier_data: VerifierCircuitTarget,
 
     // common inputs
     proof1: ProofWithPublicInputsTarget<D>,
-    verifier_data1: VerifierCircuitTarget,
 
     // increment inputs, when merging...
     updated_index: Target,   // ...2^32
@@ -67,20 +68,27 @@ struct ClockCircuitTargets<const S: usize> {
     // enable2: BoolTarget,
     // merge inputs, when incrementing...
     proof2: ProofWithPublicInputsTarget<D>, // ...same to `proof1`
-    verifier_data2: VerifierCircuitTarget,  // ...same to `verifier_data1`
 }
 
 impl<const S: usize> ClockCircuit<S> {
-    pub fn new_genesis(config: CircuitConfig) -> Self {
+    pub fn new_empty(config: CircuitConfig, num_public_inputs: usize) -> Self {
         let mut builder = CircuitBuilder::<F, D>::new(config);
-        let output_counters = builder.constants(&[F::ZERO; S]);
+        // constant value not used
+        let output_counters = builder.constants(&vec![F::ZERO; num_public_inputs]);
         builder.register_public_inputs(&output_counters);
+        // while builder.num_gates() < (1 << 13) + 1 {
+        //     builder.add_gate(plonky2::gates::noop::NoopGate, vec![]);
+        // }
+        // builder.print_gate_counts(0);
         Self {
             data: builder.build(),
             targets: None,
         }
     }
 
+    // public inputs:
+    // 0..S counters
+    // S.. verifier data of circuit of verified proofs
     pub fn new(
         inner: &Self,
         keys: &[HashOut<F>; S],
@@ -89,25 +97,34 @@ impl<const S: usize> ClockCircuit<S> {
     ) -> Self {
         let mut builder = CircuitBuilder::<F, D>::new(config);
 
+        let is_genesis = builder.add_virtual_bool_target_safe();
+        let verifier_data =
+            builder.add_virtual_verifier_data(inner.data.common.config.fri_config.cap_height);
+        let mut output_data = Vec::new();
+        for target in &verifier_data.constants_sigmas_cap.0 {
+            output_data.extend(target.elements.iter().copied())
+        }
+        output_data.extend(verifier_data.circuit_digest.elements.iter().copied());
+
         let proof1 = builder.add_virtual_proof_with_pis(&inner.data.common);
-        // the slicing is not necessary for now, just in case we add more public inputs later
         let input_counters1 = &proof1.public_inputs[..S];
         let proof2 = builder.add_virtual_proof_with_pis(&inner.data.common);
         let input_counters2 = &proof2.public_inputs[..S];
 
         let updated_index = builder.add_virtual_target();
         let updated_counter = builder.add_virtual_target();
-        // although there is `add_virtual_nonnative_target`, but seems like currently it can only be
-        // internally used by generators. there's no `set_nonnative_target` companion for witness
-        // let num_limbs = CircuitBuilder::<F, D>::num_nonnative_limbs::<Secp256K1Scalar>();
         let sig = builder.add_virtual_target();
 
-        let verifier_data1 =
-            builder.add_virtual_verifier_data(inner.data.common.config.fri_config.cap_height);
-        builder.verify_proof::<C>(&proof1, &verifier_data1, &inner.data.common);
-        let verifier_data2 =
-            builder.add_virtual_verifier_data(inner.data.common.config.fri_config.cap_height);
-        builder.verify_proof::<C>(&proof2, &verifier_data2, &inner.data.common);
+        for (public_input, target) in proof1.public_inputs[S..].iter().zip(&output_data) {
+            let selected = builder.select(is_genesis, *public_input, *target);
+            builder.connect(selected, *public_input)
+        }
+        builder.verify_proof::<C>(&proof1, &verifier_data, &inner.data.common);
+        for (public_input, target) in proof2.public_inputs[S..].iter().zip(&output_data) {
+            let selected = builder.select(is_genesis, *public_input, *target);
+            builder.connect(selected, *public_input)
+        }
+        builder.verify_proof::<C>(&proof2, &verifier_data, &inner.data.common);
         // let enable2 = builder.add_virtual_bool_target_safe();
         // builder.conditionally_verify_proof_or_dummy::<C>(
         //     enable2,
@@ -145,7 +162,10 @@ impl<const S: usize> ClockCircuit<S> {
                 let le = list_le_u32_circuit(&mut builder, vec![x1], vec![x2]);
                 let U32Target(x1) = x1;
                 let U32Target(x2) = x2;
-                builder.select(le, x2, x1)
+                let output = builder.select(le, x2, x1);
+
+                let zero = builder.zero();
+                builder.select(is_genesis, zero, output)
             })
             .collect::<Vec<_>>();
 
@@ -155,14 +175,15 @@ impl<const S: usize> ClockCircuit<S> {
         builder.connect_hashes(key, updated_key);
 
         builder.register_public_inputs(&output_counters);
-        builder.print_gate_counts(0);
+        builder.register_public_inputs(&output_data);
+        // builder.print_gate_counts(0);
         Self {
             data: builder.build(),
             targets: Some(ClockCircuitTargets {
+                is_genesis,
+                verifier_data,
                 proof1,
-                verifier_data1,
                 proof2,
-                verifier_data2,
                 updated_index,
                 updated_counter,
                 sig,
@@ -184,15 +205,14 @@ impl<const S: usize> ClockCircuitTargets<S> {
         let mut builder = CircuitBuilder::new(config);
         // let num_limbs = CircuitBuilder::<F, D>::num_nonnative_limbs::<Secp256K1Scalar>();
         Self {
+            is_genesis: builder.add_virtual_bool_target_safe(),
+            verifier_data: builder
+                .add_virtual_verifier_data(circuit.common.config.fri_config.cap_height),
             proof1: builder.add_virtual_proof_with_pis(&circuit.common),
             proof2: builder.add_virtual_proof_with_pis(&circuit.common),
             updated_index: builder.add_virtual_target(),
             updated_counter: builder.add_virtual_target(),
             sig: builder.add_virtual_target(),
-            verifier_data1: builder
-                .add_virtual_verifier_data(circuit.common.config.fri_config.cap_height),
-            verifier_data2: builder
-                .add_virtual_verifier_data(circuit.common.config.fri_config.cap_height),
         }
     }
 }
@@ -204,30 +224,39 @@ impl<const S: usize> Clock<S> {
         keys: [HashOut<F>; S],
         config: CircuitConfig,
     ) -> anyhow::Result<(Self, ClockCircuit<S>)> {
-        let mut circuit = ClockCircuit::new_genesis(config.clone());
+        let mut circuit = ClockCircuit::new_empty(config.clone(), S);
+        let dummy_key = public_key(DUMMY_SECRET);
+        for _ in 0..4 {
+            circuit = ClockCircuit::new(&circuit, &keys, dummy_key, config.clone());
+        }
+
+        let mut pw = PartialWitness::new();
+        let targets = circuit.targets.as_ref().unwrap();
+
+        let empty_circuit =
+            ClockCircuit::<S>::new_empty(config.clone(), circuit.data.common.num_public_inputs);
+        let dummy_proof = empty_circuit.data.prove(PartialWitness::new())?;
+
+        pw.set_bool_target(targets.is_genesis, true);
+        pw.set_verifier_data_target(&targets.verifier_data, &empty_circuit.data.verifier_only);
+        pw.set_proof_with_pis_target(&targets.proof1, &dummy_proof);
+        pw.set_proof_with_pis_target(&targets.proof2, &dummy_proof);
+        pw.set_target(targets.sig, DUMMY_SECRET);
         let mut timing = TimingTree::new("prove genesis", log::Level::Info);
         let proof = prove(
             &circuit.data.prover_only,
             &circuit.data.common,
-            PartialWitness::new(),
+            pw,
             &mut timing,
         )?;
         timing.print();
-        let mut clock = Self {
+        let clock = Self {
             proof,
             // depth: 0
         };
 
-        let dummy_key = public_key(DUMMY_SECRET);
-        let mut inner_circuit = circuit;
-        for _ in 0..4 {
-            circuit = ClockCircuit::new(&inner_circuit, &keys, dummy_key, config.clone());
-            clock = clock.merge_internal(&clock, &circuit, &inner_circuit)?;
-            inner_circuit = circuit;
-        }
-
         assert!(clock.counters().all(|counter| counter == 0));
-        Ok((clock, inner_circuit))
+        Ok((clock, circuit))
     }
 
     pub fn with_proof_and_circuit(
@@ -249,18 +278,15 @@ impl<const S: usize> Clock<S> {
             .nth(index)
             .ok_or(anyhow::anyhow!("out of bound index {index}"))?
             + 1;
-        let inner_circuit = circuit;
 
         let mut pw = PartialWitness::new();
         let targets = circuit.targets.as_ref().unwrap();
+        pw.set_bool_target(targets.is_genesis, false);
+        pw.set_verifier_data_target(&targets.verifier_data, &circuit.data.verifier_only);
         pw.set_proof_with_pis_target(&targets.proof1, &self.proof);
-        pw.set_verifier_data_target(&targets.verifier_data1, &inner_circuit.data.verifier_only);
+        pw.set_proof_with_pis_target(&targets.proof2, &self.proof);
         pw.set_target(targets.updated_index, F::from_canonical_usize(index));
         pw.set_target(targets.updated_counter, F::from_canonical_u32(counter));
-
-        pw.set_proof_with_pis_target(&targets.proof2, &self.proof);
-        pw.set_verifier_data_target(&targets.verifier_data2, &inner_circuit.data.verifier_only);
-
         // let sig = sign_message(Secp256K1Scalar::from_canonical_u32(counter), secret);
         pw.set_target(targets.sig, secret);
 
@@ -290,23 +316,14 @@ impl<const S: usize> Clock<S> {
     }
 
     pub fn merge(&self, other: &Self, circuit: &ClockCircuit<S>) -> anyhow::Result<Self> {
-        self.merge_internal(other, circuit, circuit)
-    }
-
-    fn merge_internal(
-        &self,
-        other: &Self,
-        circuit: &ClockCircuit<S>,
-        inner_circuit: &ClockCircuit<S>,
-    ) -> anyhow::Result<Self> {
         let clock1 = self;
         let clock2 = other;
         let mut pw = PartialWitness::new();
         let targets = circuit.targets.as_ref().unwrap();
+        pw.set_bool_target(targets.is_genesis, false);
+        pw.set_verifier_data_target(&targets.verifier_data, &circuit.data.verifier_only);
         pw.set_proof_with_pis_target(&targets.proof1, &clock1.proof);
-        pw.set_verifier_data_target(&targets.verifier_data1, &inner_circuit.data.verifier_only);
         pw.set_proof_with_pis_target(&targets.proof2, &clock2.proof);
-        pw.set_verifier_data_target(&targets.verifier_data2, &inner_circuit.data.verifier_only);
         pw.set_target(targets.updated_index, F::from_canonical_usize(S + 1));
         pw.set_target(targets.updated_counter, F::from_canonical_u32(u32::MAX));
         // let msg = Secp256K1Scalar::from_canonical_u32(u32::MAX);
@@ -425,5 +442,71 @@ mod tests {
             .public_inputs
             .clone_from(&genesis.proof.public_inputs);
         clock1.merge(&clock1, circuit).unwrap();
+    }
+
+    fn malformed_genesis_circuit(config: CircuitConfig) -> ClockCircuit<S> {
+        let mut builder = CircuitBuilder::<F, D>::new(config);
+        let output_counters = builder.constants(&[F::ONE; S]);
+        builder.register_public_inputs(&output_counters);
+        ClockCircuit {
+            data: builder.build(),
+            targets: None,
+        }
+    }
+
+    fn malformed_genesis() -> anyhow::Result<Clock<S>> {
+        let config = CircuitConfig {
+            ..CircuitConfig::standard_ecc_config()
+        };
+        let keys = [(); S].map({
+            let mut i = 0;
+            move |()| {
+                let secret = index_secret(i);
+                i += 1;
+                public_key(secret)
+            }
+        });
+
+        let mut circuit = malformed_genesis_circuit(config.clone());
+        let dummy_key = public_key(DUMMY_SECRET);
+        for _ in 0..4 {
+            circuit = ClockCircuit::new(&circuit, &keys, dummy_key, config.clone());
+        }
+
+        let empty_circuit =
+            ClockCircuit::<S>::new_empty(config.clone(), circuit.data.common.num_public_inputs);
+        let dummy_proof = empty_circuit.data.prove(PartialWitness::new())?;
+        let mut pw = PartialWitness::new();
+        let targets = circuit.targets.as_ref().unwrap();
+        pw.set_bool_target(targets.is_genesis, true);
+        pw.set_verifier_data_target(&targets.verifier_data, &empty_circuit.data.verifier_only);
+        pw.set_proof_with_pis_target(&targets.proof1, &dummy_proof);
+        pw.set_proof_with_pis_target(&targets.proof2, &dummy_proof);
+        pw.set_target(targets.sig, DUMMY_SECRET);
+        let mut timing = TimingTree::new("prove genesis", log::Level::Info);
+        let proof = prove(
+            &circuit.data.prover_only,
+            &circuit.data.common,
+            pw,
+            &mut timing,
+        )?;
+        timing.print();
+        let clock = Clock {
+            proof,
+            // depth: 0
+        };
+        assert!(clock.counters().all(|counter| counter == 1));
+        Ok(clock)
+    }
+
+    #[test]
+    #[should_panic]
+    fn malformed_with_iteration() {
+        tracing_subscriber::fmt::init();
+        let Ok(malformed_clock) = malformed_genesis() else {
+            return;
+        };
+        let (_, circuit) = GENESIS_AND_CIRCUIT.get_or_init(genesis_and_circuit);
+        malformed_clock.verify(circuit).unwrap()
     }
 }

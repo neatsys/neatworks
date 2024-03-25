@@ -5,7 +5,10 @@ use tracing::info;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
-    let config = CircuitConfig::standard_ecc_config();
+    let config = CircuitConfig {
+        zero_knowledge: true,
+        ..CircuitConfig::standard_ecc_config()
+    };
 
     // info!(
     //     "Using {} compute threads on {} cores",
@@ -66,13 +69,13 @@ fn main() -> anyhow::Result<()> {
         use rand::seq::SliceRandom;
         let clock1 = clocks.choose(&mut rand::thread_rng()).unwrap();
         let clock2 = clocks.choose(&mut rand::thread_rng()).unwrap();
-        info!(
-            "merge {:?} and {:?}",
-            clock1.counters().collect::<Vec<_>>(),
-            clock2.counters().collect::<Vec<_>>(),
-        );
+        // info!(
+        //     "merge {:?} and {:?}",
+        //     clock1.counters().collect::<Vec<_>>(),
+        //     clock2.counters().collect::<Vec<_>>(),
+        // );
         let clock = clock1.merge(clock2, &circuit)?;
-        info!("merged into {:?}", clock.counters().collect::<Vec<_>>());
+        // info!("merged into {:?}", clock.counters().collect::<Vec<_>>());
         clock.verify(&circuit)?;
         clocks.push(clock)
     }
