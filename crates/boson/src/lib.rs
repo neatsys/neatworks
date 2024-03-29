@@ -115,6 +115,7 @@ impl<const S: usize> ClockCircuit<S> {
         let updated_counter = builder.add_virtual_target();
         let sig = builder.add_virtual_target();
 
+        // let do_verify = builder.not(is_genesis);
         for (public_input, target) in proof1.public_inputs[S..].iter().zip(&output_data) {
             let selected = builder.select(is_genesis, *public_input, *target);
             builder.connect(selected, *public_input)

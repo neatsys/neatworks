@@ -6,7 +6,7 @@ use tracing::info;
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let config = CircuitConfig {
-        zero_knowledge: true,
+        // zero_knowledge: true,
         ..CircuitConfig::standard_ecc_config()
     };
 

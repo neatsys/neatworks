@@ -1,5 +1,6 @@
 pub mod app;
 pub mod bulk;
+pub mod cops;
 pub mod crypto;
 pub mod event;
 pub mod kademlia;
