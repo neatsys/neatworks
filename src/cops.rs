@@ -7,6 +7,7 @@ use crate::{
     event::{erased::OnEvent, SendEvent, Timer},
     message::Payload,
     net::{events::Recv, SendMessage},
+    worker::erased::Worker,
 };
 
 // "key" under COPS context, "id" under Boson's logical clock context
@@ -33,13 +34,13 @@ pub struct GetOk<V> {
     version: V,
 }
 
-pub struct Sync<V, A> {
+pub struct SyncKey<V, A> {
     key: KeyId,
     version: V,
     server_addr: A,
 }
 
-pub struct SyncOk<V> {
+pub struct SyncKeyOk<V> {
     key: KeyId,
     value: Payload,
     version: V,
@@ -51,46 +52,52 @@ impl<T: SendMessage<A, GetOk<V>> + SendMessage<A, PutOk<V>>, A, V> ClientNet<A, 
 pub trait ServerNet<A, V>:
     SendMessage<A, Put<V, A>>
     + SendMessage<A, Get<A>>
-    + SendMessage<A, Sync<V, A>>
-    + SendMessage<A, SyncOk<V>>
+    + SendMessage<A, SyncKey<V, A>>
+    + SendMessage<A, SyncKeyOk<V>>
 {
 }
 impl<
         T: SendMessage<A, Put<V, A>>
             + SendMessage<A, Get<A>>
-            + SendMessage<A, Sync<V, A>>
-            + SendMessage<A, SyncOk<V>>,
+            + SendMessage<A, SyncKey<V, A>>
+            + SendMessage<A, SyncKeyOk<V>>,
         A,
         V,
     > ServerNet<A, V> for T
 {
 }
 
-pub struct CreateVersion<V> {
-    pub id: KeyId,
-    pub previous: Option<V>,
-    pub deps: Vec<V>,
+pub trait VersionService {
+    type Version;
+    fn merge_and_increment_once(
+        &self,
+        id: KeyId,
+        previous: Option<Self::Version>,
+        deps: Vec<Self::Version>,
+    ) -> anyhow::Result<Self::Version>;
 }
 
-pub struct CreateVersionOk<V>(pub KeyId, pub V);
+pub trait Version: PartialOrd + Clone + Send + Sync + 'static {}
+impl<T: PartialOrd + Clone + Send + Sync + 'static> Version for T {}
+
+pub struct VersionOk<V>(pub KeyId, pub V);
 
 // pub struct Client<V> {
 // }
 
-pub trait VersionService<V>: SendEvent<CreateVersion<V>> {}
-impl<T: SendEvent<CreateVersion<V>>, V> VersionService<V> for T {}
-
-pub struct Server<N, CN, S, V, A> {
+pub struct Server<N, CN, VS, E, V, A> {
     store: BTreeMap<KeyId, (Payload, V)>,
     version_zero: V,
     pending_puts: Vec<Put<V, A>>,
     pending_gets: Vec<Get<A>>,
     net: N,
     client_net: CN,
-    version_service: S,
+    version_worker: Worker<VS, E>,
 }
 
-impl<N, CN: ClientNet<A, V>, A, V: Clone, S> OnEvent<Recv<Get<A>>> for Server<N, CN, S, V, A> {
+impl<N, CN: ClientNet<A, V>, A, V: Clone, VS, E> OnEvent<Recv<Get<A>>>
+    for Server<N, CN, VS, E, V, A>
+{
     fn on_event(&mut self, Recv(get): Recv<Get<A>>, _: &mut impl Timer) -> anyhow::Result<()> {
         if let Some((value, version)) = self.store.get(&get.key) {
             let get_ok = GetOk {
@@ -105,8 +112,14 @@ impl<N, CN: ClientNet<A, V>, A, V: Clone, S> OnEvent<Recv<Get<A>>> for Server<N,
     }
 }
 
-impl<N: ServerNet<A, V>, CN: ClientNet<A, V>, A, V: PartialOrd + Clone, S: VersionService<V>>
-    OnEvent<Recv<Put<V, A>>> for Server<N, CN, S, V, A>
+impl<
+        N: ServerNet<A, V>,
+        CN: ClientNet<A, V>,
+        A,
+        V: Version,
+        VS: VersionService<Version = V>,
+        E: SendEvent<VersionOk<V>>,
+    > OnEvent<Recv<Put<V, A>>> for Server<N, CN, VS, E, V, A>
 {
     fn on_event(&mut self, Recv(put): Recv<Put<V, A>>, _: &mut impl Timer) -> anyhow::Result<()> {
         if let Some((_, version)) = self.store.get(&put.key) {
@@ -153,11 +166,11 @@ impl<N: ServerNet<A, V>, CN: ClientNet<A, V>, A, V: PartialOrd + Clone, S: Versi
                 };
                 return self.client_net.send(put.client_addr, put_ok);
             }
-            self.version_service.send(CreateVersion {
-                id: put.key,
-                previous,
-                deps,
-            })?;
+            self.version_worker
+                .submit(Box::new(move |service, sender| {
+                    let version = service.merge_and_increment_once(put.key, previous, deps)?;
+                    sender.send(VersionOk(put.key, version))
+                }))?;
         }
         // TODO figure out who to sync with and send Sync
         self.pending_puts.push(put);
@@ -165,13 +178,17 @@ impl<N: ServerNet<A, V>, CN: ClientNet<A, V>, A, V: PartialOrd + Clone, S: Versi
     }
 }
 
-impl<N: ServerNet<A, V>, CN, A, V: PartialOrd + Clone, S> OnEvent<Recv<Sync<V, A>>>
-    for Server<N, CN, S, V, A>
+impl<N: ServerNet<A, V>, CN, A, V: PartialOrd + Clone, VS, E> OnEvent<Recv<SyncKey<V, A>>>
+    for Server<N, CN, VS, E, V, A>
 {
-    fn on_event(&mut self, Recv(sync): Recv<Sync<V, A>>, _: &mut impl Timer) -> anyhow::Result<()> {
+    fn on_event(
+        &mut self,
+        Recv(sync): Recv<SyncKey<V, A>>,
+        _: &mut impl Timer,
+    ) -> anyhow::Result<()> {
         if let Some((value, version)) = self.store.get(&sync.key) {
             if matches!(version.partial_cmp(&sync.version), Some(Greater | Equal)) {
-                let sync_ok = SyncOk {
+                let sync_ok = SyncKeyOk {
                     key: sync.key,
                     value: value.clone(),
                     version: version.clone(),
@@ -183,12 +200,18 @@ impl<N: ServerNet<A, V>, CN, A, V: PartialOrd + Clone, S> OnEvent<Recv<Sync<V, A
     }
 }
 
-impl<N, CN: ClientNet<A, V>, A, V: PartialOrd + Clone, S: VersionService<V>>
-    OnEvent<Recv<SyncOk<V>>> for Server<N, CN, S, V, A>
+impl<
+        N,
+        CN: ClientNet<A, V>,
+        A,
+        V: Version,
+        VS: VersionService<Version = V>,
+        E: SendEvent<VersionOk<V>>,
+    > OnEvent<Recv<SyncKeyOk<V>>> for Server<N, CN, VS, E, V, A>
 {
     fn on_event(
         &mut self,
-        Recv(sync_ok): Recv<SyncOk<V>>,
+        Recv(sync_ok): Recv<SyncKeyOk<V>>,
         _: &mut impl Timer,
     ) -> anyhow::Result<()> {
         if let Some((_, version)) = self.store.get(&sync_ok.key) {
@@ -223,11 +246,14 @@ impl<N, CN: ClientNet<A, V>, A, V: PartialOrd + Clone, S: VersionService<V>>
                     false
                 }
             }) {
-                self.version_service.send(CreateVersion {
-                    id: put.key,
-                    previous: self.store.get(&put.key).map(|(_, version)| version.clone()),
-                    deps: put.deps.values().cloned().collect(),
-                })?
+                let id = put.key;
+                let previous = self.store.get(&put.key).map(|(_, version)| version.clone());
+                let deps = put.deps.values().cloned().collect();
+                self.version_worker
+                    .submit(Box::new(move |service, sender| {
+                        let version = service.merge_and_increment_once(id, previous, deps)?;
+                        sender.send(VersionOk(id, version))
+                    }))?
             }
         }
 
@@ -235,12 +261,18 @@ impl<N, CN: ClientNet<A, V>, A, V: PartialOrd + Clone, S: VersionService<V>>
     }
 }
 
-impl<N, CN: ClientNet<A, V>, A, V: PartialOrd + Clone, S: VersionService<V>>
-    OnEvent<CreateVersionOk<V>> for Server<N, CN, S, V, A>
+impl<
+        N,
+        CN: ClientNet<A, V>,
+        A,
+        V: PartialOrd + Clone,
+        VS: VersionService<Version = V>,
+        E: SendEvent<VersionOk<V>>,
+    > OnEvent<VersionOk<V>> for Server<N, CN, VS, E, V, A>
 {
     fn on_event(
         &mut self,
-        CreateVersionOk(key, version): CreateVersionOk<V>,
+        VersionOk(key, version): VersionOk<V>,
         _: &mut impl Timer,
     ) -> anyhow::Result<()> {
         //

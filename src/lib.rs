@@ -18,7 +18,7 @@ pub mod workload;
 //
 // there has been a lot of generic around this codebase, naming convention
 // is roughly: `M`/`N` for messages/events, `S`/`U` for state machine (that
-// ususally `impl OnEvent`) (can also use `T` when it is not confused with
+// usually `impl OnEvent`) (can also use `T` when it is not confused with
 // representing general types), `N`/`M` for nets, `E` for `impl SendEvent`
 // (i.e. emitter), `A`/`B` for addresses
 // (yeah, i also just realized the unfortunate reusing of `M`/`N`)
@@ -33,36 +33,36 @@ pub mod workload;
 // no particular reason, just a "std" module causes unnecessary problems
 //
 // although does not look like so, but the codebase does not have a tendency of
-// using generic/trait ploymophism everywhere. enum polymophism is used as long
-// as the case is simple enough to be supported by it, e.g. crypto, worker, etc.
-// the user of this codebase is generally assumed to keep this codebase at a
-// writable place (i.e. not as a git/crates.io dependency), so more enum
+// using generic/trait polymorphism everywhere. enum polymorphism is used as
+// long as the case is simple enough to be supported by it, e.g. crypto, worker,
+// etc. the user of this codebase is generally assumed to keep this codebase at
+// a writable place (i.e. not as a git/crates.io dependency), so more enum
 // variants can always be added if necessary.
 //
-// one case that must use trait is when type erasuring is required, that is, the
+// one case that must use trait is when type erasure is required, that is, the
 // type parameters of implementors must not be exposed to the use-site. this is
 // the case for e.g. `SendEvent`.
 //
 // for `SendMessage` it's more about code organization. if it is instead an enum
 // then another enum must be constructed to hold all message types. having that
-// gaint enum feels ridiculous. a `SendMessage` trait also brings additional
+// giant enum feels ridiculous. a `SendMessage` trait also brings additional
 // benefits like allow me to come out with fancy things like `SendAddr` :)
 //
 // the rational for the address type generic (notice that the type is not
 // necessarily `impl Addr`) is that most components only work with one address
-// type (plus some auxiliry types like `All`), so an address enum will introduce
-// many runtime checks and places that bugs may sneak in. it is anonying to keep
-// a generic address type all over the place, but i have to choose between
-// either this or anonying downcasts every time the address is evaluated. i
-// decide to go down with the type parameter since it make better use of the
-// compiler
+// type (plus some auxiliary types like `All`), so an address enum will
+// introduce many runtime checks and places that bugs may sneak in. it is
+// annoying to keep a generic address type all over the place, but i have to
+// choose between either this or annoying downcasts every time the address is
+// evaluated. i decide to go down with the type parameter since it make better
+// use of the compiler
 //
 // when working with these traits, either to keep type parameters or make them
 // into trait objects (if possible) is mostly a matter of taste. there are
 // certain cases where a type parameter must be introduced e.g. when it is
-// propagated across interfaces, and ther are also other cases where a trait
+// propagated across interfaces, and there are also other cases where a trait
 // object must be used e.g. when sending events in circle while working with
-// type-erasured events (so the `impl OnEvent` type appears on `impl SendEvent`
+// type-erased events (so the `impl OnEvent` type appears on `impl SendEvent`
 // instead of the event types), and trait objects must be used somewhere to
 // break infinite type recursion. tentatively the rule of thumb is to allocate
 // type parameters for the types that hold nonvolatile states e.g. the
@@ -83,7 +83,7 @@ pub mod workload;
 // scripts. there's no dependency from `tools/` to `src/`. there's no dependency
 // from `src/` to `tools/` except some shared serialization schemas. the
 // interfaces between them are built based on HTTP. i believe this isolated
-// design results in good separation of conern
+// design results in good separation of concern
 //
 // for `crates` the story is much simpler. `src/` should be compilable against
 // plain Ubuntu system. and code live in `crates` if they have further system
@@ -103,7 +103,7 @@ pub mod workload;
 //
 // i choose to not build universal connection between them because they are
 // expected to be used in different context: `SendEvent` probably sends to local
-// receipant i.e. `impl OnEvent`, thus it's possible to work with type-erased
+// recipient i.e. `impl OnEvent`, thus it's possible to work with type-erased
 // events; `SendMessage` on contrast sends to "the outside world", so the
 // sending cannot be directly hooked up with the consuming, so type erasure
 // cannot be performed and message types are probably plain old types. also,
@@ -111,8 +111,8 @@ pub mod workload;
 // `impl SendMessage` to silently fail
 //
 // i feel sorry to have so many `anyhow::Result<()>` all over the codebase. i
-// should have aliased it if i foreseed it would be this many. nevertheless, i
-// guess the enhancement of std error will not get stablized in any time soon,
+// should have aliased it if i foresaw it would be this many. nevertheless, i
+// guess the enhancement of std error will not get stabilized in any time soon,
 // so there still a long time before i need to consider replace these results
 // with `Result<(), Box<dyn Error + Send + Sync>>`. probably the codebase has
 // been long gone before that
@@ -129,17 +129,17 @@ pub mod workload;
 //   panic assertion in heap allocation code path (at least in glibc), which
 //   means some cases of failing to fulfilling an unsafe contract are already
 //   converted into panicking, or in another direction, encountering a panic
-//   already may imply failing to filfull some contracts
+//   already may imply failing to fulfill some contracts
 //
 //   use unstructured/ad-hoc error i.e. anyhow::anyhow!() when there's no upper
 //   layer wants to handle that error, so it suppose to lead to crash. the
-//   oppotunity of making such conclusion is usually rare, but in this codebase
+//   opportunity of making such conclusion is usually rare, but in this codebase
 //   i happen to get a lot of chance, since myself is the only downstream user
 //   of the library part of code. for example, the structural errors that not
 //   exist at the presence but would like to have are the ones for disconnected
 //   channels. those are usually because of unexpected exiting that caused by
-//   some other more foundamental errors, so filter them off helps focus on
-//   other more meaningful errors
+//   some other more fundamental errors, so filter them off helps focus on other
+//   more meaningful errors
 //
 //   and lastly, create on-demand structured errors when it may be captured and
 //   downcast later. in some sense unstructured error offers more information on
@@ -152,7 +152,7 @@ pub mod workload;
 // still possible to happen, so the artifacts must be prepared for both to
 // happen and try their best to do reliable crashing. this is the main reason
 // that i used to panic only in the past. the other reasons include panic has
-// builtin backtrace support (which denimished after anyhow supports backtrace
+// builtin backtrace support (which diminished after anyhow supports backtrace
 // in stable), and panic is reported when it's happening (no matter whether or
 // not get caught later), so it's very simple to reliably both crash and report
 // by using panic and `panic = "abort"` in cargo config. The latter has
@@ -168,12 +168,12 @@ pub mod workload;
 // use panic is to save some code that i assert will never be executed, so it's
 // ok to have false positive error-returning code: that just some unreachable
 // code that is too hard to be proved to be dead code. however, if my assertion
-// on unreachability is incorrect and the program does panic, then i should
-// replace the panic with the code that previously saved e.g. return an error
-// instead.
+// on the "unreachability" is incorrect and the program does panic, then i
+// should replace the panic with the code that previously saved e.g. return an
+// error instead
 //
 // on the other hand, unstructured error defines "under what condition this code
-// suppose to work". if the conidition is just temporarily unsatisfied, i can
+// suppose to work". if the condition is just temporarily unsatisfied, i can
 // safely ignore this transient error; otherwise, i should think about how to
 // improve the implementation to make it workable in more situations.
 //

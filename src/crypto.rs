@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 // There's no well known solution for deriving digest methods for general
 // structural data i.e. structs and enums (as far as I know), which means to
 // compute digest for a structural data e.g. message type, one has to do either:
-//   specify the tranversal manually
+//   specify the traversal manually
 //   derive `Hash` and make use of it
 //   derive `Serialize` and make use of it
 //   derive `BorshSerialize`, which is similar to `Serialize` but has been
