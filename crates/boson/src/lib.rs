@@ -25,9 +25,13 @@ use plonky2_u32::gadgets::{
     range_check::range_check_u32_circuit,
 };
 
-pub const D: usize = 2;
-pub type C = PoseidonGoldilocksConfig;
 pub type F = <C as GenericConfig<D>>::F;
+pub type C = PoseidonGoldilocksConfig;
+pub const D: usize = 2;
+
+// TODO
+// change update index to public input, add public input for sealing and updatable
+// add complete/incomplete bit
 
 #[derive(Clone)]
 pub struct Clock<const S: usize> {

@@ -1,10 +1,10 @@
 // justification of dedicated bulk transfer service
 //
-// the network messaging abstraction in this codebse i.e. `SendMessage` is
+// the network messaging abstraction in this codebase i.e. `SendMessage` is
 // suitable for unreliably delivering short messages with negligible overhead
 // (negligible for delivering single message, overall networking overhead may
 // still be significant). this module, on the other hand, provides different
-// semantic that is usally desired when sending binary large object
+// semantic that is usually desired when sending binary large object
 //
 // firstly this service provides explicit cancel interface, which could be
 // helpful to improve bandwidth and performance efficiency. notice that the
@@ -15,7 +15,7 @@
 //
 // secondly this service guarantees reliable transfer (in the absent of
 // cancellation and sender/receiver crashing). `impl SendMessage` does not
-// guarantee the message will be delivered under any conidition. this service,
+// guarantee the message will be delivered under any condition. this service,
 // instead, ensures the transfer will always finish as long as both participants
 // do not cancel the transfer, the underlying connection does not broken, and
 // the `Serve` message is delivered. application may take this assertion to
