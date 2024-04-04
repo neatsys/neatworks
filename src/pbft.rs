@@ -14,7 +14,7 @@ use crate::{
     },
     net::{deserialize, events::Recv, Addr, All, MessageNet, SendMessage},
     util::{Payload, Request},
-    worker::erased::Worker,
+    worker::{Submit, Work},
     workload::{Invoke, InvokeOk},
 };
 
@@ -227,6 +227,17 @@ impl<
 {
 }
 
+pub struct CryptoWorker<W, S, E>(W, std::marker::PhantomData<(S, E)>);
+
+impl<W: Submit<S, E>, S: 'static, E: SendCryptoEvent<A> + 'static, A: Addr>
+    Submit<S, dyn SendCryptoEvent<A>> for CryptoWorker<W, S, E>
+{
+    fn submit(&mut self, work: Work<S, dyn SendCryptoEvent<A>>) -> anyhow::Result<()> {
+        self.0
+            .submit(Box::new(move |state, emit| work(state, emit)))
+    }
+}
+
 pub struct Replica<S, A> {
     id: u8,
     num_replica: usize,
@@ -247,7 +258,7 @@ pub struct Replica<S, A> {
 
     net: Box<dyn ToReplicaNet<A> + Send + Sync>,
     client_net: Box<dyn ToClientNet<A> + Send + Sync>,
-    crypto_worker: Worker<Crypto, dyn SendCryptoEvent<A> + Send + Sync>,
+    crypto_worker: Box<dyn Submit<Crypto, dyn SendCryptoEvent<A>> + Send + Sync>,
 }
 
 #[derive(Debug)]
@@ -277,13 +288,13 @@ impl<S, A> Debug for Replica<S, A> {
     }
 }
 
-impl<S, A> Replica<S, A> {
-    pub fn new(
+impl<S, A: Addr> Replica<S, A> {
+    pub fn new<E: SendCryptoEvent<A> + Send + Sync + 'static>(
         id: u8,
         app: S,
         net: impl ToReplicaNet<A> + Send + Sync + 'static,
         client_net: impl ToClientNet<A> + Send + Sync + 'static,
-        crypto_worker: Worker<Crypto, dyn SendCryptoEvent<A> + Send + Sync>,
+        crypto_worker: impl Submit<Crypto, E> + Send + Sync + 'static,
         num_replica: usize,
         num_faulty: usize,
     ) -> Self {
@@ -292,7 +303,7 @@ impl<S, A> Replica<S, A> {
             app,
             net: Box::new(net),
             client_net: Box::new(client_net),
-            crypto_worker,
+            crypto_worker: Box::new(CryptoWorker(crypto_worker, Default::default())),
             num_replica,
             num_faulty,
             replies: Default::default(),

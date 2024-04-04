@@ -12,6 +12,13 @@
 //     erased::spawn_backend(state)
 // }
 
+use tokio::{
+    sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    task::JoinSet,
+};
+
+use crate::event::SendEvent;
+
 pub mod erased {
     use tokio::{
         sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
@@ -131,4 +138,59 @@ pub mod erased {
         };
         (Worker::Spawn(worker), executor)
     }
+}
+
+pub type Work<S, E> = Box<dyn FnOnce(&S, &mut E) -> anyhow::Result<()> + Send + Sync>;
+
+pub trait Submit<S, E: ?Sized> {
+    fn submit(&mut self, work: Work<S, E>) -> anyhow::Result<()>;
+}
+// impl<T: SendEvent<Work<S>>, S> Submit<S> for T {}
+
+pub enum Worker<S, E> {
+    Inline(S, E),
+    Send(UnboundedSender<Work<S, E>>),
+}
+
+impl<S, E> Submit<S, E> for Worker<S, E> {
+    fn submit(&mut self, work: Work<S, E>) -> anyhow::Result<()> {
+        match self {
+            Self::Inline(state, emit) => work(state, emit),
+            Self::Send(sender) => sender.send(work),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct SpawnExecutor<S, E> {
+    receiver: UnboundedReceiver<Work<S, E>>,
+    handles: JoinSet<anyhow::Result<()>>,
+}
+
+impl<S: Clone + Send + 'static, E: Clone + Send + 'static> SpawnExecutor<S, E> {
+    pub async fn run(&mut self, state: S, emit: E) -> anyhow::Result<()> {
+        loop {
+            enum Select<S, E> {
+                Recv(Work<S, E>),
+                JoinNext(()),
+            }
+            if let Select::Recv(work) = tokio::select! {
+                Some(result) = self.handles.join_next() => Select::JoinNext(result??),
+                work = self.receiver.recv() => Select::Recv(work.ok_or(anyhow::anyhow!("channel closed"))?),
+            } {
+                let state = state.clone();
+                let mut emit = emit.clone();
+                self.handles.spawn(async move { work(&state, &mut emit) });
+            }
+        }
+    }
+}
+
+pub fn spawn_backend<S, E>() -> (Worker<S, E>, SpawnExecutor<S, E>) {
+    let (sender, receiver) = unbounded_channel();
+    let executor = SpawnExecutor {
+        receiver,
+        handles: Default::default(),
+    };
+    (Worker::Send(sender), executor)
 }

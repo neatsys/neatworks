@@ -20,7 +20,7 @@ use augustus::{
     },
     net::{session::Udp, IndexNet},
     pbft, unreplicated,
-    worker::erased::spawn_backend,
+    worker::spawn_backend,
     workload::{CloseLoop, Invoke, InvokeOk, Iter, OpLatency, Workload},
 };
 use axum::{
@@ -397,7 +397,7 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
             CryptoFlavor::Schnorrkel,
             // CryptoFlavor::Secp256k1,
         )?;
-        let (crypto_worker, mut crypto_executor) = spawn_backend(crypto);
+        let (crypto_worker, mut crypto_executor) = spawn_backend();
 
         match config.protocol {
             Protocol::Unreplicated => {
@@ -432,7 +432,7 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
                     state,
                     pbft::to_replica_on_buf,
                     net,
-                    move |sender| async move { crypto_executor.run(sender, |sender| sender).await },
+                    move |sender| async move { crypto_executor.run(crypto, sender).await },
                     session_cancel,
                 ))
             }
