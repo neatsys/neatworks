@@ -12,8 +12,8 @@ use crate::{
         erased::{OnEventRichTimer as OnEvent, RichTimer as Timer},
         SendEvent, TimerId,
     },
-    message::{Payload, Request},
     net::{deserialize, events::Recv, Addr, All, MessageNet, SendMessage},
+    util::{Payload, Request},
     worker::erased::Worker,
     workload::{Invoke, InvokeOk},
 };
@@ -83,6 +83,11 @@ pub struct Client<A> {
     net: Box<dyn ToReplicaNet<A> + Send + Sync>,
     upcall: Box<dyn SendEvent<InvokeOk> + Send + Sync>,
 }
+
+// struct ClientEffect<A> {
+//     net: Box<dyn ToReplicaNet<A> + Send + Sync>,
+//     upcall: Box<dyn SendEvent<InvokeOk> + Send + Sync>,
+// }
 
 #[derive(Debug)]
 struct ClientInvoke {

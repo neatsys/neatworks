@@ -4,7 +4,7 @@ use rand::{distributions::Alphanumeric, rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    message::Payload,
+    util::Payload,
     workload::{Check, Workload},
 };
 

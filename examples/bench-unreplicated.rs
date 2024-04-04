@@ -297,7 +297,10 @@ async fn main() -> anyhow::Result<()> {
             let mut cpu_set = rustix::process::CpuSet::new();
             cpu_set.set(0);
             rustix::process::sched_setaffinity(None, &cpu_set)?;
-            raw_net.recv(move |buf| to_replica_on_buf(buf, &mut state_sender), None)
+            raw_net.recv(
+                move |buf| to_replica_on_buf::<SocketAddr>(buf, &mut state_sender),
+                None,
+            )
         });
         let state_session = spawn_blocking(move || {
             let mut cpu_set = rustix::process::CpuSet::new();
@@ -319,7 +322,7 @@ async fn main() -> anyhow::Result<()> {
             let mut state_sender = state_session.sender();
             let mut tcp_control =
                 Dispatch::<_, bytes::Bytes, _>::new(Tcp::new(None)?, move |buf: &_| {
-                    to_replica_on_buf(buf, &mut state_sender)
+                    to_replica_on_buf::<SocketAddr>(buf, &mut state_sender)
                 })?;
             let mut timer = UnreachableTimer;
             let accept_session =
@@ -335,7 +338,7 @@ async fn main() -> anyhow::Result<()> {
         let mut state_sender = state_session.sender();
         let mut tcp_control = Blanket(erased::Unify(Dispatch::new(
             Tcp::new(listener.local_addr()?)?,
-            move |buf: &_| to_replica_on_buf(buf, &mut state_sender),
+            move |buf: &_| to_replica_on_buf::<SocketAddr>(buf, &mut state_sender),
         )?));
 
         let accept_session = tcp_accept_session(
@@ -368,7 +371,7 @@ async fn main() -> anyhow::Result<()> {
         let quic = Quic::new(replica_addr)?;
         let mut quic_control = Blanket(erased::Unify(Dispatch::new(
             quic.clone(),
-            move |buf: &_| to_replica_on_buf(buf, &mut state_sender),
+            move |buf: &_| to_replica_on_buf::<SocketAddr>(buf, &mut state_sender),
         )?));
 
         let accept_session =
@@ -399,7 +402,7 @@ async fn main() -> anyhow::Result<()> {
         let mut state_session = erased::Session::new();
         let mut state_sender = erased::session::Sender::from(state_session.sender());
         let recv_session = raw_net.recv_session(move |buf| {
-            unreplicated::erased::to_replica_on_buf(buf, &mut state_sender)
+            unreplicated::erased::to_replica_on_buf::<SocketAddr>(buf, &mut state_sender)
         });
         let state_session = state_session.run(&mut state);
         run(recv_session, state_session).await
@@ -407,8 +410,8 @@ async fn main() -> anyhow::Result<()> {
         let mut state = Unify(Replica::new(Null, net));
         let mut state_session = Session::<unreplicated::ReplicaEvent<_>>::new();
         let mut state_sender = state_session.sender();
-        let recv_session =
-            raw_net.recv_session(move |buf| to_replica_on_buf(buf, &mut state_sender));
+        let recv_session = raw_net
+            .recv_session(move |buf| to_replica_on_buf::<SocketAddr>(buf, &mut state_sender));
         let state_session = state_session.run(&mut state);
         run(recv_session, state_session).await
     }

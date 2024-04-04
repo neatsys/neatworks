@@ -4,11 +4,11 @@ pub mod cops;
 pub mod crypto;
 pub mod event;
 pub mod kademlia;
-pub mod message;
 pub mod net;
 pub mod pbft;
 pub mod search;
 pub mod unreplicated;
+pub mod util;
 pub mod worker;
 pub mod workload;
 

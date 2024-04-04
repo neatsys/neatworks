@@ -408,7 +408,7 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
                 )));
                 runtime.block_on(replica_session(
                     state,
-                    unreplicated::erased::to_replica_on_buf,
+                    unreplicated::erased::to_replica_on_buf::<SocketAddr>,
                     net,
                     |_| pending(),
                     session_cancel,

@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     event::{erased::OnEvent, SendEvent, Timer},
-    message::Payload,
     net::{events::Recv, Addr, SendMessage},
+    util::Payload,
     worker::erased::Worker,
 };
 

@@ -43,7 +43,7 @@ use rand_distr::{WeightedAliasIndex, Zeta, Zipf};
 use rustc_hash::FxHasher;
 use serde::{Deserialize, Serialize};
 
-use crate::message::Payload;
+use crate::util::Payload;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Op {

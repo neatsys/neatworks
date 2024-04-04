@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use std::{fmt::Debug, hash::Hash};
 
 use serde::{Deserialize, Serialize};
 
@@ -14,15 +14,42 @@ impl Debug for Payload {
         } else {
             write!(
                 f,
-                "Payload({})",
+                "Payload({}{})",
                 self.0
                     .iter()
                     .map(|b| format!("{b:02x}"))
+                    .take(32)
                     .collect::<Vec<_>>()
-                    .concat()
+                    .concat(),
+                if self.0.len() > 32 { ".." } else { "" }
             )
         }
     }
+}
+
+#[derive(Clone, derive_more::Deref, derive_more::DerefMut)]
+pub struct Effects<E>(
+    #[deref]
+    #[deref_mut]
+    pub E,
+);
+
+impl<E> Debug for Effects<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Effects(..)")
+    }
+}
+
+impl<E> PartialEq<Self> for Effects<E> {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl<E> Eq for Effects<E> {}
+
+impl<E> Hash for Effects<E> {
+    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

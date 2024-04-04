@@ -16,7 +16,7 @@ use crate::{
         erased::{events::Init, OnEvent},
         OnTimer, SendEvent, Timer,
     },
-    message::Payload,
+    util::Payload,
 };
 
 pub trait Workload {

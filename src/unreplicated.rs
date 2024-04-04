@@ -1,12 +1,12 @@
-use std::{collections::BTreeMap, fmt::Debug, net::SocketAddr, time::Duration};
+use std::{collections::BTreeMap, fmt::Debug, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
     app::App,
     event::{erased::OnEvent as On, OnEvent, OnTimer, SendEvent, Timer, TimerId},
-    message::{Payload, Request},
     net::{deserialize, events::Recv, Addr, MessageNet, SendMessage},
+    util::{Payload, Request},
     workload::{Invoke, InvokeOk},
 };
 
@@ -135,8 +135,8 @@ pub enum ReplicaEvent<A> {
 #[derive(Clone)]
 pub struct Replica<S, N, A> {
     replies: BTreeMap<u32, Reply>,
-    _addr_marker: std::marker::PhantomData<A>,
     app: S,
+    _addr_marker: std::marker::PhantomData<A>,
     net: N,
 }
 
@@ -210,23 +210,28 @@ pub fn to_client_on_buf(
 
 pub type ToReplicaMessageNet<T, A> = MessageNet<T, Request<A>>;
 
-pub fn to_replica_on_buf(
+pub fn to_replica_on_buf<A: Addr>(
     buf: &[u8],
-    sender: &mut impl SendEvent<ReplicaEvent<SocketAddr>>,
+    sender: &mut impl SendEvent<ReplicaEvent<A>>,
 ) -> anyhow::Result<()> {
     sender.send(ReplicaEvent::Ingress(deserialize(buf)?))
 }
 
 pub mod erased {
-    use std::net::SocketAddr;
-
     use crate::{
+        app::App,
         event::SendEvent,
-        message::Request,
-        net::{deserialize, events::Recv},
+        net::{deserialize, events::Recv, Addr},
+        util::Request,
     };
 
-    use super::Reply;
+    use super::{ClientUpcall, Reply, ToClientNet, ToReplicaNet};
+
+    pub type Client<A> = super::Client<
+        Box<dyn ToReplicaNet<A> + Send + Sync>,
+        Box<dyn ClientUpcall + Send + Sync>,
+        A,
+    >;
 
     pub fn to_client_on_buf(
         buf: &[u8],
@@ -235,113 +240,17 @@ pub mod erased {
         sender.send(Recv(deserialize(buf)?))
     }
 
-    pub fn to_replica_on_buf(
+    pub type Replica<A> =
+        super::Replica<Box<dyn App + Send + Sync>, Box<dyn ToClientNet<A> + Send + Sync>, A>;
+
+    pub fn to_replica_on_buf<A: Addr>(
         buf: &[u8],
-        sender: &mut impl SendEvent<Recv<Request<SocketAddr>>>,
+        sender: &mut impl SendEvent<Recv<Request<A>>>,
     ) -> anyhow::Result<()> {
         sender.send(Recv(deserialize(buf)?))
     }
 }
 
-// notes about this iteration of model checking design. code below may get
-// extracted into a reusable module that generally supports model checking of
-// various protocols in latter days, but the code that matters for this
-// discussion will probably stay here
-// (add: the extraction has been done. everything still here will remain here)
-//
-// although trying out searching in state space is more as a jourey out of
-// curious, the `impl State` that aggreates node states and network state and
-// steps on them is also demanded by simulation-style unit tests. a decent
-// protocol test suite probably involves infrastructures like
-//`SimulatedTransport` in SpecPaxos codebase, which effectively does one "probe"
-// of random-DFS as DSLabs defines, with restricted (and even deterministic)
-// randomness that makes common sense e.g. no re-deliver, prefer deliver
-// messages over times, etc.
-//
-// (so a minor concern is that if there's boilerplate code similar to the one
-// below for every protocol, whether `pub mod check` naming convention is
-// appropriate. `check` somehow implies model checking, which somehow implies
-// the DSLabs approach, while a simluation test is kind of a different thing)
-//
-// the `impl OnEvent` owns `impl SendEvent` in this codebase. it's a tradeoff
-// on interface and code organization that so far seems good in other part of
-// the current codebase. it does expose some retrictions for model checking
-// though
-//
-// there are almost only two choices for implementing simulation sender: either
-// channel sender, or shared mutable data structure which in Rust must be
-// guarded by `Mutex` or similar. both SpecPaxos and DSLabs go with the second
-// choice (with unsafe bare metal data structure that carefully used).
-//
-// as far as i know the common choice of model checking is to send the events by
-// returning them from event handlers (as the "side effect" of event handling),
-// instead of by invoking on some owned internal objects. that approach comes
-// with its own performance and engineering overhead so i did not take it
-// neither
-
-// i instead take a (rather clever) alternative approach based on the second
-// choice. the `impl SendEvent` is simple buffer that owns events. while
-// `impl OnEvent` owns `impl SendEvent`, `impl State` owns `impl OnEvent`, so
-// when necessary it just inspect all the way down to the buffer and take the
-// events out. so far the most significant downside is that the `impl SendEvent`
-// type must be in clear text i.e. cannot be `dyn SendEvent`. so more verbose
-// type parameters is the cost of model checking. anyway there's alternative
-// approach to add a optional method on `SendEvent` trait which takes all
-// buffered events out and dedicate to model checking usage
-//
-// after several reiterations, the whole `impl State` is almost `Eq + Hash`.
-// but there's still `impl Workload` out there for now. besides, it's a good
-// timing to trim the redundent states when turns it into `impl Eq + Hash`, to
-// reduce the `Eq` and `Hash` overhead (at the cost of `Into` overhead). so i
-// introduce the concept of "dry state" that is `Eq + Hash` and fulfills BFS's
-// demand: two states with identical dry state will have identical succesor
-// state space. a `impl State` should implement "dyhydration" process i.e.
-// `impl Into` the dry state. interestingly DSLabs also has an "equal and hash
-// wrapper" thing for BFS and similarly "dehydrates" timers stuff from the
-// state. i don't know why that is necessary for DSLabs though
-//
-// the codebase intentially be flexible on event types. indeed, it does not
-// perform model checking for networking apps, but perform model checking for
-// general event-driven apps. each `impl State` defines its own set of events
-// that to be exposed to model checker for reordering, duplicating and dropping,
-// and other events e.g. the `Invoke` and `InvokeOk` between clients and close
-// loops can be considered as internal events and hided from model checker since
-// it is little useful to e.g. reorder them with message/timer events.
-//
-// the more flexibility results in a weaker framework that can write less
-// generic code for common case (since we indeed assume less common cases),
-// which results in more boilerplates on app side to swallow that complexity. we
-// already saw that in various artifact executables, and now it's getting worse:
-// we will have to repeat the boilerplate for every protocol that demands unit
-// tests, which is...every protocol
-//
-// actually, it's even worse than the artifact boilerplate. here we must unify
-// every event type down to single representation, in order to have one "model"
-// that has full control of what's happening first and what's happening later.
-// (type erased interfaces, while perform this unification automatically, also
-// turn every event into a universal blackbox that is highly undesirable for
-// testing.)
-//
-// as the result, we have to polyfill a lot of event hierarchy, and adaptions
-// into/out of it. we must have the "into" adapter on `impl SendEvent` and
-// `impl Timer` side, and have the "out of" adapter on `State::step` (and
-// `State::flush` below, which is tentatively decided as the conventional method
-// for consuming internal events without consulting model checker). what makes
-// it a problem is that all these boilerplates have to be protocol specific.
-// there's hardly any code to be reused across protocols
-//
-// that's it. the `impl Into<DryState>` boilerplate. the explicit event
-// hierarchy, with the boilerplate to unify/dispatch events. all these probably
-// have interior complexity and can only be abstracted at least at derivable
-// macros level, that is, we cannot write a bunch of trait and let compiler to
-// generate them automatically. i guess this is the cost we have to pay to
-// perform model checking
-// * in a static-typed language
-// * which happens to lack runtime reflection
-// * and we do not have a clear expectation on how protocols we are/will be
-//   writing looks in mind
-// fortunately the performance speedup kind of pays off. however, when things
-// come to unit testing, a less-effort approach is very desirable
 pub mod check {
     use std::{
         collections::{BTreeMap, BTreeSet},
@@ -357,8 +266,8 @@ pub mod check {
             linear::Timer,
             OnTimer as _, TimerId, Transient, UnreachableTimer,
         },
-        message::Request,
         net::{events::Recv, SendMessage},
+        util::Request,
         workload::{check::DryCloseLoop, CloseLoop, Invoke, InvokeOk, Workload},
     };
 
@@ -524,7 +433,7 @@ pub mod check {
                     Transient::default(),
                 ),
                 timer: Timer::default(),
-                close_loop: CloseLoop::new(Transient::<Invoke>::default(), workload),
+                close_loop: CloseLoop::new(Transient::default(), workload),
             });
             Ok(())
         }
@@ -611,3 +520,102 @@ pub mod check {
         }
     }
 }
+// notes about this iteration of model checking design. code below may get
+// extracted into a reusable module that generally supports model checking of
+// various protocols in latter days, but the code that matters for this
+// discussion will probably stay here
+// (add: the extraction has been done. everything still here will remain here)
+//
+// although trying out searching in state space is more as a journey out of
+// curious, the `impl State` that aggregates node states and network state and
+// steps on them is also demanded by simulation-style unit tests. a decent
+// protocol test suite probably involves infrastructures like
+//`SimulatedTransport` in SpecPaxos codebase, which effectively does one "probe"
+// of random-DFS as DSLabs defines, with restricted (and even deterministic)
+// randomness that makes common sense e.g. no re-deliver, prefer deliver
+// messages over times, etc.
+//
+// (so a minor concern is that if there's boilerplate code similar to the one
+// below for every protocol, whether `pub mod check` naming convention is
+// appropriate. `check` somehow implies model checking, which somehow implies
+// the DSLabs approach, while a simulation test is kind of a different thing)
+//
+// the `impl OnEvent` owns `impl SendEvent` in this codebase. it's a tradeoff
+// on interface and code organization that so far seems good in other part of
+// the current codebase. it does expose some restrictions for model checking
+// though
+//
+// there are almost only two choices for implementing simulation sender: either
+// channel sender, or shared mutable data structure which in Rust must be
+// guarded by `Mutex` or similar. both SpecPaxos and DSLabs go with the second
+// choice (with unsafe bare metal data structure that carefully used).
+//
+// as far as i know the common choice of model checking is to send the events by
+// returning them from event handlers (as the "side effect" of event handling),
+// instead of by invoking on some owned internal objects. that approach comes
+// with its own performance and engineering overhead so i did not take it
+// neither
+//
+// i instead take a (rather clever) alternative approach based on the second
+// choice. the `impl SendEvent` is simple buffer that owns events. while
+// `impl OnEvent` owns `impl SendEvent`, `impl State` owns `impl OnEvent`, so
+// when necessary it just inspect all the way down to the buffer and take the
+// events out. so far the most significant downside is that the `impl SendEvent`
+// type must be in clear text i.e. cannot be `dyn SendEvent`. so more verbose
+// type parameters is the cost of model checking. anyway there's alternative
+// approach to add a optional method on `SendEvent` trait which takes all
+// buffered events out and dedicate to model checking usage
+//
+// after several reiterations, the whole `impl State` is almost `Eq + Hash`.
+// but there's still `impl Workload` out there for now. besides, it's a good
+// timing to trim the redundant states when turns it into `impl Eq + Hash`, to
+// reduce the `Eq` and `Hash` overhead (at the cost of `Into` overhead). so i
+// introduce the concept of "dry state" that is `Eq + Hash` and fulfills BFS's
+// demand: two states with identical dry state will have identical successor
+// state space. a `impl State` should implement "dehydration" process i.e.
+// `impl Into` the dry state. interestingly DSLabs also has an "equal and hash
+// wrapper" thing for BFS and similarly "dehydrates" timers stuff from the
+// state. i don't know why that is necessary for DSLabs though
+//
+// the codebase intentionally be flexible on event types. indeed, it does not
+// perform model checking for networking apps, but perform model checking for
+// general event-driven apps. each `impl State` defines its own set of events
+// that to be exposed to model checker for reordering, duplicating and dropping,
+// and other events e.g. the `Invoke` and `InvokeOk` between clients and close
+// loops can be considered as internal events and hided from model checker since
+// it is little useful to e.g. reorder them with message/timer events.
+//
+// the more flexibility results in a weaker framework that can write less
+// generic code for common case (since we indeed assume less common cases),
+// which results in more boilerplate on app side to swallow that complexity. we
+// already saw that in various artifact executables, and now it's getting worse:
+// we will have to repeat the boilerplate for every protocol that demands unit
+// tests, which is...every protocol
+//
+// actually, it's even worse than the artifact boilerplate. here we must unify
+// every event type down to single representation, in order to have one "model"
+// that has full control of what's happening first and what's happening later.
+// (type erased interfaces, while perform this unification automatically, also
+// turn every event into a universal blackbox that is highly undesirable for
+// testing.)
+//
+// as the result, we have to polyfill a lot of event hierarchy, and adaptions
+// into/out of it. we must have the "into" adapter on `impl SendEvent` and
+// `impl Timer` side, and have the "out of" adapter on `State::step` (and
+// `State::flush` below, which is tentatively decided as the conventional method
+// for consuming internal events without consulting model checker). what makes
+// it a problem is that all these boilerplate have to be protocol specific.
+// there's hardly any code to be reused across protocols
+//
+// that's it. the `impl Into<DryState>` boilerplate. the explicit event
+// hierarchy, with the boilerplate to unify/dispatch events. all these probably
+// have interior complexity and can only be abstracted at least at derivable
+// macros level, that is, we cannot write a bunch of trait and let compiler to
+// generate them automatically. i guess this is the cost we have to pay to
+// perform model checking
+// * in a static-typed language
+// * which happens to lack runtime reflection
+// * and we do not have a clear expectation on how protocols we are/will be
+//   writing looks in mind
+// fortunately the performance speedup kind of pays off. however, when things
+// come to unit testing, a less-effort approach is very desirable
