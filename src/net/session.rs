@@ -74,8 +74,9 @@ const MAX_BUF_LEN: usize = 1 << 20;
 
 // a construction that enables connection reusing
 // the client side of a connection informs its server address to the connected
-// server with preamble, so if later a message need to be delivered in the
-// opposite direction, it can go through the existing connection
+// server upon establishing connection, so if later a message need to be
+// delivered in the opposite direction, it can go through the existing
+// connection
 // a few design choice has been explored, and here i note the rationale for
 // current tradeoffs
 // there's no aggressive throttling/eviction strategy built into this connection
@@ -93,13 +94,13 @@ const MAX_BUF_LEN: usize = 1 << 20;
 // remaining concern is that there's too many TIME_WAIT connections out there
 // exceeding the amount kernel would like to keep i.e. 32768, so there may be
 // unexpected fast recycling which causes corruption. i don't expect that to
-// happen with noticeable probablity, and switching to QUIC should workaround
+// happen with noticeable probability, and switching to QUIC should workaround
 // the issue quiet nicely
-// if there's no active reclaiming, how should we decide when to relaim a
+// if there's no active reclaiming, how should we decide when to reclaim a
 // connection? unlike us, libp2p actually expose a more complex connection based
 // interface to upper layer, and a connection is closed when application does
 // not refer to it anymore, so we cannot mirror its behavior into our stateless
-// inteface. does application itself know when it should keep a connection open
+// interface. does application itself know when it should keep a connection open
 // and when it should release? in kademlia it might know, but in entropy the
 // message pattern may be more in a unidirectional oneshot style. not sure
 // whether that's inherent difference among protocols or it just libp2p's
@@ -119,11 +120,11 @@ const MAX_BUF_LEN: usize = 1 << 20;
 //   are around the same topic/context. we guarantee to never interrupt a
 //   session, but we don't try to predict when the next session will come
 //
-// this solution comes with inherint overhead: each outgoing message must go
-// through two channels, the first one for getting into `TcpControl` and the
+// this solution comes with inherit overhead: each outgoing message must go
+// through two channels, the first one for getting into `Dispatch` and the
 // second one for dispatching into corresponding `write_task`. the first queuing
 // is necessary for keeping all mutation to connection cache inside
-// `TcpControl`. the performance is not comparable to udp net
+// `Dispatch`. the performance is not comparable to bare metal udp net
 #[derive(Debug)]
 pub struct Dispatch<P, B, F> {
     protocol: P,
@@ -356,7 +357,7 @@ impl Protocol for Tcp {
     fn connect<B: Buf>(
         &self,
         remote: SocketAddr,
-        on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
+        on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Send + 'static,
         receiver: UnboundedReceiver<B>,
     ) {
         let preamble = self.0.clone();
@@ -387,7 +388,7 @@ impl Protocol for Tcp {
 
     fn accept<B: Buf>(
         (preamble, stream): Self::Incoming,
-        on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
+        on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Send + 'static,
         receiver: UnboundedReceiver<B>,
     ) -> Option<SocketAddr> {
         let (read, write) = stream.into_split();
@@ -431,7 +432,7 @@ pub async fn tcp_accept_session(
 
 // `simplex::Tcp` provides a stateless `impl SendMessage` which initiate an
 // ephemeral tcp connection for every message. this results in a setup closer to
-// udp, but the performance will be even worse, and it cannot accept incoming
+// udp, but the performance will be much worse, and it cannot accept incoming
 // connections anymore. you can use a second `TcpControl` that wrapped as
 //   Inline(&mut control, &mut UnreachableTimer)
 // to `impl SendEvent<Incoming>` and pass into `tcp_accept_session` for incoming
@@ -493,9 +494,9 @@ pub mod simplex {
 pub struct Quic(pub quinn::Endpoint);
 
 fn quic_config() -> anyhow::Result<(quinn::ServerConfig, quinn::ClientConfig)> {
-    let issuer_key = rcgen::KeyPair::from_pem(include_str!("../key.pem"))?;
+    let issuer_key = rcgen::KeyPair::from_pem(include_str!("issuer_key.pem"))?;
     let issuer = rcgen::Certificate::generate_self_signed(
-        rcgen::CertificateParams::from_ca_cert_pem(include_str!("../cert.pem"))?,
+        rcgen::CertificateParams::from_ca_cert_pem(include_str!("issuer_cert.pem"))?,
         &issuer_key,
     )?;
     let priv_key = rcgen::KeyPair::generate()?;
