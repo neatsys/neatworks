@@ -2,13 +2,22 @@
 name = "augustus"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75.0"
+rust-version = "1.77.1"
 
 [workspace]
 members = [
     ".",
     "crates/entropy",
     "crates/boson",
+    "tools/replication-control",
+    "tools/replication-control-messages",
+    "tools/entropy-control",
+    "tools/entropy-control-messages",
+]
+default-members = [
+    ".",
+    # "crates/entropy",
+    # "crates/boson",
     "tools/replication-control",
     "tools/replication-control-messages",
     "tools/entropy-control",
@@ -23,9 +32,9 @@ opt-level = 3
 
 [profile.artifact]
 inherits = "release"
-debug = true
-# strip = true
+strip = true
 # lto = true
+# debug = true
 
 [dependencies]
 anyhow = { version = "1.0.79", features = ["backtrace"] }
