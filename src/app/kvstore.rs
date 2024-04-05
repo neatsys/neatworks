@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, panic::UnwindSafe};
 
 use rand::{distributions::Alphanumeric, rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
@@ -62,7 +62,7 @@ impl App for KVStore {
 
 pub fn static_workload(
     rounds: impl ExactSizeIterator<Item = (Op, Result)>,
-) -> anyhow::Result<impl Workload<Attach = ()> + Clone + Into<()>> {
+) -> anyhow::Result<impl Workload<Attach = ()> + Clone + Into<()> + UnwindSafe> {
     Ok(Check::new(
         rounds
             .map(|(op, result)| {

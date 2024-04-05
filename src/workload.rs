@@ -4,6 +4,7 @@
 
 use std::{
     fmt::{Debug, Display},
+    panic::UnwindSafe,
     sync::{
         atomic::{AtomicU32, Ordering::SeqCst},
         Arc,
@@ -262,7 +263,7 @@ pub struct CloseLoop<W: Workload, E> {
     pub done: bool,
 }
 
-type CloseLoopStop = Box<dyn FnOnce() -> anyhow::Result<()> + Send + Sync>;
+type CloseLoopStop = Box<dyn FnOnce() -> anyhow::Result<()> + Send + Sync + UnwindSafe>;
 
 impl<W: Workload, E> Debug for CloseLoop<W, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

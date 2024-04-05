@@ -1,8 +1,11 @@
 use std::{
+    any::Any,
+    convert::identity,
     fmt::{Debug, Display},
     hash::{BuildHasherDefault, Hash},
     iter::repeat,
     num::NonZeroUsize,
+    panic::{catch_unwind, UnwindSafe},
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::SeqCst},
         Arc, Barrier, Condvar, Mutex,
@@ -35,6 +38,19 @@ pub trait State: Clone {
             })
             .collect()
     }
+
+    fn step_catch_unwind(mut self, event: Self::Event) -> anyhow::Result<Self>
+    where
+        Self: UnwindSafe,
+        Self::Event: UnwindSafe,
+    {
+        catch_unwind(move || {
+            self.step(event)?;
+            Ok(self)
+        })
+        .map_err(error_from_panic)
+        .and_then(identity)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -56,7 +72,7 @@ pub enum SearchResult<S, T, E> {
 impl<S, T, E> Debug for SearchResult<S, T, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Err(_, _, err) => write!(f, "Err({err:?})"),
+            Self::Err(_, _, err) => write!(f, "Err({err})"),
             Self::InvariantViolation(_, err) => write!(f, "InvariantViolation({err:?})"),
             Self::GoalFound(_) => write!(f, "GoalFound"),
             Self::SpaceExhausted => write!(f, "SpaceExhausted"),
@@ -95,8 +111,8 @@ pub fn breadth_first<S, T, I, G, P>(
     max_duration: impl Into<Option<Duration>>,
 ) -> anyhow::Result<SearchResult<S, T, S::Event>>
 where
-    S: State + Into<T> + Send + 'static,
-    S::Event: Clone + Send + Sync,
+    S: State + Into<T> + Send + UnwindSafe + 'static,
+    S::Event: Clone + Send + Sync + UnwindSafe,
     T: Clone + Eq + Hash + Send + Sync + 'static,
     I: Fn(&S) -> anyhow::Result<()> + Clone + Send + 'static,
     G: Fn(&S) -> bool + Clone + Send + 'static,
@@ -178,8 +194,8 @@ pub fn random_depth_first<S, T, I, G, P>(
     max_duration: impl Into<Option<Duration>>,
 ) -> anyhow::Result<SearchResult<S, T, S::Event>>
 where
-    S: State + Into<T> + Send + 'static,
-    S::Event: Clone + Send + Sync,
+    S: State + Into<T> + Send + UnwindSafe + 'static,
+    S::Event: Clone + Send + Sync + UnwindSafe,
     T: Eq + Hash + Send + Sync + 'static,
     I: Fn(&S) -> anyhow::Result<()> + Clone + Send + 'static,
     G: Fn(&S) -> bool + Clone + Send + 'static,
@@ -208,18 +224,26 @@ where
             })
             .take(num_worker.get())
         },
-        move |elasped| {
+        move |elapsed| {
             format!(
                 "Explored: {}, Num Probes: {} ({:.2}s, {:.2}K explored/s)",
                 num_state.load(SeqCst),
                 num_probe.load(SeqCst),
-                elasped.as_secs_f32(),
-                num_state.load(SeqCst) as f32 / elasped.as_secs_f32() / 1000.
+                elapsed.as_secs_f32(),
+                num_state.load(SeqCst) as f32 / elapsed.as_secs_f32() / 1000.
             )
         },
         search_finished,
     )?;
     Ok(result.unwrap_or(SearchResult::Timeout))
+}
+
+fn error_from_panic(err: Box<dyn Any + Send>) -> anyhow::Error {
+    if let Ok(err) = err.downcast::<anyhow::Error>() {
+        *err
+    } else {
+        anyhow::anyhow!("unknown join error")
+    }
 }
 
 fn search_internal<R: Send + 'static, F: FnOnce() + Send + 'static>(
@@ -264,22 +288,10 @@ where
     search_finished.1.notify_all();
     // println!("search finished");
     for worker in worker_tasks {
-        worker.join().map_err(|err| {
-            if let Ok(err) = err.downcast::<anyhow::Error>() {
-                *err
-            } else {
-                anyhow::anyhow!("unknown join error")
-            }
-        })?;
+        worker.join().map_err(error_from_panic)?;
     }
     // println!("worker joined");
-    status_worker.join().map_err(|err| {
-        if let Ok(err) = err.downcast::<anyhow::Error>() {
-            *err
-        } else {
-            anyhow::anyhow!("unknown join error")
-        }
-    })?; // println!("status worker joined");
+    status_worker.join().map_err(error_from_panic)?; // println!("status worker joined");
     Ok(result)
 }
 
@@ -337,8 +349,8 @@ fn breath_first_worker<S, T, I, G, P>(
     depth_barrier: Arc<Barrier>,
     search_finished: SearchFinished<SearchWorkerResult<S, S::Event>>,
 ) where
-    S: State + Into<T>,
-    S::Event: Clone,
+    S: State + Into<T> + UnwindSafe,
+    S::Event: Clone + UnwindSafe,
     T: Eq + Hash,
     I: Fn(&S) -> anyhow::Result<()>,
     G: Fn(&S) -> bool,
@@ -357,14 +369,14 @@ fn breath_first_worker<S, T, I, G, P>(
             // TODO check initial state
             // println!("check events");
             for event in state.events() {
-                // these duplication will probably never panic, since initial state duplication
-                // already success
-                let mut next_state = state.clone();
                 // println!("step {event:?}");
-                if let Err(err) = next_state.step(event.clone()) {
-                    search_finish(SearchWorkerResult::Error(state, event, err));
-                    break 'depth;
-                }
+                let next_state = match state.clone().step_catch_unwind(event.clone()) {
+                    Ok(next_state) => next_state,
+                    Err(err) => {
+                        search_finish(SearchWorkerResult::Error(state, event, err));
+                        break 'depth;
+                    }
+                };
                 let next_dry_state = Arc::new(next_state.clone().into());
                 // do not replace a previously-found state, which may be reached with a shorter
                 // trace from initial state
@@ -437,8 +449,8 @@ fn random_depth_first_worker<S, T, I, G, P>(
     num_state: Arc<AtomicU32>,
     search_finished: SearchFinished<SearchResult<S, T, S::Event>>,
 ) where
-    S: State + Into<T>,
-    S::Event: Clone,
+    S: State + Into<T> + UnwindSafe,
+    S::Event: Clone + UnwindSafe,
     T: Eq + Hash,
     I: Fn(&S) -> anyhow::Result<()>,
     G: Fn(&S) -> bool,
@@ -459,10 +471,13 @@ fn random_depth_first_worker<S, T, I, G, P>(
             let Some(event) = events.choose(&mut thread_rng()).cloned() else {
                 break;
             };
-            if let Err(err) = state.step(event.clone()) {
-                search_finish(SearchResult::Err(trace, event, err));
-                break;
-            }
+            state = match state.step_catch_unwind(event.clone()) {
+                Ok(next_state) => next_state,
+                Err(err) => {
+                    search_finish(SearchResult::Err(trace, event, err));
+                    break;
+                }
+            };
             num_state.fetch_add(1, SeqCst);
             trace.push((event, state.clone().into()));
             if let Err(err) = (settings.invariant)(&state) {

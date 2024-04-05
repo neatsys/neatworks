@@ -1,4 +1,8 @@
-use std::{collections::HashMap, fmt::Debug, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt::Debug,
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -13,7 +17,7 @@ use crate::{
         SendEvent, TimerId,
     },
     net::{deserialize, events::Recv, Addr, All, MessageNet, SendMessage},
-    util::{Payload, Request},
+    util::{Effect, Payload, Request},
     worker::{Submit, Work},
     workload::{Invoke, InvokeOk},
 };
@@ -41,7 +45,7 @@ pub struct Commit {
     replica_id: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Reply {
     seq: u32,
     result: Payload,
@@ -71,6 +75,7 @@ impl<
 {
 }
 
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct Client<A> {
     id: u32,
     addr: A,
@@ -80,34 +85,15 @@ pub struct Client<A> {
     num_replica: usize,
     num_faulty: usize,
 
-    net: Box<dyn ToReplicaNet<A> + Send + Sync>,
-    upcall: Box<dyn SendEvent<InvokeOk> + Send + Sync>,
+    net: Effect<Box<dyn ToReplicaNet<A> + Send + Sync>>,
+    upcall: Effect<Box<dyn SendEvent<InvokeOk> + Send + Sync>>,
 }
 
-// struct ClientEffect<A> {
-//     net: Box<dyn ToReplicaNet<A> + Send + Sync>,
-//     upcall: Box<dyn SendEvent<InvokeOk> + Send + Sync>,
-// }
-
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct ClientInvoke {
     op: Payload,
     resend_timer: TimerId,
-    replies: HashMap<u8, Reply>,
-}
-
-impl<A: Addr> Debug for Client<A> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Client")
-            .field("id", &self.id)
-            .field("addr", &self.addr)
-            .field("seq", &self.seq)
-            .field("invoke", &self.invoke)
-            .field("view_num", &self.view_num)
-            .field("num_replica", &self.num_replica)
-            .field("num_faulty", &self.num_faulty)
-            .finish_non_exhaustive()
-    }
+    replies: BTreeMap<u8, Reply>,
 }
 
 impl<A> Client<A> {
@@ -122,10 +108,11 @@ impl<A> Client<A> {
         Self {
             id,
             addr,
-            net: Box::new(net),
-            upcall: Box::new(upcall),
+            net: Effect(Box::new(net)),
+            upcall: Effect(Box::new(upcall)),
             num_replica,
             num_faulty,
+
             seq: 0,
             view_num: 0,
             invoke: Default::default(),
@@ -154,9 +141,9 @@ struct Resend;
 
 impl<A: Addr> OnEvent<Resend> for Client<A> {
     fn on_event(&mut self, Resend: Resend, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
-        // println!("Resend timeout on seq {}", self.seq);
-        // self.do_send(AllReplica)
-        Ok(())
+        println!("Resend timeout on seq {}", self.seq);
+        self.do_send(crate::net::All)
+        // Ok(())
     }
 }
 
@@ -227,10 +214,10 @@ impl<
 {
 }
 
-pub struct CryptoWorker<W, S, E>(W, std::marker::PhantomData<(S, E)>);
+pub struct CryptoWorker<W, E>(W, std::marker::PhantomData<E>);
 
 impl<W: Submit<S, E>, S: 'static, E: SendCryptoEvent<A> + 'static, A: Addr>
-    Submit<S, dyn SendCryptoEvent<A>> for CryptoWorker<W, S, E>
+    Submit<S, dyn SendCryptoEvent<A>> for CryptoWorker<W, E>
 {
     fn submit(&mut self, work: Work<S, dyn SendCryptoEvent<A>>) -> anyhow::Result<()> {
         self.0
@@ -238,6 +225,7 @@ impl<W: Submit<S, E>, S: 'static, E: SendCryptoEvent<A> + 'static, A: Addr>
     }
 }
 
+#[derive(Debug)]
 pub struct Replica<S, A> {
     id: u8,
     num_replica: usize,
@@ -252,13 +240,12 @@ pub struct Replica<S, A> {
     commit_quorums: HashMap<u32, HashMap<u8, Verifiable<Commit>>>,
     commit_num: u32,
     app: S,
-    // op number -> task
     pending_prepares: HashMap<u32, Vec<Verifiable<Prepare>>>,
     pending_commits: HashMap<u32, Vec<Verifiable<Commit>>>,
 
-    net: Box<dyn ToReplicaNet<A> + Send + Sync>,
-    client_net: Box<dyn ToClientNet<A> + Send + Sync>,
-    crypto_worker: Box<dyn Submit<Crypto, dyn SendCryptoEvent<A>> + Send + Sync>,
+    net: Effect<Box<dyn ToReplicaNet<A> + Send + Sync>>,
+    client_net: Effect<Box<dyn ToClientNet<A> + Send + Sync>>,
+    crypto_worker: Effect<Box<dyn Submit<Crypto, dyn SendCryptoEvent<A>> + Send + Sync>>,
 }
 
 #[derive(Debug)]
@@ -282,12 +269,6 @@ impl<A> Default for LogEntry<A> {
     }
 }
 
-impl<S, A> Debug for Replica<S, A> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Replica").finish_non_exhaustive()
-    }
-}
-
 impl<S, A: Addr> Replica<S, A> {
     pub fn new<E: SendCryptoEvent<A> + Send + Sync + 'static>(
         id: u8,
@@ -301,11 +282,12 @@ impl<S, A: Addr> Replica<S, A> {
         Self {
             id,
             app,
-            net: Box::new(net),
-            client_net: Box::new(client_net),
-            crypto_worker: Box::new(CryptoWorker(crypto_worker, Default::default())),
+            net: Effect(Box::new(net)),
+            client_net: Effect(Box::new(client_net)),
+            crypto_worker: Effect(Box::new(CryptoWorker(crypto_worker, Default::default()))),
             num_replica,
             num_faulty,
+
             replies: Default::default(),
             requests: Default::default(),
             view_num: 0,

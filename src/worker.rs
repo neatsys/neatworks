@@ -145,16 +145,18 @@ pub type Work<S, E> = Box<dyn FnOnce(&S, &mut E) -> anyhow::Result<()> + Send + 
 pub trait Submit<S, E: ?Sized> {
     fn submit(&mut self, work: Work<S, E>) -> anyhow::Result<()>;
 }
-// impl<T: SendEvent<Work<S>>, S> Submit<S> for T {}
 
 pub enum Worker<S, E> {
+    Null,
     Inline(S, E),
     Send(UnboundedSender<Work<S, E>>),
 }
 
+// TODO fix the double dispatching of Box<dyn Submit<...>>
 impl<S, E> Submit<S, E> for Worker<S, E> {
     fn submit(&mut self, work: Work<S, E>) -> anyhow::Result<()> {
         match self {
+            Self::Null => Ok(()),
             Self::Inline(state, emit) => work(state, emit),
             Self::Send(sender) => sender.send(work),
         }

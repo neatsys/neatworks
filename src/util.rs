@@ -28,27 +28,27 @@ impl Debug for Payload {
 }
 
 #[derive(Clone, derive_more::Deref, derive_more::DerefMut)]
-pub struct Effects<E>(
+pub struct Effect<E>(
     #[deref]
     #[deref_mut]
     pub E,
 );
 
-impl<E> Debug for Effects<E> {
+impl<E> Debug for Effect<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Effects(..)")
     }
 }
 
-impl<E> PartialEq<Self> for Effects<E> {
+impl<E> PartialEq<Self> for Effect<E> {
     fn eq(&self, _: &Self) -> bool {
         true
     }
 }
 
-impl<E> Eq for Effects<E> {}
+impl<E> Eq for Effect<E> {}
 
-impl<E> Hash for Effects<E> {
+impl<E> Hash for Effect<E> {
     fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
 }
 
