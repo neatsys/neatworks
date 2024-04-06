@@ -4,7 +4,7 @@
 
 use std::{
     fmt::{Debug, Display},
-    panic::UnwindSafe,
+    mem::replace,
     sync::{
         atomic::{AtomicU32, Ordering::SeqCst},
         Arc,
@@ -12,10 +12,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+use derive_where::derive_where;
+
 use crate::{
     event::{
         erased::{events::Init, OnEvent},
-        OnTimer, SendEvent, Timer,
+        OnTimer, SendEvent, Timer, Void,
     },
     util::Payload,
 };
@@ -246,7 +248,7 @@ impl<I> From<Check<I>> for () {
     fn from(_: Check<I>) -> Self {}
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Invoke(pub Payload);
 
 // newtype namespace may be desired after the type erasure migration
@@ -255,20 +257,21 @@ pub struct Invoke(pub Payload);
 // too lazy to refactor it off
 pub type InvokeOk = (u32, Payload);
 
-pub struct CloseLoop<W: Workload, E> {
+pub struct Stop;
+
+#[derive(Debug, Clone)]
+#[derive_where(PartialEq, Eq, Hash; W::Attach, E, SE)]
+pub struct CloseLoop<W: Workload, E, SE = Void> {
     pub sender: E,
+    // don't consider `workload` state for comparing, this is aligned with how DSLabs also ignores
+    // workload in its `ClientWorker`
+    // still feels we are risking missing states where the system goes back to an identical previous
+    // state after consuming one item from workload, but anyway i'm not making it worse
+    #[derive_where[skip]]
     pub workload: W,
     workload_attach: Option<W::Attach>,
-    pub stop: Option<CloseLoopStop>,
+    pub stop_sender: SE,
     pub done: bool,
-}
-
-type CloseLoopStop = Box<dyn FnOnce() -> anyhow::Result<()> + Send + Sync + UnwindSafe>;
-
-impl<W: Workload, E> Debug for CloseLoop<W, E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CloseLoop").finish_non_exhaustive()
-    }
 }
 
 impl<W: Workload, E> CloseLoop<W, E> {
@@ -277,31 +280,13 @@ impl<W: Workload, E> CloseLoop<W, E> {
             sender,
             workload,
             workload_attach: None,
-            stop: None,
+            stop_sender: Void,
             done: false,
         }
     }
 }
 
-impl<W: Workload + Clone, E: Clone> Clone for CloseLoop<W, E>
-where
-    W::Attach: Clone,
-{
-    fn clone(&self) -> Self {
-        if self.stop.is_some() {
-            panic!("cannot clone CloseLoop with some `stop`")
-        }
-        Self {
-            sender: self.sender.clone(),
-            workload: self.workload.clone(),
-            workload_attach: self.workload_attach.clone(),
-            stop: None,
-            done: self.done,
-        }
-    }
-}
-
-impl<W: Workload, E: SendEvent<Invoke>> OnEvent<Init> for CloseLoop<W, E> {
+impl<W: Workload, E: SendEvent<Invoke>, SE> OnEvent<Init> for CloseLoop<W, E, SE> {
     fn on_event(&mut self, Init: Init, _: &mut impl Timer) -> anyhow::Result<()> {
         let (op, attach) = self
             .workload
@@ -315,7 +300,9 @@ impl<W: Workload, E: SendEvent<Invoke>> OnEvent<Init> for CloseLoop<W, E> {
     }
 }
 
-impl<W: Workload, E: SendEvent<Invoke>> OnEvent<InvokeOk> for CloseLoop<W, E> {
+impl<W: Workload, E: SendEvent<Invoke>, SE: SendEvent<Stop>> OnEvent<InvokeOk>
+    for CloseLoop<W, E, SE>
+{
     fn on_event(&mut self, (_, result): InvokeOk, _: &mut impl Timer) -> anyhow::Result<()> {
         let Some(attach) = self.workload_attach.take() else {
             anyhow::bail!("missing workload attach")
@@ -325,30 +312,15 @@ impl<W: Workload, E: SendEvent<Invoke>> OnEvent<InvokeOk> for CloseLoop<W, E> {
             self.workload_attach.replace(attach);
             self.sender.send(Invoke(op))
         } else {
-            self.done = true;
-            if let Some(stop) = self.stop.take() {
-                stop()?
-            }
-            Ok(())
+            let replaced = replace(&mut self.done, true);
+            assert!(!replaced);
+            self.stop_sender.send(Stop)
         }
     }
 }
 
-impl<W: Workload, E> OnTimer for CloseLoop<W, E> {
+impl<W: Workload, E, SE> OnTimer for CloseLoop<W, E, SE> {
     fn on_timer(&mut self, _: crate::event::TimerId, _: &mut impl Timer) -> anyhow::Result<()> {
         unreachable!()
-    }
-}
-
-pub mod check {
-    use super::{CloseLoop, Workload};
-
-    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-    pub struct DryCloseLoop<T>(T);
-
-    impl<W: Workload + Into<T>, T, E> From<CloseLoop<W, E>> for DryCloseLoop<T> {
-        fn from(value: CloseLoop<W, E>) -> Self {
-            Self(value.workload.into())
-        }
     }
 }

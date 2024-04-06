@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use super::TimerId;
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Timer {
     events: Vec<(u32, Duration)>,
     timer_id: u32,

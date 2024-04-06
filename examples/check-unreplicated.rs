@@ -3,7 +3,7 @@ use std::{thread::available_parallelism, time::Duration};
 use augustus::{
     app::kvstore::{static_workload, InfinitePutGet, Op, Result},
     search::{breadth_first, random_depth_first, Settings},
-    unreplicated::check::{DryState, State},
+    unreplicated::check::State,
     util::Payload,
     workload::{Check, DryRecorded, Iter, Recorded, Workload},
 };
@@ -15,6 +15,8 @@ use tikv_jemallocator::Jemalloc;
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
+
+type DryState<W> = State<W>;
 
 fn main() -> anyhow::Result<()> {
     println!("* Single client; Put, Append, Get");
@@ -145,7 +147,7 @@ fn main() -> anyhow::Result<()> {
         prune: |_: &_| false,
         max_depth: None,
     };
-    let result = breadth_first::<_, DryState<DryRecorded<()>>, _, _, _>(
+    let result = breadth_first::<_, DryState<_>, _, _, _>(
         state.clone(),
         settings.clone(),
         1.try_into().unwrap(),
@@ -159,7 +161,7 @@ fn main() -> anyhow::Result<()> {
         prune: settings.goal,
         max_depth: None,
     };
-    let result = breadth_first::<_, DryState<DryRecorded<()>>, _, _, _>(
+    let result = breadth_first::<_, DryState<_>, _, _, _>(
         state,
         settings,
         1.try_into().unwrap(),
@@ -178,7 +180,7 @@ fn main() -> anyhow::Result<()> {
         prune: |_: &_| false,
         max_depth: None,
     };
-    let result = breadth_first::<_, DryState<()>, _, _, _>(
+    let result = breadth_first::<_, DryState<_>, _, _, _>(
         state.clone(),
         settings.clone(),
         available_parallelism()?,
@@ -187,7 +189,7 @@ fn main() -> anyhow::Result<()> {
     )?;
     println!("{result:?}");
     settings.max_depth = Some(1000.try_into().unwrap());
-    let result = random_depth_first::<_, DryState<()>, _, _, _>(
+    let result = random_depth_first::<_, DryState<_>, _, _, _>(
         state,
         settings,
         available_parallelism()?,

@@ -27,6 +27,7 @@ impl<T: ?Sized + SendEvent<M>, M> SendEvent<M> for Box<T> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Void; // for testing
 
 impl<M> SendEvent<M> for Void {

@@ -77,5 +77,6 @@ rcgen = { git = "https://github.com/rustls/rcgen", version = "0.13.0", features 
 ] }
 
 replication-control-messages = { version = "0.1.0", path = "tools/replication-control-messages" }
+derive-where = "1.2.7"
 [dev-dependencies]
 proptest = "1.4.0"

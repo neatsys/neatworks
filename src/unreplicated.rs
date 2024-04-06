@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, fmt::Debug, time::Duration};
 
+use derive_where::derive_where;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -37,14 +38,17 @@ impl From<Invoke> for ClientEvent {
 pub trait ClientUpcall: SendEvent<InvokeOk> {}
 impl<T: SendEvent<InvokeOk>> ClientUpcall for T {}
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
+#[derive_where(Debug, PartialEq, Eq, Hash; A)]
 pub struct Client<N, U, A> {
     id: u32,
     addr: A,
     seq: u32,
     invoke: Option<ClientInvoke>,
 
+    #[derive_where(skip)]
     net: N,
+    #[derive_where(skip)]
     upcall: U,
 }
 
@@ -129,24 +133,17 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> Client<N, U, A> {
 #[derive(Debug)]
 pub enum ReplicaEvent<A> {
     Ingress(Request<A>),
-    Dummy, //
+    Dummy, // prevent unrealistic optimization in the typed message deployment
 }
 
 #[derive(Clone)]
+#[derive_where(Debug, PartialEq, Eq, Hash; S)]
 pub struct Replica<S, N, A> {
     replies: BTreeMap<u32, Reply>,
     app: S,
-    _addr_marker: std::marker::PhantomData<A>,
+    #[derive_where(skip)]
     net: N,
-}
-
-impl<S: Debug, N, A> Debug for Replica<S, N, A> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Replica")
-            .field("replies", &self.replies)
-            .field("app", &self.app)
-            .finish_non_exhaustive()
-    }
+    _addr_marker: std::marker::PhantomData<A>,
 }
 
 impl<S, N, A> Replica<S, N, A> {
@@ -154,8 +151,8 @@ impl<S, N, A> Replica<S, N, A> {
         Self {
             app,
             net,
-            _addr_marker: Default::default(),
             replies: Default::default(),
+            _addr_marker: Default::default(),
         }
     }
 }
@@ -257,6 +254,7 @@ pub mod check {
         mem::replace,
     };
 
+    use derive_where::derive_where;
     use serde::{Deserialize, Serialize};
 
     use crate::{
@@ -268,11 +266,12 @@ pub mod check {
         },
         net::{events::Recv, SendMessage},
         util::Request,
-        workload::{check::DryCloseLoop, CloseLoop, Invoke, InvokeOk, Workload},
+        workload::{CloseLoop, Invoke, InvokeOk, Workload},
     };
 
     use super::{ClientInvoke, Reply};
 
+    // we don't really do (de)serialization on this address type, just to conform `Addr`
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
     pub enum Addr {
         Client(usize),
@@ -282,37 +281,20 @@ pub mod check {
     type Client = super::Client<Transient<MessageEvent>, Transient<InvokeOk>, Addr>;
     type Replica = super::Replica<KVStore, Transient<MessageEvent>, Addr>;
 
+    #[derive_where(PartialEq, Eq, Hash; W::Attach)]
+    #[derive_where(Debug, Clone; W, W::Attach)]
     pub struct State<W: Workload> {
         pub clients: Vec<ClientState<W>>,
         pub replica: Replica,
         message_events: BTreeSet<MessageEvent>,
     }
 
+    #[derive_where(PartialEq, Eq, Hash; W::Attach)]
+    #[derive_where(Debug, Clone; W, W::Attach)]
     pub struct ClientState<W: Workload> {
         pub state: Client,
         timer: Timer,
         pub close_loop: CloseLoop<W, Transient<Invoke>>,
-    }
-
-    impl<W: Workload + Clone> Clone for State<W>
-    where
-        W::Attach: Clone,
-    {
-        fn clone(&self) -> Self {
-            Self {
-                clients: self
-                    .clients
-                    .iter()
-                    .map(|client| ClientState {
-                        state: client.state.clone(),
-                        timer: client.timer.clone(),
-                        close_loop: client.close_loop.clone(),
-                    })
-                    .collect(),
-                replica: self.replica.clone(),
-                message_events: self.message_events.clone(),
-            }
-        }
     }
 
     #[derive(Debug, Clone)]
@@ -339,22 +321,22 @@ pub mod check {
         client_index: usize,
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-    pub struct DryState<T> {
-        clients: Vec<DryClientState<T>>,
-        replica: DryReplica,
-        message_events: BTreeSet<MessageEvent>,
-    }
+    // #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    // pub struct DryState<T> {
+    //     clients: Vec<DryClientState<T>>,
+    //     replica: DryReplica,
+    //     message_events: BTreeSet<MessageEvent>,
+    // }
 
-    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-    pub struct DryClientState<T> {
-        // inlining `state` here to avoid a `DryClientStateState` struct
-        id: u32,
-        addr: Addr,
-        seq: u32,
-        invoke: Option<ClientInvoke>,
-        close_loop: DryCloseLoop<T>,
-    }
+    // #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    // pub struct DryClientState<T> {
+    //     // inlining `state` here to avoid a `DryClientStateState` struct
+    //     id: u32,
+    //     addr: Addr,
+    //     seq: u32,
+    //     invoke: Option<ClientInvoke>,
+    //     close_loop: DryCloseLoop<T>,
+    // }
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub struct DryReplica {
@@ -362,30 +344,30 @@ pub mod check {
         app: KVStore,
     }
 
-    impl<W: Workload + Into<T>, T> From<State<W>> for DryState<T> {
-        fn from(value: State<W>) -> Self {
-            let clients = value
-                .clients
-                .into_iter()
-                .map(|client| DryClientState {
-                    id: client.state.id,
-                    addr: client.state.addr,
-                    seq: client.state.seq,
-                    invoke: client.state.invoke,
-                    close_loop: client.close_loop.into(),
-                })
-                .collect();
-            let replica = DryReplica {
-                replies: value.replica.replies,
-                app: value.replica.app,
-            };
-            Self {
-                clients,
-                replica,
-                message_events: value.message_events,
-            }
-        }
-    }
+    // impl<W: Workload + Into<T>, T> From<State<W>> for DryState<T> {
+    //     fn from(value: State<W>) -> Self {
+    //         let clients = value
+    //             .clients
+    //             .into_iter()
+    //             .map(|client| DryClientState {
+    //                 id: client.state.id,
+    //                 addr: client.state.addr,
+    //                 seq: client.state.seq,
+    //                 invoke: client.state.invoke,
+    //                 close_loop: client.close_loop.into(),
+    //             })
+    //             .collect();
+    //         let replica = DryReplica {
+    //             replies: value.replica.replies,
+    //             app: value.replica.app,
+    //         };
+    //         Self {
+    //             clients,
+    //             replica,
+    //             message_events: value.message_events,
+    //         }
+    //     }
+    // }
 
     impl<M: Into<Message>> SendMessage<Addr, M> for Transient<MessageEvent> {
         fn send(&mut self, dest: Addr, message: M) -> anyhow::Result<()> {

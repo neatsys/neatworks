@@ -1,5 +1,6 @@
-use std::{collections::BTreeMap, panic::UnwindSafe};
+use std::{collections::BTreeMap, hash::Hash, panic::UnwindSafe};
 
+use derive_where::derive_where;
 use rand::{distributions::Alphanumeric, rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
@@ -61,8 +62,9 @@ impl App for KVStore {
 }
 
 pub fn static_workload(
+    // ask for exact size as a safety manner, we are `collecting` inside
     rounds: impl ExactSizeIterator<Item = (Op, Result)>,
-) -> anyhow::Result<impl Workload<Attach = ()> + Clone + Into<()> + UnwindSafe> {
+) -> anyhow::Result<impl Workload<Attach = ()> + Clone + UnwindSafe> {
     Ok(Check::new(
         rounds
             .map(|(op, result)| {
@@ -76,9 +78,11 @@ pub fn static_workload(
     ))
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive_where(Hash)]
 pub struct InfinitePutGet {
     namespace: String,
+    #[derive_where(skip)] // is this safe?
     rng: StdRng,
     values: [String; 5],
     should_get: bool,
