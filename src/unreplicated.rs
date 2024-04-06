@@ -269,7 +269,7 @@ pub mod check {
         workload::{CloseLoop, Invoke, InvokeOk, Workload},
     };
 
-    use super::{ClientInvoke, Reply};
+    use super::Reply;
 
     // we don't really do (de)serialization on this address type, just to conform `Addr`
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -321,53 +321,11 @@ pub mod check {
         client_index: usize,
     }
 
-    // #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-    // pub struct DryState<T> {
-    //     clients: Vec<DryClientState<T>>,
-    //     replica: DryReplica,
-    //     message_events: BTreeSet<MessageEvent>,
-    // }
-
-    // #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-    // pub struct DryClientState<T> {
-    //     // inlining `state` here to avoid a `DryClientStateState` struct
-    //     id: u32,
-    //     addr: Addr,
-    //     seq: u32,
-    //     invoke: Option<ClientInvoke>,
-    //     close_loop: DryCloseLoop<T>,
-    // }
-
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub struct DryReplica {
         replies: BTreeMap<u32, Reply>,
         app: KVStore,
     }
-
-    // impl<W: Workload + Into<T>, T> From<State<W>> for DryState<T> {
-    //     fn from(value: State<W>) -> Self {
-    //         let clients = value
-    //             .clients
-    //             .into_iter()
-    //             .map(|client| DryClientState {
-    //                 id: client.state.id,
-    //                 addr: client.state.addr,
-    //                 seq: client.state.seq,
-    //                 invoke: client.state.invoke,
-    //                 close_loop: client.close_loop.into(),
-    //             })
-    //             .collect();
-    //         let replica = DryReplica {
-    //             replies: value.replica.replies,
-    //             app: value.replica.app,
-    //         };
-    //         Self {
-    //             clients,
-    //             replica,
-    //             message_events: value.message_events,
-    //         }
-    //     }
-    // }
 
     impl<M: Into<Message>> SendMessage<Addr, M> for Transient<MessageEvent> {
         fn send(&mut self, dest: Addr, message: M) -> anyhow::Result<()> {
@@ -548,17 +506,6 @@ pub mod check {
 // approach to add a optional method on `SendEvent` trait which takes all
 // buffered events out and dedicate to model checking usage
 //
-// after several reiterations, the whole `impl State` is almost `Eq + Hash`.
-// but there's still `impl Workload` out there for now. besides, it's a good
-// timing to trim the redundant states when turns it into `impl Eq + Hash`, to
-// reduce the `Eq` and `Hash` overhead (at the cost of `Into` overhead). so i
-// introduce the concept of "dry state" that is `Eq + Hash` and fulfills BFS's
-// demand: two states with identical dry state will have identical successor
-// state space. a `impl State` should implement "dehydration" process i.e.
-// `impl Into` the dry state. interestingly DSLabs also has an "equal and hash
-// wrapper" thing for BFS and similarly "dehydrates" timers stuff from the
-// state. i don't know why that is necessary for DSLabs though
-//
 // the codebase intentionally be flexible on event types. indeed, it does not
 // perform model checking for networking apps, but perform model checking for
 // general event-driven apps. each `impl State` defines its own set of events
@@ -589,15 +536,14 @@ pub mod check {
 // it a problem is that all these boilerplate have to be protocol specific.
 // there's hardly any code to be reused across protocols
 //
-// that's it. the `impl Into<DryState>` boilerplate. the explicit event
-// hierarchy, with the boilerplate to unify/dispatch events. all these probably
-// have interior complexity and can only be abstracted at least at derivable
-// macros level, that is, we cannot write a bunch of trait and let compiler to
-// generate them automatically. i guess this is the cost we have to pay to
-// perform model checking
+// that's it. i have been continuously simplifying the required boilerplate, but
+// many of it still persists, and must be available before writing even single
+//"hello world" level unit test. all these probably have interior complexity and
+// can only be abstracted at least at derivable macros level, that is, we cannot
+// write a bunch of trait and let compiler to generate them automatically. i
+// guess this is the cost we have to pay to perform model checking
 // * in a static-typed language
 // * which happens to lack runtime reflection
-// * and we do not have a clear expectation on how protocols we are/will be
-//   writing looks in mind
+// * and demands to support protocols that may/can do anything
 // fortunately the performance speedup kind of pays off. however, when things
 // come to unit testing, a less-effort approach is very desirable

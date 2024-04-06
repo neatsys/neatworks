@@ -104,6 +104,16 @@ impl<S, T: Debug, E: Debug> Display for SearchResult<S, T, E> {
     }
 }
 
+// historically there are two state types: the original state `S` and the "dry" state `T`
+// the rationale is that it could be unreasonable to ask `S`, which may contain moving parts (i.e.
+// `impl SendEvent<_>`s) that prepared for interacting with the real world, to be as "pure" as
+// `impl Eq + Hash`
+// the solution has been improved into a `derive_where`-based opt-out approach, which means `S` may
+// be `impl Eq + Hash` on its own and probably `T = S`
+// the interface is left in the form of distinct `S` and `T` in case of design rollback, and also
+// the code is more readable in current form, where `S` represents the constantly involving states
+// and `T` represents explored achieved states (which is still called "dry state" below)
+// the `S: Into<T>` should become no-op and zero cost, hopefully
 pub fn breadth_first<S, T, I, G, P>(
     initial_state: S,
     settings: Settings<I, G, P>,
@@ -187,6 +197,7 @@ where
     Ok(result)
 }
 
+// the discussion above on `S` and `T` also applies here
 pub fn random_depth_first<S, T, I, G, P>(
     initial_state: S,
     settings: Settings<I, G, P>,

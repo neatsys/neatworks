@@ -20,7 +20,7 @@ use augustus::{
     },
     net::{session::Udp, IndexNet},
     pbft, unreplicated,
-    worker::spawn_backend,
+    worker::{spawn_backend, Submit},
     workload::{CloseLoop, Invoke, InvokeOk, Iter, OpLatency, Workload},
 };
 use axum::{
@@ -98,94 +98,38 @@ async fn start_client(State(state): State<AppState>, Json(config): Json<ClientCo
             .enable_all()
             .build()?;
         match config.protocol {
-            Protocol::Unreplicated => runtime.block_on(client_session::<
-                Blanket<Unify<unreplicated::Client<_, _, _>>>,
-            >(
+            Protocol::Unreplicated => runtime.block_on(client_session(
                 config,
+                |id, addr, net, upcall| {
+                    Blanket(Unify(unreplicated::Client::new(
+                        id,
+                        addr,
+                        unreplicated::ToReplicaMessageNet::new(net),
+                        upcall,
+                    )))
+                },
                 unreplicated::erased::to_client_on_buf,
                 benchmark_result,
             )),
-            Protocol::Pbft => {
-                runtime.block_on(client_session::<Blanket<Buffered<pbft::Client<_>>>>(
-                    config,
-                    pbft::to_client_on_buf,
-                    benchmark_result,
-                ))
-            }
+            Protocol::Pbft => runtime.block_on(client_session(
+                config.clone(),
+                |id, addr, net, upcall| {
+                    Blanket(Buffered::from(pbft::Client::new(
+                        id,
+                        addr,
+                        pbft::ToReplicaMessageNet::new(net),
+                        upcall,
+                        config.num_replica,
+                        config.num_faulty,
+                    )))
+                },
+                pbft::to_client_on_buf,
+                benchmark_result,
+            )),
         }
     });
     let replaced = session.replace((handle, cancel));
     assert!(replaced.is_none())
-}
-
-trait NewClient<S> {
-    fn new_client(
-        &self,
-        id: u32,
-        addr: SocketAddr,
-        net: Udp,
-        upcall: impl SendEvent<InvokeOk> + Send + Sync + 'static,
-    ) -> S;
-}
-
-impl
-    NewClient<
-        Blanket<
-            Unify<
-                unreplicated::Client<
-                    Box<dyn unreplicated::ToReplicaNet<SocketAddr> + Send + Sync>,
-                    Box<dyn unreplicated::ClientUpcall + Send + Sync>,
-                    SocketAddr,
-                >,
-            >,
-        >,
-    > for ClientConfig
-{
-    fn new_client(
-        &self,
-        id: u32,
-        addr: SocketAddr,
-        net: Udp,
-        upcall: impl SendEvent<InvokeOk> + Send + Sync + 'static,
-    ) -> Blanket<
-        Unify<
-            unreplicated::Client<
-                Box<dyn unreplicated::ToReplicaNet<SocketAddr> + Send + Sync>,
-                Box<dyn unreplicated::ClientUpcall + Send + Sync>,
-                SocketAddr,
-            >,
-        >,
-    > {
-        Blanket(Unify(unreplicated::Client::new(
-            id,
-            addr,
-            Box::new(unreplicated::ToReplicaMessageNet::new(IndexNet::new(
-                net,
-                self.replica_addrs.clone(),
-                None,
-            ))),
-            Box::new(upcall),
-        )))
-    }
-}
-
-impl NewClient<Blanket<Buffered<pbft::Client<SocketAddr>>>> for ClientConfig {
-    fn new_client(
-        &self,
-        id: u32,
-        addr: SocketAddr,
-        net: Udp,
-        upcall: impl SendEvent<InvokeOk> + Send + Sync + 'static,
-    ) -> Blanket<Buffered<pbft::Client<SocketAddr>>> {
-        Blanket(Buffered::from(pbft::Client::new(
-            id,
-            addr,
-            pbft::ToReplicaMessageNet::new(IndexNet::new(net, self.replica_addrs.clone(), None)),
-            upcall,
-            self.num_replica,
-            self.num_faulty,
-        )))
-    }
 }
 
 async fn client_session<
@@ -196,11 +140,16 @@ async fn client_session<
         + 'static,
 >(
     config: ClientConfig,
+    new_client: impl Fn(
+        u32,
+        SocketAddr,
+        IndexNet<Udp, SocketAddr>,
+        Box<dyn SendEvent<InvokeOk> + Send + Sync>,
+    ) -> S,
     on_buf: impl Fn(&[u8], &mut Sender<S>) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
     benchmark_result: Arc<Mutex<Option<BenchmarkResult>>>,
 ) -> anyhow::Result<()>
 where
-    ClientConfig: NewClient<S>,
     Sender<S>: SendEvent<Invoke>,
 {
     let mut sessions = JoinSet::new();
@@ -214,6 +163,7 @@ where
             spawn_client_sessions(
                 &mut sessions,
                 config,
+                new_client,
                 on_buf,
                 || OpLatency::new(Iter(repeat_with(Default::default))),
                 stop.clone(),
@@ -239,6 +189,7 @@ where
             spawn_client_sessions(
                 &mut sessions,
                 config,
+                new_client,
                 on_buf,
                 || {
                     i += 1;
@@ -285,6 +236,12 @@ async fn spawn_client_sessions<
 >(
     sessions: &mut JoinSet<anyhow::Result<()>>,
     config: ClientConfig,
+    new_client: impl Fn(
+        u32,
+        SocketAddr,
+        IndexNet<Udp, SocketAddr>,
+        Box<dyn SendEvent<InvokeOk> + Send + Sync>,
+    ) -> S,
     on_buf: impl Fn(&[u8], &mut Sender<S>) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
     mut workload: impl FnMut() -> W,
     stop: CancellationToken,
@@ -292,7 +249,6 @@ async fn spawn_client_sessions<
     barrier: Arc<Barrier>,
 ) -> anyhow::Result<()>
 where
-    ClientConfig: NewClient<S>,
     Sender<S>: SendEvent<Invoke>,
     W::Attach: Send + Sync,
 {
@@ -305,11 +261,11 @@ where
         let mut session = Session::new();
         let mut close_loop_session = Session::new();
 
-        let mut state = config.new_client(
+        let mut state = new_client(
             client_id,
             addr,
-            net.clone(),
-            Sender::from(close_loop_session.sender()),
+            IndexNet::new(net.clone(), config.replica_addrs.clone(), None),
+            Box::new(Sender::from(close_loop_session.sender())),
         );
         let mut close_loop = Blanket(Unify(CloseLoop::new(
             Sender::from(session.sender()),
@@ -404,7 +360,7 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
                 assert_eq!(config.replica_id, 0);
                 let state = Blanket(Unify(unreplicated::Replica::new(
                     app,
-                    Box::new(unreplicated::ToClientMessageNet::new(net.clone())),
+                    unreplicated::ToClientMessageNet::new(net.clone()),
                 )));
                 runtime.block_on(replica_session(
                     state,
@@ -415,7 +371,7 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
                 ))
             }
             Protocol::Pbft => {
-                let state = Blanket(Buffered::from(pbft::Replica::<_, SocketAddr>::new(
+                let state = Blanket(Buffered::from(pbft::Replica::new(
                     config.replica_id,
                     app,
                     pbft::ToReplicaMessageNet::new(IndexNet::new(
@@ -424,7 +380,10 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
                         config.replica_id as usize,
                     )),
                     pbft::ToClientMessageNet::new(net.clone()),
-                    crypto_worker,
+                    Box::new(pbft::CryptoWorker::from(crypto_worker))
+                        as Box<
+                            dyn Submit<Crypto, dyn pbft::SendCryptoEvent<SocketAddr>> + Send + Sync,
+                        >,
                     config.num_replica,
                     config.num_faulty,
                 )));
@@ -472,7 +431,7 @@ async fn replica_session<
             result = &mut state_session => result??,
             () = cancel.cancelled() => break 'select,
         }
-        return Err(anyhow::anyhow!("unexpected shutdown"));
+        return Err(anyhow::anyhow!("unreachable"));
     }
     recv_session.abort();
     crypto_session.abort();

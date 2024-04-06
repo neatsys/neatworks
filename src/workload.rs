@@ -45,14 +45,10 @@ impl<T: Iterator<Item = Payload>> Workload for Iter<T> {
     }
 }
 
-impl<I> From<Iter<I>> for () {
-    fn from(_: Iter<I>) -> Self {}
-}
-
 // coupling workload generation and latency measurement may not be a good design
 // generally speaking, there should be a concept of "transaction" that composed from one or more
 // ops, and latency is mean to be measured against transactions
-// current the transaction concept is skipped, maybe revisit the design later
+// currently the transaction concept is skipped, maybe revisit the design later
 #[derive(Debug, derive_more::Deref)]
 pub struct OpLatency<W> {
     #[deref]
@@ -107,12 +103,6 @@ impl<W> From<W> for Recorded<W> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DryRecorded<T> {
-    inner: T,
-    pub invocations: Vec<(Payload, Payload)>,
-}
-
 impl<W: Workload> Workload for Recorded<W> {
     type Attach = (Payload, W::Attach);
 
@@ -126,15 +116,6 @@ impl<W: Workload> Workload for Recorded<W> {
     fn on_result(&mut self, result: Payload, (op, attach): Self::Attach) -> anyhow::Result<()> {
         self.invocations.push((op, result.clone()));
         self.inner.on_result(result, attach)
-    }
-}
-
-impl<W: Into<T>, T> From<Recorded<W>> for DryRecorded<T> {
-    fn from(value: Recorded<W>) -> Self {
-        Self {
-            inner: value.inner.into(),
-            invocations: value.invocations,
-        }
     }
 }
 
@@ -179,12 +160,6 @@ impl<W: Workload> Workload for Total<W> {
         self.inner.on_result(result, attach)
     }
 }
-
-// impl<W: Into<T>, T> From<Total<W>> for T {
-//     fn from(value: Total<W>) -> Self {
-//         value.inner.into()
-//     }
-// }
 
 #[derive(Debug, Clone)]
 pub struct Check<I> {
@@ -242,10 +217,6 @@ impl<I: Iterator<Item = (Payload, Payload)>> Workload for Check<I> {
             })?
         }
     }
-}
-
-impl<I> From<Check<I>> for () {
-    fn from(_: Check<I>) -> Self {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

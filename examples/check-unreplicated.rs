@@ -5,7 +5,7 @@ use augustus::{
     search::{breadth_first, random_depth_first, Settings},
     unreplicated::check::State,
     util::Payload,
-    workload::{Check, DryRecorded, Iter, Recorded, Workload},
+    workload::{Check, Iter, Recorded, Workload},
 };
 use rand::thread_rng;
 
@@ -161,12 +161,8 @@ fn main() -> anyhow::Result<()> {
         prune: settings.goal,
         max_depth: None,
     };
-    let result = breadth_first::<_, DryState<_>, _, _, _>(
-        state,
-        settings,
-        1.try_into().unwrap(),
-        None,
-    )?;
+    let result =
+        breadth_first::<_, DryState<_>, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
     println!("{result:?}");
 
     println!("* Infinite workload searches (with 2 clients)");

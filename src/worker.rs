@@ -146,6 +146,12 @@ pub trait Submit<S, E: ?Sized> {
     fn submit(&mut self, work: Work<S, E>) -> anyhow::Result<()>;
 }
 
+impl<W: ?Sized + Submit<S, E>, S, E: ?Sized> Submit<S, E> for Box<W> {
+    fn submit(&mut self, work: Work<S, E>) -> anyhow::Result<()> {
+        W::submit(self, work)
+    }
+}
+
 pub enum Worker<S, E> {
     Null,
     Inline(S, E),
