@@ -6,10 +6,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    event::{erased::OnEvent, SendEvent, Timer},
-    net::{events::Recv, Addr, SendMessage},
+    event::{erased::OnEvent, Timer},
+    net::{events::Recv, Addr, All, SendMessage},
     util::Payload,
-    worker::erased::Worker,
 };
 
 // "key" under COPS context, "id" under Boson's logical clock context
@@ -50,11 +49,11 @@ pub trait ClientNet<A, V>: SendMessage<A, GetOk<V, A>> + SendMessage<A, PutOk<V>
 impl<T: SendMessage<A, GetOk<V, A>> + SendMessage<A, PutOk<V>>, A, V> ClientNet<A, V> for T {}
 
 pub trait ServerNet<A, V>:
-    SendMessage<A, Put<V, A>> + SendMessage<A, Get<A>> + SendMessage<A, SyncKey<V, A>>
+    SendMessage<u8, Put<V, A>> + SendMessage<u8, Get<A>> + SendMessage<All, SyncKey<V, A>>
 {
 }
 impl<
-        T: SendMessage<A, Put<V, A>> + SendMessage<A, Get<A>> + SendMessage<A, SyncKey<V, A>>,
+        T: SendMessage<u8, Put<V, A>> + SendMessage<u8, Get<A>> + SendMessage<All, SyncKey<V, A>>,
         A,
         V,
     > ServerNet<A, V> for T
@@ -68,26 +67,26 @@ pub trait VersionService {
         id: KeyId,
         previous: Option<Self::Version>,
         deps: Vec<Self::Version>,
-    ) -> anyhow::Result<Self::Version>;
+    ) -> anyhow::Result<()>;
 }
 
 pub trait Version: PartialOrd + Clone + Send + Sync + 'static {}
 impl<T: PartialOrd + Clone + Send + Sync + 'static> Version for T {}
 
-pub struct VersionOk<V>(pub KeyId, pub V);
+pub struct VersionOk<V, A>(pub Put<V, A>, pub V);
 
 // pub struct Client<V> {
 // }
 
-pub struct Server<N, CN, VS, E, V, A> {
+pub struct Server<N, CN, VS, V, A> {
     store: BTreeMap<KeyId, (Put<V, A>, V)>,
     net: N,
     client_net: CN,
-    version_worker: Worker<VS, E>,
+    version_worker: VS,
 }
 
-impl<N, CN: ClientNet<A, V>, A: Addr, V: Version, VS, E> OnEvent<Recv<Get<A>>>
-    for Server<N, CN, VS, E, V, A>
+impl<N, CN: ClientNet<A, V>, A: Addr, V: Version, VS> OnEvent<Recv<Get<A>>>
+    for Server<N, CN, VS, V, A>
 {
     fn on_event(&mut self, Recv(get): Recv<Get<A>>, _: &mut impl Timer) -> anyhow::Result<()> {
         if let Some((put, version)) = self.store.get(&get.key) {
@@ -101,14 +100,8 @@ impl<N, CN: ClientNet<A, V>, A: Addr, V: Version, VS, E> OnEvent<Recv<Get<A>>>
     }
 }
 
-impl<
-        N: ServerNet<A, V>,
-        CN: ClientNet<A, V>,
-        A,
-        V: Version,
-        VS: VersionService<Version = V>,
-        E: SendEvent<VersionOk<V>>,
-    > OnEvent<Recv<Put<V, A>>> for Server<N, CN, VS, E, V, A>
+impl<N: ServerNet<A, V>, CN: ClientNet<A, V>, A, V: Version, VS: VersionService<Version = V>>
+    OnEvent<Recv<Put<V, A>>> for Server<N, CN, VS, V, A>
 {
     fn on_event(&mut self, Recv(put): Recv<Put<V, A>>, _: &mut impl Timer) -> anyhow::Result<()> {
         if let Some((_, version)) = self.store.get(&put.key) {
@@ -127,14 +120,8 @@ impl<
     }
 }
 
-impl<
-        N,
-        CN: ClientNet<A, V>,
-        A: Addr,
-        V: Version,
-        VS: VersionService<Version = V>,
-        E: SendEvent<VersionOk<V>>,
-    > OnEvent<Recv<SyncKey<V, A>>> for Server<N, CN, VS, E, V, A>
+impl<N, CN: ClientNet<A, V>, A: Addr, V: Version, VS: VersionService<Version = V>>
+    OnEvent<Recv<SyncKey<V, A>>> for Server<N, CN, VS, V, A>
 {
     fn on_event(
         &mut self,
@@ -147,21 +134,21 @@ impl<
     }
 }
 
-// impl<
-//         N,
-//         CN: ClientNet<A, V>,
-//         A,
-//         V: PartialOrd + Clone,
-//         VS: VersionService<Version = V>,
-//         E: SendEvent<VersionOk<V>>,
-//     > OnEvent<VersionOk<V>> for Server<N, CN, VS, E, V, A>
-// {
-//     fn on_event(
-//         &mut self,
-//         VersionOk(key, version): VersionOk<V>,
-//         _: &mut impl Timer,
-//     ) -> anyhow::Result<()> {
-//         //
-//         Ok(())
-//     }
-// }
+impl<
+        N: ServerNet<A, V>,
+        CN: ClientNet<A, V>,
+        A,
+        V: PartialOrd + Clone,
+        VS: VersionService<Version = V>,
+    > OnEvent<VersionOk<V, A>> for Server<N, CN, VS, V, A>
+{
+    fn on_event(
+        &mut self,
+        VersionOk(put, version): VersionOk<V, A>,
+        _: &mut impl Timer,
+    ) -> anyhow::Result<()> {
+        let sync_key = SyncKey { put, version };
+        self.net.send(All, sync_key)
+        // TODO
+    }
+}

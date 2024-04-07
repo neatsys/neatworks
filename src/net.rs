@@ -20,6 +20,7 @@ use std::{fmt::Debug, hash::Hash, marker::PhantomData};
 
 use bincode::Options as _;
 use bytes::Bytes;
+use derive_where::derive_where;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::event::SendEvent;
@@ -51,10 +52,10 @@ impl Buf for bytes::Bytes {}
 // the `A` parameter used to be an associated type, and later get lifted to
 // contravariant position to enable implementations to send to multiple address
 // types
-// there used to be a dediated trait for raw net, but later get merged into this
-// univeral trait
+// there used to be a dedicated trait for raw net, but later get merged into
+// this universal trait
 // these result in the fact that `Addr` and `Buf` traits are not directly
-// mentioned in sending trait anymore. nevertheless, constrait type parameters
+// mentioned in sending trait anymore. nevertheless, constraint type parameters
 // with them manually when necessary
 
 // it's obvious that `M` is not required to `impl Buf` for all cases, but `A`
@@ -85,7 +86,7 @@ impl<T: ?Sized + SendMessage<A, M>, A, M> SendMessage<A, M> for Box<T> {
 }
 
 // an `IterAddr` type for broadcast (or multicast, depends on context)
-// serivce provider site should impl `SendMessage<IterAddr<_>, _>`, to fully
+// service provider site should impl `SendMessage<IterAddr<_>, _>`, to fully
 // leverage the combinator that works with generic address types
 
 // this is not usable without "real" higher ranked trait bound i.e.
@@ -106,7 +107,7 @@ pub struct IterAddr<'a, A>(pub &'a mut (dyn Iterator<Item = A> + Send + Sync));
 pub trait SendMessageToEach<A, M>: for<'a> SendMessage<IterAddr<'a, A>, M> {}
 impl<T: for<'a> SendMessage<IterAddr<'a, A>, M>, A, M> SendMessageToEach<A, M> for T {}
 // this has to go into a separated trait because the method is not object safe,
-// while `SendMessageToEach` is a popular candicate for trait object
+// while `SendMessageToEach` is a popular candidate for trait object
 pub trait SendMessageToEachExt<A, M>: SendMessageToEach<A, M> {
     fn send_to_each(
         &mut self,
@@ -126,8 +127,8 @@ pub mod events {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SendAddr<E>(pub E);
 
-#[derive(Debug)]
-pub struct Auto<A>(PhantomData<A>); // TODO better name
+#[derive_where(Debug)]
+pub struct Auto<A>(#[derive_where(skip)] PhantomData<A>); // TODO better name
 
 impl<E: SendEvent<M>, M> SendMessage<SendAddr<E>, M> for Auto<SendAddr<E>> {
     fn send(&mut self, mut dest: SendAddr<E>, message: M) -> anyhow::Result<()> {
@@ -135,8 +136,8 @@ impl<E: SendEvent<M>, M> SendMessage<SendAddr<E>, M> for Auto<SendAddr<E>> {
     }
 }
 
-#[derive(Debug)]
-pub struct MessageNet<T, M>(pub T, PhantomData<M>);
+#[derive_where(Debug, Clone; T)]
+pub struct MessageNet<T, M>(pub T, #[derive_where(skip)] PhantomData<M>);
 
 impl<T, M> MessageNet<T, M> {
     pub fn new(raw_net: T) -> Self {
@@ -147,12 +148,6 @@ impl<T, M> MessageNet<T, M> {
 impl<T, M> From<T> for MessageNet<T, M> {
     fn from(value: T) -> Self {
         Self::new(value)
-    }
-}
-
-impl<T: Clone, M> Clone for MessageNet<T, M> {
-    fn clone(&self) -> Self {
-        Self::new(self.0.clone())
     }
 }
 

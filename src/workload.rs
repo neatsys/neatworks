@@ -1,5 +1,5 @@
 // notice: `App`-specific `impl Workload`s are in `app` module
-// only `App`-agnostic combinators live here
+// only `App`-agnostic combinator lives here
 // maybe not the most reasonable organization but makes enough sense to me
 
 use std::{
@@ -30,7 +30,7 @@ pub trait Workload {
     fn on_result(&mut self, result: Payload, attach: Self::Attach) -> anyhow::Result<()>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub struct Iter<I>(pub I);
 
 impl<T: Iterator<Item = Payload>> Workload for Iter<T> {

@@ -138,7 +138,7 @@ struct Resend;
 impl<N: ToReplicaNet<A>, U, A: Addr> OnEvent<Resend> for Client<N, U, A> {
     fn on_event(&mut self, Resend: Resend, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
         println!("Resend timeout on seq {}", self.seq);
-        self.do_send(crate::net::All)
+        self.do_send(All)
         // Ok(())
     }
 }
@@ -242,6 +242,9 @@ pub struct Replica<N, CN, CW, S, A> {
     commit_quorums: HashMap<u32, HashMap<u8, Verifiable<Commit>>>,
     commit_num: u32,
     app: S,
+    // any op num presents in this maps -> there's ongoing verification submitted
+    // entry presents but empty list -> no pending but one is verifying
+    // no entry present -> no pending and not verifying
     pending_prepares: HashMap<u32, Vec<Verifiable<Prepare>>>,
     pending_commits: HashMap<u32, Vec<Verifiable<Commit>>>,
 
@@ -251,24 +254,13 @@ pub struct Replica<N, CN, CW, S, A> {
 }
 
 #[derive(Debug)]
+#[derive_where(Default)]
 struct LogEntry<A> {
     view_num: u32,
     pre_prepare: Option<Verifiable<PrePrepare>>,
     requests: Vec<Request<A>>,
     prepares: Vec<(u8, Verifiable<Prepare>)>,
     commits: Vec<(u8, Verifiable<Commit>)>,
-}
-
-impl<A> Default for LogEntry<A> {
-    fn default() -> Self {
-        Self {
-            view_num: Default::default(),
-            pre_prepare: Default::default(),
-            requests: Default::default(),
-            prepares: Default::default(),
-            commits: Default::default(),
-        }
-    }
 }
 
 impl<N, CN, CW, S, A> Replica<N, CN, CW, S, A> {
