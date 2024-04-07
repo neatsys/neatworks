@@ -1,5 +1,6 @@
 use std::{net::IpAddr, num::NonZeroUsize, time::Duration};
 
+use primitive_types::H256;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,7 +31,7 @@ pub struct PutConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PutResult {
-    pub digest: [u8; 32],
+    pub digest: H256,
     pub chunks: Vec<(u32, String)>,
     pub latency: Duration,
 }
@@ -45,6 +46,6 @@ pub struct GetConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetResult {
-    pub digest: [u8; 32],
+    pub digest: H256,
     pub latency: Duration,
 }

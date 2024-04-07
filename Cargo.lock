@@ -636,6 +636,7 @@ dependencies = [
 name = "entropy-control-messages"
 version = "0.1.0"
 dependencies = [
+ "primitive-types",
  "serde",
 ]
 

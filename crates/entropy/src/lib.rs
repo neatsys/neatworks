@@ -555,7 +555,7 @@ impl<K> OnEvent<Recv<Verifiable<FragmentAvailable>>> for Peer<K> {
         let Some(state) = self.uploads.get_mut(&fragment_available.chunk) else {
             return Ok(());
         };
-        if fragment_available.peer_id == fragment_available.peer_key.sha256()
+        if H256(fragment_available.peer_id) == fragment_available.peer_key.sha256()
             && self
                 .crypto
                 .verify(&fragment_available.peer_key, &fragment_available)

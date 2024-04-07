@@ -127,7 +127,7 @@ async fn main() -> anyhow::Result<()> {
                 Upcall::PutOk(PutOk(chunk)) => pending_puts
                     .lock()
                     .await
-                    .remove(&chunk)
+                    .remove(&H256(chunk))
                     // if the sender is not present a premature stop-peers is probably executed
                     // which is unexpected
                     .unwrap()
@@ -136,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
                 Upcall::GetOk(GetOk(chunk, buf)) => pending_gets
                     .lock()
                     .await
-                    .remove(&chunk)
+                    .remove(&H256(chunk))
                     .unwrap()
                     .send(buf)
                     .unwrap(),
@@ -165,9 +165,9 @@ struct AppState {
     peers: Arc<Mutex<PeersState>>,
     // runtime: Arc<Runtime>,
     upcall_sender: UnboundedSender<Upcall>,
-    pending_puts: Arc<Mutex<HashMap<[u8; 32], oneshot::Sender<()>>>>,
+    pending_puts: Arc<Mutex<HashMap<H256, oneshot::Sender<()>>>>,
     #[allow(clippy::type_complexity)]
-    pending_gets: Arc<Mutex<HashMap<[u8; 32], oneshot::Sender<Vec<u8>>>>>,
+    pending_gets: Arc<Mutex<HashMap<H256, oneshot::Sender<Vec<u8>>>>>,
     op_client: reqwest::Client,
     benchmark_op_id: Arc<AtomicU32>,
     benchmark_puts: Arc<Mutex<HashMap<u32, JoinHandle<anyhow::Result<PutResult>>>>>,
@@ -377,10 +377,10 @@ async fn put_chunk(
         let (sender, receiver) = oneshot::channel();
         let replaced = state.pending_puts.lock().await.insert(chunk, sender);
         assert!(replaced.is_none());
-        state.peers.lock().await.senders[peer_index].send(Put(chunk, buf))?;
+        state.peers.lock().await.senders[peer_index].send(Put(chunk.into(), buf))?;
         // detach receiving, so that even if http connection closed receiver keeps alive
         tokio::spawn(receiver).await??;
-        anyhow::Result::<_>::Ok(format!("{:x}", H256(chunk)))
+        anyhow::Result::<_>::Ok(format!("{chunk:x}"))
     };
     match task.await {
         Ok(result) => (StatusCode::OK, result),
@@ -396,11 +396,11 @@ async fn get_chunk(
     Path((peer_index, chunk)): Path<(usize, String)>,
 ) -> (StatusCode, Vec<u8>) {
     let task = async {
-        let chunk = chunk.parse::<H256>()?.into();
+        let chunk = chunk.parse()?;
         let (sender, receiver) = oneshot::channel();
         let replaced = state.pending_gets.lock().await.insert(chunk, sender);
         assert!(replaced.is_none());
-        state.peers.lock().await.senders[peer_index].send(Get(chunk))?;
+        state.peers.lock().await.senders[peer_index].send(Get(chunk.into()))?;
         anyhow::Result::<_>::Ok(tokio::spawn(receiver).await??)
     };
     match task.await {
