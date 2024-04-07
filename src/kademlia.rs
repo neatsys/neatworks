@@ -283,7 +283,7 @@ pub struct Peer<A> {
     buckets: Buckets<PublicKey, A>,
     query_states: HashMap<Target, QueryState<A>>,
     refresh_targets: HashSet<Target>,
-    on_bootstrap: Option<OnBootstrap>,
+    on_bootstrap: Option<OnBootstrap>, // TODO change to impl SendEventOnce
     find_peer_ok_seq: u32,
     find_peer_ok_dests: HashMap<u32, A>,
 

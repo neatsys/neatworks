@@ -36,6 +36,26 @@ impl<M> SendEvent<M> for Void {
     }
 }
 
+pub trait SendEventOnce<M> {
+    fn send_once(self, event: M) -> anyhow::Result<()>;
+}
+
+impl<T: SendEvent<M>, M> SendEventOnce<M> for T {
+    fn send_once(mut self, event: M) -> anyhow::Result<()> {
+        SendEvent::send(&mut self, event)
+    }
+}
+
+impl<T: SendEventOnce<M>, M> SendEvent<M> for Option<T> {
+    fn send(&mut self, event: M) -> anyhow::Result<()> {
+        if let Some(emit) = self.take() {
+            emit.send_once(event)
+        } else {
+            Err(anyhow::anyhow!("can only send once"))
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, derive_more::Deref, derive_more::DerefMut)]
 pub struct Transient<M>(Vec<M>);
 

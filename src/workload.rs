@@ -17,7 +17,7 @@ use derive_where::derive_where;
 use crate::{
     event::{
         erased::{events::Init, OnEvent},
-        OnTimer, SendEvent, Timer, Void,
+        OnTimer, SendEvent, SendEventOnce, Timer, Void,
     },
     util::Payload,
 };
@@ -241,7 +241,7 @@ pub struct CloseLoop<W: Workload, E, SE = Void> {
     #[derive_where[skip]]
     pub workload: W,
     workload_attach: Option<W::Attach>,
-    pub stop_sender: SE,
+    pub stop_sender: Option<SE>,
     pub done: bool,
 }
 
@@ -251,7 +251,7 @@ impl<W: Workload, E> CloseLoop<W, E> {
             sender,
             workload,
             workload_attach: None,
-            stop_sender: Void,
+            stop_sender: Some(Void),
             done: false,
         }
     }
@@ -271,7 +271,7 @@ impl<W: Workload, E: SendEvent<Invoke>, SE> OnEvent<Init> for CloseLoop<W, E, SE
     }
 }
 
-impl<W: Workload, E: SendEvent<Invoke>, SE: SendEvent<Stop>> OnEvent<InvokeOk>
+impl<W: Workload, E: SendEvent<Invoke>, SE: SendEventOnce<Stop>> OnEvent<InvokeOk>
     for CloseLoop<W, E, SE>
 {
     fn on_event(&mut self, (_, result): InvokeOk, _: &mut impl Timer) -> anyhow::Result<()> {
