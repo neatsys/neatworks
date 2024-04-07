@@ -378,3 +378,6 @@ mod tests {
         assert_ne!(foo.sha256(), Default::default());
     }
 }
+
+// cSpell:words hasher Borsh endianness seedable keypair prehashed secp256k1
+// cSpell:words schnorrkel secp

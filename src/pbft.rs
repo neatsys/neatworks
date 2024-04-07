@@ -893,3 +893,5 @@ pub fn to_replica_on_buf<A: Addr>(
         ToReplica::Commit(message) => sender.send(Recv(message)),
     }
 }
+
+// cSpell:words upcall
