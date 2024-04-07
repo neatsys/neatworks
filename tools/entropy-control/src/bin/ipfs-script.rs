@@ -11,9 +11,7 @@ async fn main() -> anyhow::Result<()> {
             .args(["-xf", "kubo_v0.26.0_linux-amd64.tar.gz"])
             .status()
             .await?;
-        if !status.success() {
-            anyhow::bail!("Command `tar` exit with {status}")
-        }
+        anyhow::ensure!(status.success(), "Command `tar` exit with {status}");
         return Ok(());
     }
     struct Ipfs(usize);
@@ -40,9 +38,7 @@ async fn main() -> anyhow::Result<()> {
                         .status()
                 })
                 .await?;
-            if !status.success() {
-                anyhow::bail!("Command `ipfs init` exit with {status}")
-            }
+            anyhow::ensure!(status.success(), "Command `ipfs init` exit with {status}");
             let swarm_addrs = serde_json::to_string(&[
                 format!("/ip4/{public_ip}/tcp/{}", 4000 + i),
                 format!("/ip4/{private_ip}/tcp/{}", 4000 + i),
@@ -57,9 +53,10 @@ async fn main() -> anyhow::Result<()> {
                         .status()
                 })
                 .await?;
-            if !status.success() {
-                anyhow::bail!("Command `ipfs config Addresses.Swarm` exit with {status}")
-            }
+            anyhow::ensure!(
+                status.success(),
+                "Command `ipfs config Addresses.Swarm` exit with {status}"
+            );
             let api_addr = serde_json::to_string(&format!("/ip4/0.0.0.0/tcp/{}", 5000 + i))?;
             let status = ipfs
                 .run(|command| {
@@ -71,9 +68,10 @@ async fn main() -> anyhow::Result<()> {
                         .status()
                 })
                 .await?;
-            if !status.success() {
-                anyhow::bail!("Command `ipfs config Addresses.API` exit with {status}")
-            }
+            anyhow::ensure!(
+                status.success(),
+                "Command `ipfs config Addresses.API` exit with {status}"
+            );
             let gateway_addr = serde_json::to_string(&format!("/ip4/127.0.0.1/tcp/{}", 8000 + i))?;
             let status = ipfs
                 .run(|command| {
@@ -85,9 +83,10 @@ async fn main() -> anyhow::Result<()> {
                         .status()
                 })
                 .await?;
-            if !status.success() {
-                anyhow::bail!("Command `ipfs config Addresses.Gateway` exit with {status}")
-            }
+            anyhow::ensure!(
+                status.success(),
+                "Command `ipfs config Addresses.Gateway` exit with {status}"
+            );
 
             let status = ipfs
                 .run(|command| {
@@ -97,9 +96,10 @@ async fn main() -> anyhow::Result<()> {
                         .status()
                 })
                 .await?;
-            if !status.success() {
-                anyhow::bail!("Command `ipfs bootstrap rm all` exit with {status}")
-            }
+            anyhow::ensure!(
+                status.success(),
+                "Command `ipfs bootstrap rm all` exit with {status}"
+            );
             if let Some(seed_addr) = &seed_addr {
                 let status = ipfs
                     .run(|command| {
@@ -109,9 +109,10 @@ async fn main() -> anyhow::Result<()> {
                             .status()
                     })
                     .await?;
-                if !status.success() {
-                    anyhow::bail!("Command `ipfs bootstrap add` exit with {status}")
-                }
+                anyhow::ensure!(
+                    status.success(),
+                    "Command `ipfs bootstrap add` exit with {status}"
+                );
             }
 
             let status = Command::new("tmux")
@@ -122,9 +123,7 @@ async fn main() -> anyhow::Result<()> {
                 .arg(format!("IPFS_PATH=/tmp/ipfs-{i} ./kubo/ipfs daemon"))
                 .status()
                 .await?;
-            if !status.success() {
-                anyhow::bail!("Command `ipfs daemon` exit with {status}")
-            }
+            anyhow::ensure!(status.success(), "Command `ipfs daemon` exit with {status}");
             while seed_addr.is_none() {
                 sleep(Duration::from_millis(500)).await;
                 let out = ipfs.run(|command| command.arg("id").output()).await?.stdout;
@@ -180,9 +179,7 @@ async fn main() -> anyhow::Result<()> {
                     .arg(format!("IPFS_PATH=/tmp/ipfs-{i} ./kubo/ipfs daemon"))
                     .status()
                     .await?;
-                if !status.success() {
-                    anyhow::bail!("Command `ipfs daemon` exit with {status}")
-                }
+                anyhow::ensure!(status.success(), "Command `ipfs daemon` exit with {status}");
             }
         }
         return Ok(());

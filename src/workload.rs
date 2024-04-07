@@ -198,9 +198,7 @@ impl<I: Iterator<Item = (Payload, Payload)>> Workload for Check<I> {
             return Ok(None);
         };
         let replaced = self.expected_result.replace(expected_result);
-        if replaced.is_some() {
-            anyhow::bail!("only support close loop")
-        }
+        anyhow::ensure!(replaced.is_none(), "only support close loop");
         Ok(Some((op, ())))
     }
 
@@ -264,9 +262,7 @@ impl<W: Workload, E: SendEvent<Invoke>, SE> OnEvent<Init> for CloseLoop<W, E, SE
             .next_op()?
             .ok_or(anyhow::anyhow!("not enough op"))?;
         let replaced = self.workload_attach.replace(attach);
-        if replaced.is_some() {
-            anyhow::bail!("duplicated launch")
-        }
+        anyhow::ensure!(replaced.is_none(), "duplicated launching");
         self.sender.send(Invoke(op))
     }
 }

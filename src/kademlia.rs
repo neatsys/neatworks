@@ -359,9 +359,10 @@ impl<A: Addr> OnEvent<Query> for Peer<A> {
         Query(target, count): Query,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        if self.on_bootstrap.is_some() {
-            anyhow::bail!("start query while bootstrap in progress")
-        }
+        anyhow::ensure!(
+            self.on_bootstrap.is_none(),
+            "start query while bootstrap in progress"
+        );
         // there's tiny little chance that the refreshing target (which is randomly chosen) that
         // happens to be queried
         // universe will explode before that happens
@@ -399,9 +400,11 @@ impl<A: Addr> OnEvent<Signed<FindPeer<A>>> for Peer<A> {
             &target,
             find_peer.count.max(NUM_CONCURRENCY.try_into().unwrap()),
         );
-        if records.is_empty() {
-            anyhow::bail!("empty buckets when finding {}", H256(target))
-        }
+        anyhow::ensure!(
+            !records.is_empty(),
+            "empty buckets when finding {}",
+            H256(target)
+        );
         let mut contacting = HashMap::new();
         let mut addrs = Vec::new();
         for record in records
@@ -425,9 +428,7 @@ impl<A: Addr> OnEvent<Signed<FindPeer<A>>> for Peer<A> {
             records,
         };
         let replaced = self.query_states.insert(target, state);
-        if replaced.is_some() {
-            anyhow::bail!("concurrent query to {}", H256(target))
-        }
+        anyhow::ensure!(replaced.is_none(), "concurrent query to {}", H256(target));
         self.net.send_to_each(addrs.into_iter(), find_peer)
     }
 }
@@ -568,9 +569,7 @@ impl<A: Addr> OnEvent<Verified<FindPeerOk<A>>> for Peer<A> {
                     distance(&record.id, &target)
                 }) {
                 Ok(index) => {
-                    if record != state.records[index] {
-                        anyhow::bail!("non-distinct distance")
-                    }
+                    anyhow::ensure!(record == state.records[index], "non-distinct distance")
                 }
                 Err(index) => state.records.insert(index, record),
             }

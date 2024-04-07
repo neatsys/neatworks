@@ -140,12 +140,12 @@ pub trait OnEventRichTimer {
 
 pub struct Buffered<S, M> {
     pub inner: S,
-    attched: HashMap<TimerId, Box<dyn FnMut() -> M + Send + Sync>>,
+    attached: HashMap<TimerId, Box<dyn FnMut() -> M + Send + Sync>>,
 }
 
 struct BufferedTimer<'a, T, M> {
     inner: &'a mut T,
-    attched: &'a mut HashMap<TimerId, Box<dyn FnMut() -> M + Send + Sync>>,
+    attached: &'a mut HashMap<TimerId, Box<dyn FnMut() -> M + Send + Sync>>,
 }
 
 impl<T: Timer, M> RichTimer for BufferedTimer<'_, T, M> {
@@ -157,18 +157,14 @@ impl<T: Timer, M> RichTimer for BufferedTimer<'_, T, M> {
         event: impl FnMut() -> Self::Event + Send + Sync + 'static,
     ) -> anyhow::Result<TimerId> {
         let TimerId(timer_id) = self.inner.set(period)?;
-        let replaced = self.attched.insert(TimerId(timer_id), Box::new(event));
-        if replaced.is_some() {
-            anyhow::bail!("duplicated timer id")
-        }
+        let replaced = self.attached.insert(TimerId(timer_id), Box::new(event));
+        anyhow::ensure!(replaced.is_none(), "duplicated timer id");
         Ok(TimerId(timer_id))
     }
 
     fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()> {
-        let removed = self.attched.remove(&timer_id);
-        if removed.is_some() {
-            anyhow::bail!("missing timer attachment")
-        }
+        let removed = self.attached.remove(&timer_id);
+        anyhow::ensure!(removed.is_some(), "missing timer attachment");
         self.inner.unset(timer_id)
     }
 }
@@ -179,7 +175,7 @@ impl<S: OnEventRichTimer> OnEvent for Buffered<S, S::Event> {
     fn on_event(&mut self, event: Self::Event, timer: &mut impl Timer) -> anyhow::Result<()> {
         let mut timer = BufferedTimer {
             inner: timer,
-            attched: &mut self.attched,
+            attached: &mut self.attached,
         };
         self.inner.on_event(event, &mut timer)
     }
@@ -188,7 +184,7 @@ impl<S: OnEventRichTimer> OnEvent for Buffered<S, S::Event> {
 impl<S: OnEventRichTimer> OnTimer for Buffered<S, S::Event> {
     fn on_timer(&mut self, timer_id: TimerId, timer: &mut impl Timer) -> anyhow::Result<()> {
         let event = (self
-            .attched
+            .attached
             .get_mut(&timer_id)
             .ok_or(anyhow::anyhow!("missing timer attachment"))?)();
         self.on_event(event, timer)
@@ -396,13 +392,13 @@ pub mod erased {
                 }) as _
             };
             let replaced = self.attached.insert(TimerId(timer_id), Box::new(action));
-            if replaced.is_some() {
-                anyhow::bail!("duplicated timer id")
-            }
+            anyhow::ensure!(replaced.is_none(), "duplicated timer id");
             Ok(TimerId(timer_id))
         }
 
         fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()> {
+            let removed = self.attached.remove(&timer_id);
+            anyhow::ensure!(removed.is_some(), "missing timer attachment");
             self.inner.unset(timer_id)
         }
     }

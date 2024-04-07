@@ -518,9 +518,7 @@ async fn put_impl(
         .await
         .ok_or(anyhow::anyhow!("no peer url for the chunk"))???;
     while let Some(also_chunk) = put_sessions.join_next().await {
-        if also_chunk?? != chunk {
-            anyhow::bail!("inconsistent chunk among peers")
-        }
+        anyhow::ensure!(also_chunk?? == chunk, "inconsistent chunk among peers");
     }
     Ok(chunk)
 }

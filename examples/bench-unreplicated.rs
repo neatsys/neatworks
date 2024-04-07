@@ -74,18 +74,14 @@ async fn main() -> anyhow::Result<()> {
     let flag_blocking = args.remove("blocking");
     let flag_dual = args.remove("dual");
     let flag_quic = args.remove("quic");
-    if !args.is_empty() {
-        anyhow::bail!("unknown arguments {args:?}")
-    }
+    anyhow::ensure!(args.is_empty(), "unknown arguments {args:?}");
     #[allow(clippy::nonminimal_bool)]
-    if flag_latency && !flag_client
+    let invalid_combinations = flag_latency && !flag_client
         || flag_client && (flag_dyn || flag_blocking)
         || (flag_tcp || flag_quic) && (flag_blocking || flag_dyn)
         || flag_dual && !flag_blocking
-        || flag_simplex && !flag_tcp
-    {
-        anyhow::bail!("invalid argument combination")
-    }
+        || flag_simplex && !flag_tcp;
+    anyhow::ensure!(!invalid_combinations);
 
     if flag_client {
         let replica_addrs = vec![replica_addr];
@@ -256,7 +252,7 @@ async fn main() -> anyhow::Result<()> {
                 Some(result) = sessions.join_next() => result??,
                 () = sleep(Duration::from_secs(10)) => break 'select,
             }
-            anyhow::bail!("unexpected shutdown")
+            anyhow::bail!("unreachable")
         }
         cancel.cancel();
         drop(count_sender);
@@ -426,5 +422,5 @@ async fn run(
         result = state_session => result?,
         result = ctrl_c() => return Ok(result?),
     }
-    anyhow::bail!("unexpected exit")
+    anyhow::bail!("unreachable")
 }

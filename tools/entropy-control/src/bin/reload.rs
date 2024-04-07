@@ -20,9 +20,7 @@ async fn main() -> anyhow::Result<()> {
             ])
             .status()
             .await?;
-        if !status.success() {
-            anyhow::bail!("Command `cargo build` exit with {status}")
-        }
+        anyhow::ensure!(status.success(), "Command `cargo build` exit with {status}");
     }
 
     println!("Spawning host sessions");
@@ -53,9 +51,7 @@ async fn host_session(ssh_host: String, sync: bool) -> anyhow::Result<()> {
             .arg(format!("{ssh_host}:"))
             .status()
             .await?;
-        if !status.success() {
-            anyhow::bail!("Command `rsync` exit with {status}")
-        }
+        anyhow::ensure!(status.success(), "Command `rsync` exit with {status}");
     }
     let status = Command::new("ssh")
         .arg(ssh_host)
@@ -63,8 +59,6 @@ async fn host_session(ssh_host: String, sync: bool) -> anyhow::Result<()> {
         // .arg("pkill -x entropy; sleep 1; tmux new -d -s entropy \"RUST_BACKTRACE=1 ./entropy 2> entropy.errors\"")
         .status()
         .await?;
-    if !status.success() {
-        anyhow::bail!("Command `entropy` exit with {status}")
-    }
+    anyhow::ensure!(status.success(), "Command `entropy` exit with {status}");
     Ok(())
 }

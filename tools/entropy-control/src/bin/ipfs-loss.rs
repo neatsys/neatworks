@@ -139,9 +139,7 @@ async fn put_session(op_client: reqwest::Client, peer_urls: Vec<String>) -> anyh
             }
         };
         if let Some(saved_hash) = &saved_hash {
-            if hash != *saved_hash {
-                anyhow::bail!("inconsistent hashes")
-            }
+            anyhow::ensure!(hash == *saved_hash, "inconsistent hashes");
         } else {
             saved_hash = Some(hash)
         }
@@ -196,8 +194,9 @@ async fn resume_session(ssh_host: String) -> anyhow::Result<()> {
         .arg("resume-peers")
         .status()
         .await?;
-    if !status.success() {
-        anyhow::bail!("Command `ipfs-script` exit with {status} ({ssh_host})")
-    }
+    anyhow::ensure!(
+        status.success(),
+        "Command `ipfs-script` exit with {status} ({ssh_host})"
+    );
     Ok(())
 }

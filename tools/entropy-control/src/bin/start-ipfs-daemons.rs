@@ -78,9 +78,6 @@ async fn host_session(
         }
         status = output.status
     }
-    if !status.success() {
-        anyhow::bail!("Command `ssh` exit with {status}")
-    }
-    // TODO record seed addr
+    anyhow::ensure!(status.success(), "Command `ssh` exit with {status}");
     Ok(())
 }

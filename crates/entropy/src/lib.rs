@@ -269,14 +269,13 @@ impl<K: Preimage> OnEvent<Put<K>> for Peer<K> {
         Put(preimage, buf): Put<K>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        if buf.len() != self.fragment_len as usize * self.chunk_k.get() {
-            anyhow::bail!(
-                "expect chunk len {} * {}, actual {}",
-                self.fragment_len,
-                self.chunk_k,
-                buf.len()
-            )
-        }
+        anyhow::ensure!(
+            buf.len() == self.fragment_len as usize * self.chunk_k.get(),
+            "expect chunk len {} * {}, actual {}",
+            self.fragment_len,
+            self.chunk_k,
+            buf.len()
+        );
         let chunk = preimage.target();
         let replaced = self.uploads.insert(
             chunk,
@@ -288,9 +287,11 @@ impl<K: Preimage> OnEvent<Put<K>> for Peer<K> {
                 cancel: CancellationToken::new(),
             },
         );
-        if replaced.is_some() {
-            anyhow::bail!("duplicated upload chunk {}", H256(chunk))
-        }
+        anyhow::ensure!(
+            replaced.is_none(),
+            "duplicated upload chunk {}",
+            H256(chunk)
+        );
         let fragment_len = self.fragment_len;
         self.codec_worker.submit(Box::new(move |(), sender| {
             let encoder = Encoder::new(buf.into(), fragment_len)?;
@@ -583,9 +584,11 @@ impl<K: Preimage> OnEvent<Get<K>> for Peer<K> {
                 recover: RecoverState::new(self.fragment_len, self.chunk_k)?,
             },
         );
-        if replaced.is_some() {
-            anyhow::bail!("duplicated download chunk {}", H256(chunk))
-        }
+        anyhow::ensure!(
+            replaced.is_none(),
+            "duplicated download chunk {}",
+            H256(chunk)
+        );
         let pull = Pull {
             chunk,
             peer_id: self.id,

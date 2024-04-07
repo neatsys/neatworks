@@ -123,9 +123,7 @@ fn main() -> anyhow::Result<()> {
                 let Result::AppendResult(value) = serde_json::from_slice::<Result>(result)? else {
                     anyhow::bail!("unexpected {result:?}")
                 };
-                if !value.ends_with(&append_value) {
-                    anyhow::bail!("{op:?} get {result:?}")
-                }
+                anyhow::ensure!(value.ends_with(&append_value), "{op:?} get {result:?}");
                 all_results.push(value)
             }
         }
@@ -134,9 +132,10 @@ fn main() -> anyhow::Result<()> {
             let [prev_value, value] = window else {
                 unreachable!()
             };
-            if !value.starts_with(prev_value) {
-                anyhow::bail!("{value} inconsistent with {prev_value}")
-            }
+            anyhow::ensure!(
+                value.starts_with(prev_value),
+                "{value} inconsistent with {prev_value}"
+            );
         }
         Ok(())
     }

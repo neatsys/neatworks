@@ -84,9 +84,7 @@ impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> OnEvent for Client<N, U, A> {
 
 impl<N: ToReplicaNet<A>, U: ClientUpcall, A: Addr> On<Invoke> for Client<N, U, A> {
     fn on_event(&mut self, Invoke(op): Invoke, timer: &mut impl Timer) -> anyhow::Result<()> {
-        if self.invoke.is_some() {
-            anyhow::bail!("concurrent invocation")
-        }
+        anyhow::ensure!(self.invoke.is_none(), "concurrent invocation");
         self.seq += 1;
         let invoke = ClientInvoke {
             op,
@@ -426,7 +424,7 @@ pub mod check {
                     client.timer.step_timer(&timer_id)?;
                     client.state.on_timer(timer_id, &mut client.timer)?
                 }
-                _ => anyhow::bail!("unexpected event"),
+                _ => anyhow::bail!("unexpected event {event:?}"),
             }
             self.flush()
         }

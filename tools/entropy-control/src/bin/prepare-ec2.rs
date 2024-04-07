@@ -24,9 +24,7 @@ async fn main() -> anyhow::Result<()> {
         ])
         .status()
         .await?;
-    if !status.success() {
-        anyhow::bail!("Command `cargo build` exit with {status}")
-    }
+    anyhow::ensure!(status.success(), "Command `cargo build` exit with {status}");
 
     println!("Spawning host sessions");
     let mut sessions = JoinSet::new();
@@ -65,9 +63,7 @@ async fn host_session(
         .stdout(Stdio::null())
         .status()
         .await?;
-    if !status.success() {
-        anyhow::bail!("Command `apt-get` exit with {status}")
-    }
+    anyhow::ensure!(status.success(), "Command `apt-get` exit with {status}");
 
     let status = Command::new("rsync")
         .arg("target/artifact/ipfs-script")
@@ -75,9 +71,7 @@ async fn host_session(
         .arg(format!("{ssh_host}:"))
         .status()
         .await?;
-    if !status.success() {
-        anyhow::bail!("Command `rsync` exit with {status}")
-    }
+    anyhow::ensure!(status.success(), "Command `rsync` exit with {status}");
 
     let status = Command::new("ssh")
         .arg(&ssh_host)
@@ -85,9 +79,7 @@ async fn host_session(
         .arg("install")
         .status()
         .await?;
-    if !status.success() {
-        anyhow::bail!("Command `ssh` exit with {status}")
-    }
+    anyhow::ensure!(status.success(), "Command `ssh` exit with {status}");
 
     // principly the script should be idempotent, but the following commands are not
     // so offer some mercy

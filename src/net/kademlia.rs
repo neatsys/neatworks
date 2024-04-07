@@ -1,5 +1,6 @@
 use std::{collections::HashMap, fmt::Debug, hash::Hash, num::NonZeroUsize, time::Duration};
 
+use derive_where::derive_where;
 use lru::LruCache;
 use primitive_types::H256;
 
@@ -28,30 +29,25 @@ impl<E: SendEvent<(A, M)>, A, M> SendMessage<A, M> for PeerNet<E> {
     }
 }
 
-// is it useful to have a variant that suppress loopback?
+// is it useful to have a variant that exclude sender from receivers i.e.
+// similar to `All`?
 
 pub trait Net<A, M>: SendMessage<A, M> + for<'a> SendMessageToEach<A, M> {}
 impl<T: SendMessage<A, M> + for<'a> SendMessageToEach<A, M>, A, M> Net<A, M> for T {}
 
+#[derive_where(Debug; M, A, B, B: Eq + Hash)] // awesome!
 pub struct Control<M, A, B = [u8; 32]> {
+    #[derive_where(skip)]
     inner_net: Box<dyn Net<A, M> + Send + Sync>,
+    #[derive_where(skip)]
     peer: Box<dyn SendEvent<Query> + Send + Sync>, // sender handle of a kademlia Peer
     querying_unicasts: HashMap<B, QueryingUnicast<M>>,
     querying_multicasts: HashMap<B, QueryMulticast<M>>,
     pending_multicasts: HashMap<B, Vec<(NonZeroUsize, M)>>,
     // addresses that recently send messages to
-    // assuming temporal locality of addresses that those sent addresses are more likely to be sent
-    // to (again) later
+    // assuming temporal locality of addresses: those sent addresses are more likely to be sent to
+    // (again) later
     addrs: LruCache<B, A>,
-}
-
-impl<M: Debug, A: Debug, B: Debug + Eq + Hash> Debug for Control<M, A, B> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Control")
-            .field("pending_messages", &self.querying_unicasts)
-            .field("records", &self.addrs)
-            .finish_non_exhaustive()
-    }
 }
 
 #[derive(Debug)]
@@ -79,7 +75,7 @@ impl<M, A, B: Eq + Hash> Control<M, A, B> {
             querying_unicasts: Default::default(),
             querying_multicasts: Default::default(),
             pending_multicasts: Default::default(),
-            // cache size is arbitrary chosen for entropy
+            // cache size is currently arbitrary chosen while prioritizing entropy usage
             // in entropy an address may be unicast after it has been multicast, and the multicast
             // has at most 120 receivers
             addrs: LruCache::new(160.try_into().unwrap()),

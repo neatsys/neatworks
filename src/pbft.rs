@@ -118,9 +118,7 @@ impl<N, U, A> Client<N, U, A> {
 
 impl<N: ToReplicaNet<A>, U, A: Addr> OnEvent<Invoke> for Client<N, U, A> {
     fn on_event(&mut self, Invoke(op): Invoke, timer: &mut impl Timer<Self>) -> anyhow::Result<()> {
-        if self.invoke.is_some() {
-            anyhow::bail!("concurrent invocation")
-        }
+        anyhow::ensure!(self.invoke.is_none(), "concurrent invocation");
         self.seq += 1;
         let invoke = ClientInvoke {
             op,

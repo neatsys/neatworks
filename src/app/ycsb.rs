@@ -449,9 +449,10 @@ impl<R: Rng> crate::workload::Workload for Workload<R> {
     }
 
     fn on_result(&mut self, result: Payload, key_num: Self::Attach) -> anyhow::Result<()> {
-        if matches!(bincode::options().deserialize(&result)?, Result::NotFound) {
-            anyhow::bail!("expected NotFound")
-        }
+        anyhow::ensure!(
+            !matches!(bincode::options().deserialize(&result)?, Result::NotFound),
+            "unexpected NotFound"
+        );
         if let Some(key_num) = key_num {
             self.insert_state.ack(key_num)
         }

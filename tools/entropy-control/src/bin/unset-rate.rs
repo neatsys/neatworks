@@ -28,19 +28,10 @@ async fn join_sessions(sessions: &mut JoinSet<anyhow::Result<()>>) -> anyhow::Re
 async fn host_session(ssh_host: String) -> anyhow::Result<()> {
     let status = Command::new("ssh")
         .arg(&ssh_host)
+        //     .arg("sudo tc qdisc del dev lo root")
         .arg("sudo tc qdisc del dev ens5 root")
         .status()
         .await?;
-    if !status.success() {
-        anyhow::bail!("Command `tc` exit with {status}")
-    }
-    // let status = Command::new("ssh")
-    //     .arg(&ssh_host)
-    //     .arg("sudo tc qdisc del dev lo root")
-    //     .status()
-    //     .await?;
-    // if !status.success() {
-    //     anyhow::bail!("Command `tc` exit with {status}")
-    // }
+    anyhow::ensure!(status.success(), "Command `tc` exit with {status}");
     Ok(())
 }

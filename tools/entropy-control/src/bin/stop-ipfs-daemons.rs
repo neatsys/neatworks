@@ -32,8 +32,6 @@ async fn host_session(ssh_host: String) -> anyhow::Result<()> {
         .arg("stop-peers")
         .status()
         .await?;
-    if !status.success() {
-        anyhow::bail!("Command `ssh` exit with {status}")
-    }
+    anyhow::ensure!(status.success(), "Command `ssh` exit with {status}");
     Ok(())
 }

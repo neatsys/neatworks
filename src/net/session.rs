@@ -311,9 +311,7 @@ impl Tcp {
                     Err(err) if matches!(err.kind(), ErrorKind::UnexpectedEof) => break Ok(()),
                     Err(err) => Err(err)?,
                 };
-                if len > MAX_BUF_LEN {
-                    anyhow::bail!("invalid buffer length {len}")
-                }
+                anyhow::ensure!(len <= MAX_BUF_LEN, "invalid buffer length {len}");
                 let mut buf = vec![0; len];
                 stream.read_exact(&mut buf).await?;
                 on_buf(&buf)?
