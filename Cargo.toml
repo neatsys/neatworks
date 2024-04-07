@@ -54,8 +54,7 @@ rustc-hash = "1.1.0"
 tikv-jemallocator = "0.5.4"
 # kademlia net
 lru = "0.12.2"
-# kademlia and 32-byte types (digest, peer id, etc)
-primitive-types = "0.12.2"
+primitive-types = { version = "0.12.2", features = ["serde"] }
 # app::ycsb
 rand_distr = "0.4.3"
 # app::sqlite

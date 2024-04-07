@@ -27,7 +27,7 @@ use crate::{
 // 32 bytes array refers to sha256 digest by default in this codebase
 // consider new types if necessary
 // (hopefully no demand on digest-based routing...)
-pub type PeerId = [u8; 32];
+pub type PeerId = [u8; 32]; // TODO
 pub type Target = [u8; 32];
 
 const U256_BITS: usize = 256;
@@ -62,7 +62,7 @@ impl<K: Debug, A: Debug> Debug for PeerRecord<K, A> {
 impl<K: DigestHash, A> PeerRecord<K, A> {
     pub fn new(key: K, addr: A) -> Self {
         Self {
-            id: key.sha256(),
+            id: key.sha256().into(),
             key,
             addr,
         }
@@ -470,7 +470,7 @@ impl<A: Addr> OnEvent<Recv<Verifiable<FindPeer<A>>>> for Peer<A> {
         //     H256(find_peer.target)
         // );
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
-            if find_peer.record.key.sha256() == find_peer.record.id
+            if find_peer.record.key.sha256() == H256(find_peer.record.id)
                 && crypto.verify(&find_peer.record.key, &find_peer).is_ok()
             {
                 sender.send(Verified(find_peer))
@@ -531,7 +531,7 @@ impl<A: Addr> OnEvent<Recv<Verifiable<FindPeerOk<A>>>> for Peer<A> {
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
-            if find_peer_ok.record.key.sha256() == find_peer_ok.record.id
+            if find_peer_ok.record.key.sha256() == H256(find_peer_ok.record.id)
                 && crypto
                     .verify(&find_peer_ok.record.key, &find_peer_ok)
                     .is_ok()
@@ -743,12 +743,6 @@ fn rand_distance_model(index: usize) -> U256 {
 
     U256::from_little_endian(&bytes)
 }
-
-// #[derive(Debug, Clone, derive_more::From, Serialize, Deserialize)]
-// pub enum Message<A> {
-//     FindPeer(Verifiable<FindPeer<A>>),
-//     FindPeerOk(Verifiable<FindPeerOk<A>>),
-// }
 
 pub trait SendRecvEvent<A>:
     SendEvent<Recv<Verifiable<FindPeer<A>>>> + SendEvent<Recv<Verifiable<FindPeerOk<A>>>>

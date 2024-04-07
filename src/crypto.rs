@@ -83,10 +83,10 @@ pub trait DigestHash: Hash {
         Hash::hash(self, &mut ImplHasher(state))
     }
 
-    fn sha256(&self) -> [u8; 32] {
+    fn sha256(&self) -> H256 {
         let mut state = Sha256::new();
         DigestHash::hash(self, &mut state);
-        state.finalize().into()
+        H256(state.finalize().into())
     }
 }
 impl<T: Hash> DigestHash for T {}
@@ -210,7 +210,7 @@ impl Crypto {
     pub fn sign<M: DigestHash>(&self, message: M) -> Verifiable<M> {
         match &self.provider {
             CryptoProvider::Secp256k1(crypto) => {
-                let digest = secp256k1::Message::from_digest(message.sha256());
+                let digest = secp256k1::Message::from_digest(message.sha256().into());
                 Verifiable {
                     inner: message,
                     signature: Signature::Secp256k1(
@@ -243,7 +243,7 @@ impl Crypto {
                 PublicKey::Secp256k1(public_key),
                 Signature::Secp256k1(signature),
             ) => {
-                let digest = secp256k1::Message::from_digest(signed.inner.sha256());
+                let digest = secp256k1::Message::from_digest(signed.inner.sha256().into());
                 crypto.secp.verify_ecdsa(&digest, signature, public_key)?
             }
             // this feels even more monkey patch > <
@@ -347,6 +347,6 @@ mod tests {
             a: 42,
             bs: b"hello".to_vec(),
         };
-        assert_ne!(foo.sha256(), <[u8; 32]>::default());
+        assert_ne!(foo.sha256(), Default::default());
     }
 }

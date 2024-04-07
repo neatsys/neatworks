@@ -11,7 +11,7 @@ use crate::{
     app::App,
     crypto::{
         events::{Signed, Verified},
-        Crypto, DigestHash as _, Verifiable,
+        Crypto, DigestHash as _, Verifiable, H256,
     },
     event::{
         erased::{OnEventRichTimer as OnEvent, RichTimer as Timer},
@@ -27,14 +27,14 @@ use crate::{
 pub struct PrePrepare {
     view_num: u32,
     op_num: u32,
-    digest: [u8; 32],
+    digest: H256,
 }
 
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]
 pub struct Prepare {
     view_num: u32,
     op_num: u32,
-    digest: [u8; 32],
+    digest: H256,
     replica_id: u8,
 }
 
@@ -42,7 +42,7 @@ pub struct Prepare {
 pub struct Commit {
     view_num: u32,
     op_num: u32,
-    digest: [u8; 32],
+    digest: H256,
     replica_id: u8,
 }
 
