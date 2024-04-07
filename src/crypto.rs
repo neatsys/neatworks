@@ -119,8 +119,9 @@ pub mod events {
 // it would be better if the library supports prehashed message as well, but a
 // fallback `impl DigestHasher for Vec<u8>` is provided above anyway
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Signature {
+    Plain(String), // for testing
     Secp256k1(secp256k1::ecdsa::Signature),
     Schnorrkel(peer::Signature),
 }
@@ -133,6 +134,7 @@ pub struct Crypto {
 
 #[derive(Debug, Clone)]
 enum CryptoProvider {
+    Insecure(String), // the "signature"
     Secp256k1(Secp256k1Crypto),
     Schnorrkel(Box<peer::Crypto>),
 }
@@ -145,12 +147,14 @@ struct Secp256k1Crypto {
 
 #[derive(Debug, Clone)]
 enum PublicKey {
+    Plain(String),
     Secp256k1(secp256k1::PublicKey),
     Schnorrkel(peer::PublicKey),
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum CryptoFlavor {
+    Plain,
     Secp256k1,
     Schnorrkel,
 }
@@ -168,6 +172,12 @@ impl Crypto {
             k
         });
         let crypto = match flavor {
+            CryptoFlavor::Plain => Self {
+                public_keys: (0..num_replica)
+                    .map(|i| PublicKey::Plain(format!("replica-{i:03}")))
+                    .collect(),
+                provider: CryptoProvider::Insecure(format!("replica-{:03}", replica_id.into())),
+            },
             CryptoFlavor::Secp256k1 => {
                 let secret_keys = secret_keys
                     .map(|k| secp256k1::SecretKey::from_slice(&k))
@@ -209,6 +219,10 @@ impl Crypto {
 
     pub fn sign<M: DigestHash>(&self, message: M) -> Verifiable<M> {
         match &self.provider {
+            CryptoProvider::Insecure(signature) => Verifiable {
+                inner: message,
+                signature: Signature::Plain(signature.clone()),
+            },
             CryptoProvider::Secp256k1(crypto) => {
                 let digest = secp256k1::Message::from_digest(message.sha256().into());
                 Verifiable {
@@ -238,6 +252,12 @@ impl Crypto {
             anyhow::bail!("no identifier for index")
         };
         match (&self.provider, public_key, &signed.signature) {
+            (
+                CryptoProvider::Insecure(_),
+                PublicKey::Plain(expected_signature),
+                Signature::Plain(signature),
+            ) => anyhow::ensure!(signature == expected_signature),
+
             (
                 CryptoProvider::Secp256k1(crypto),
                 PublicKey::Secp256k1(public_key),
