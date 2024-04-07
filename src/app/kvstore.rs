@@ -31,7 +31,7 @@ pub enum Op {
 pub enum Result {
     PutOk,
     GetResult(String),
-    KetyNotFound,
+    KeyNotFound,
     AppendResult(String),
 }
 
@@ -47,7 +47,7 @@ impl App for KVStore {
                 if let Some(value) = store.get(&key) {
                     Result::GetResult(value.clone())
                 } else {
-                    Result::KetyNotFound
+                    Result::KeyNotFound
                 }
             }
             Op::Append(key, postfix) => {
@@ -82,7 +82,7 @@ pub fn static_workload(
 #[derive_where(Hash)]
 pub struct InfinitePutGet {
     namespace: String,
-    #[derive_where(skip)] // is this safe?
+    #[derive_where(skip)] // is this safe? probably since `Eq` still considers it
     rng: StdRng,
     values: [String; 5],
     should_get: bool,
@@ -108,7 +108,7 @@ impl Iterator for InfinitePutGet {
             (
                 Op::Get(format!("{}-{index}", self.namespace)),
                 if self.values[index] == String::default() {
-                    Result::KetyNotFound
+                    Result::KeyNotFound
                 } else {
                     Result::GetResult(self.values[index].clone())
                 },
@@ -131,8 +131,4 @@ impl Iterator for InfinitePutGet {
             Payload(serde_json::to_vec(&result).unwrap()),
         ))
     }
-}
-
-impl From<InfinitePutGet> for () {
-    fn from(_: InfinitePutGet) -> Self {}
 }

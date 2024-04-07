@@ -273,6 +273,14 @@ pub mod peer {
 
     pub type PublicKey = schnorrkel::PublicKey;
 
+    pub mod events {
+        #[derive(Debug, Clone)]
+        pub struct Signed<M>(pub super::Verifiable<M>);
+
+        #[derive(Debug, Clone)]
+        pub struct Verified<M>(pub super::Verifiable<M>);
+    }
+
     #[derive(Clone)]
     pub struct Crypto {
         pub keypair: Keypair,

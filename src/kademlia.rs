@@ -6,14 +6,17 @@ use std::{
     time::Duration,
 };
 
+use derive_where::derive_where;
 use primitive_types::{H256, U256};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::{
     crypto::{
-        events::{Signed, Verified},
-        peer::{Crypto, PublicKey, Signature, Verifiable},
+        peer::{
+            events::{Signed, Verified},
+            Crypto, PublicKey, Verifiable,
+        },
         DigestHash,
     },
     event::{
@@ -73,7 +76,7 @@ impl<K: DigestHash, A> PeerRecord<K, A> {
 // `PeerRecord` always contains a fixed 256-bit `PeerId`, which cannot match
 // `BITS` easily since it permits incomplete byte
 // currently this is just a monkey patch for model checking on a reduced scale,
-// intented for internal use only
+// intended for internal use only
 #[derive(Debug)]
 pub struct Buckets<K, A, const BITS: usize = U256_BITS> {
     origin: PeerRecord<K, A>,
@@ -81,18 +84,10 @@ pub struct Buckets<K, A, const BITS: usize = U256_BITS> {
 }
 
 #[derive(Debug, Clone)]
+#[derive_where(Default)]
 struct Bucket<K, A> {
     records: Vec<PeerRecord<K, A>>,
     cached_records: Vec<PeerRecord<K, A>>,
-}
-
-impl<K, A> Default for Bucket<K, A> {
-    fn default() -> Self {
-        Self {
-            records: Default::default(),
-            cached_records: Default::default(),
-        }
-    }
 }
 
 const BUCKET_SIZE: usize = 20;
@@ -116,11 +111,9 @@ impl<K, A, const BITS: usize> Buckets<K, A, BITS> {
     }
 
     pub fn insert(&mut self, record: PeerRecord<K, A>) -> anyhow::Result<()> {
-        #[cfg(not(kani))]
-        if record.id == self.origin.id {
-            anyhow::bail!("cannot insert origin id")
-        }
-        // `assume` not equal for kani
+        #[cfg(not(kani))] // `assume` not equal for kani
+        anyhow::ensure!(record.id != self.origin.id, "cannot insert origin id");
+
         let index = self.index(&record.id);
         let bucket = &mut self.distances[index];
         // if record exists in the bucket, move it to the end
@@ -187,7 +180,7 @@ impl<K: Clone, A: Addr, const BITS: usize> Buckets<K, A, BITS> {
         {
             let mut index_records = self.distances[index].records.clone();
             // ensure origin peer is included if it is indeed close enough
-            // can it be more elegant?
+            // can it/does it need to be more elegant?
             if index == 0 {
                 index_records.push(self.origin.clone())
             }
@@ -248,9 +241,9 @@ pub enum QueryStatus {
     // there should be `count` peers in `closest`, and any peer that is closer to any of the peers
     // in `closest` is either contacted (and thus in `closest`) or unreachable
     Converge,
-    // termination condition is not satisfied, but nothing can be further done
-    // this can either because the total number of discovered peers is less than `count`, otherwise
-    // i'm not sure
+    // termination condition is not satisfied, but no further progress is expected to happen
+    // this can because of the total number of discovered peers is less than `count`, otherwise i'm
+    // not sure
     Halted,
 }
 
@@ -268,17 +261,17 @@ pub trait Upcall<A>: SendEvent<QueryResult<A>> {}
 impl<T: SendEvent<QueryResult<A>>, A> Upcall<A> for T {}
 
 pub trait SendCryptoEvent<A>:
-    SendEvent<Signed<FindPeer<A>, Signature>>
-    + SendEvent<Signed<FindPeerOk<A>, Signature>>
-    + SendEvent<Verified<FindPeer<A>, Signature>>
-    + SendEvent<Verified<FindPeerOk<A>, Signature>>
+    SendEvent<Signed<FindPeer<A>>>
+    + SendEvent<Signed<FindPeerOk<A>>>
+    + SendEvent<Verified<FindPeer<A>>>
+    + SendEvent<Verified<FindPeerOk<A>>>
 {
 }
 impl<
-        T: SendEvent<Signed<FindPeer<A>, Signature>>
-            + SendEvent<Signed<FindPeerOk<A>, Signature>>
-            + SendEvent<Verified<FindPeer<A>, Signature>>
-            + SendEvent<Verified<FindPeerOk<A>, Signature>>,
+        T: SendEvent<Signed<FindPeer<A>>>
+            + SendEvent<Signed<FindPeerOk<A>>>
+            + SendEvent<Verified<FindPeer<A>>>
+            + SendEvent<Verified<FindPeerOk<A>>>,
         A,
     > SendCryptoEvent<A> for T
 {
@@ -340,17 +333,20 @@ impl<A: Addr> Peer<A> {
 
 impl<A: Addr> Peer<A> {
     pub fn bootstrap(&mut self, on_bootstrap: OnBootstrap) -> anyhow::Result<()> {
-        // assert only bootstrap once?
+        // TODO assert only bootstrap once?
         // seems no harm to bootstrap multiple times anyway, so just assert a clear state for now
-        if !self.query_states.is_empty() {
-            anyhow::bail!("start bootsrap while query in progress")
-        }
-        if !self.refresh_targets.is_empty() {
-            anyhow::bail!("start bootsrap while refresh in progress")
-        }
-        if self.on_bootstrap.is_some() {
-            anyhow::bail!("start bootstrap while another bootstrap in progress")
-        }
+        anyhow::ensure!(
+            self.query_states.is_empty(),
+            "start bootstrap while query in progress"
+        );
+        anyhow::ensure!(
+            self.refresh_targets.is_empty(),
+            "start bootstrap while refresh in progress"
+        );
+        anyhow::ensure!(
+            self.on_bootstrap.is_none(),
+            "start bootstrap while another bootstrap in progress"
+        );
         self.on_bootstrap = Some(on_bootstrap);
         let target = self.record.id;
         self.start_query(&target, BUCKET_SIZE.try_into().unwrap())
@@ -392,10 +388,10 @@ impl<A: Addr> Peer<A> {
 struct ResendFindPeer<A>(Target, PeerRecord<PublicKey, A>);
 const RESEND_FIND_PEER_DURATION: Duration = Duration::from_millis(2500);
 
-impl<A: Addr> OnEvent<Signed<FindPeer<A>, Signature>> for Peer<A> {
+impl<A: Addr> OnEvent<Signed<FindPeer<A>>> for Peer<A> {
     fn on_event(
         &mut self,
-        Signed(find_peer): Signed<FindPeer<A>, Signature>,
+        Signed(find_peer): Signed<FindPeer<A>>,
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let target = find_peer.target;
@@ -482,10 +478,10 @@ impl<A: Addr> OnEvent<Recv<Verifiable<FindPeer<A>>>> for Peer<A> {
     }
 }
 
-impl<A: Addr> OnEvent<Verified<FindPeer<A>, Signature>> for Peer<A> {
+impl<A: Addr> OnEvent<Verified<FindPeer<A>>> for Peer<A> {
     fn on_event(
         &mut self,
-        Verified(find_peer): Verified<FindPeer<A>, Signature>,
+        Verified(find_peer): Verified<FindPeer<A>>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let find_peer = find_peer.into_inner();
@@ -507,10 +503,10 @@ impl<A: Addr> OnEvent<Verified<FindPeer<A>, Signature>> for Peer<A> {
     }
 }
 
-impl<A> OnEvent<Signed<FindPeerOk<A>, Signature>> for Peer<A> {
+impl<A> OnEvent<Signed<FindPeerOk<A>>> for Peer<A> {
     fn on_event(
         &mut self,
-        Signed(find_peer_ok): Signed<FindPeerOk<A>, Signature>,
+        Signed(find_peer_ok): Signed<FindPeerOk<A>>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let dest = self
@@ -545,10 +541,10 @@ impl<A: Addr> OnEvent<Recv<Verifiable<FindPeerOk<A>>>> for Peer<A> {
     }
 }
 
-impl<A: Addr> OnEvent<Verified<FindPeerOk<A>, Signature>> for Peer<A> {
+impl<A: Addr> OnEvent<Verified<FindPeerOk<A>>> for Peer<A> {
     fn on_event(
         &mut self,
-        Verified(find_peer_ok): Verified<FindPeerOk<A>, Signature>,
+        Verified(find_peer_ok): Verified<FindPeerOk<A>>,
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let find_peer_ok = find_peer_ok.into_inner();
