@@ -1,6 +1,6 @@
 // use crate::event::SendEvent;
 
-// TODO find a use case for non-erased (type-preseved?) variant
+// TODO find a use case for non-erased (type-preserved?) variant
 // or just remove it at all. anyway no performance gain here
 // pub type Work<S, M> = erased::Work<S, dyn SendEvent<M>>;
 // pub type Worker<S, M> = erased::Worker<S, dyn SendEvent<M>>;

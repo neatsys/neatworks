@@ -9,14 +9,16 @@ use augustus::{
         },
         SendEvent as _,
     },
-    kademlia::{Buckets, FindPeer, FindPeerOk, Peer, PeerId, PeerRecord},
+    kademlia::{
+        Buckets, CryptoWorker, FindPeer, FindPeerOk, Peer, PeerId, PeerRecord, SendCryptoEvent,
+    },
     net::{
         events::Recv,
         kademlia::{Control, Multicast, PeerNet},
         session::Udp,
         SendMessage,
     },
-    worker::erased::Worker,
+    worker::{Submit, Worker},
 };
 use bincode::Options;
 use primitive_types::H256;
@@ -68,7 +70,11 @@ async fn main() -> anyhow::Result<()> {
             buckets,
             MessageNet::new(socket_net.clone()),
             Sender::from(control_session.sender()),
-            Worker::new_inline(crypto, Box::new(Sender::from(peer_session.sender()))),
+            Box::new(CryptoWorker::from(Worker::Inline(
+                crypto,
+                Box::new(Sender::from(peer_session.sender())),
+            )))
+                as Box<dyn Submit<Crypto, dyn SendCryptoEvent<SocketAddr>> + Send + Sync>,
         );
         let cancel = bootstrap_finished.clone();
         peer.bootstrap(Box::new(move || {
@@ -85,7 +91,10 @@ async fn main() -> anyhow::Result<()> {
             buckets,
             MessageNet::new(socket_net.clone()),
             Sender::from(control_session.sender()),
-            Worker::new_inline(seed_crypto, Box::new(Sender::from(peer_session.sender()))),
+            Box::new(CryptoWorker::from(Worker::Inline(
+                seed_crypto,
+                Box::new(Sender::from(peer_session.sender())),
+            ))),
         );
         bootstrap_finished.cancel(); // skip bootstrap on seed peer
     }
@@ -143,3 +152,5 @@ async fn main() -> anyhow::Result<()> {
     }
     Err(anyhow::anyhow!("unreachable"))
 }
+
+// cSpell:words kademlia bincode seedable

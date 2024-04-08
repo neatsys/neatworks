@@ -316,7 +316,6 @@ pub trait ReplicaCommon {
     type S: App;
     type A: Addr;
 }
-
 impl<N, CN, CW, S, A> ReplicaCommon for ReplicaMarker<N, CN, CW, S, A>
 where
     N: ToReplicaNet<A>,

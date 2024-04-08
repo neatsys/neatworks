@@ -24,7 +24,7 @@ use crate::{
         SendEvent, TimerId,
     },
     net::{events::Recv, Addr, SendMessage, SendMessageToEach, SendMessageToEachExt as _},
-    worker::erased::Worker,
+    worker::Submit,
 };
 
 // 32 bytes array refers to sha256 digest by default in this codebase
@@ -207,7 +207,6 @@ pub struct FindPeer<A> {
 
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]
 pub struct FindPeerOk<A> {
-    seq: u32,
     target: Target,
     closest: Vec<PeerRecord<PublicKey, A>>,
     record: PeerRecord<PublicKey, A>,
@@ -277,24 +276,46 @@ impl<
 {
 }
 
-pub struct Peer<A> {
+pub struct CryptoWorker<W, E>(W, std::marker::PhantomData<E>);
+
+impl<W, E> From<W> for CryptoWorker<W, E> {
+    fn from(value: W) -> Self {
+        Self(value, Default::default())
+    }
+}
+
+impl<W: Submit<Crypto, E>, E: SendCryptoEvent<A> + 'static, A: 'static>
+    Submit<Crypto, dyn SendCryptoEvent<A>> for CryptoWorker<W, E>
+{
+    fn submit(
+        &mut self,
+        work: crate::worker::Work<Crypto, dyn SendCryptoEvent<A>>,
+    ) -> anyhow::Result<()> {
+        self.0
+            .submit(Box::new(move |state, emit| work(state, emit)))
+    }
+}
+
+pub struct PeerMarker<N, U, CW, A>(std::marker::PhantomData<(N, U, CW, A)>);
+
+pub struct Peer<N, U, CW, A, M = PeerMarker<N, U, CW, A>> {
     record: PeerRecord<PublicKey, A>,
 
     buckets: Buckets<PublicKey, A>,
     query_states: HashMap<Target, QueryState<A>>,
     refresh_targets: HashSet<Target>,
     on_bootstrap: Option<OnBootstrap>, // TODO change to impl SendEventOnce
-    find_peer_ok_seq: u32,
 
-    net: Box<dyn Net<A> + Send + Sync>,
-    upcall: Box<dyn Upcall<A> + Send + Sync>,
-    crypto_worker: CryptoWorker<A>,
+    net: N,
+    upcall: U,
+    crypto_worker: CW,
+
+    _m: std::marker::PhantomData<M>,
 }
 
 type OnBootstrap = Box<dyn FnOnce() -> anyhow::Result<()> + Send + Sync>;
-pub type CryptoWorker<A> = Worker<Crypto, dyn SendCryptoEvent<A> + Send + Sync>;
 
-impl<A> Debug for Peer<A> {
+impl<N, U, CW, A> Debug for Peer<N, U, CW, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Peer").finish_non_exhaustive()
     }
@@ -308,28 +329,47 @@ struct QueryState<A> {
     contacted: HashSet<PeerId>,
 }
 
-impl<A: Addr> Peer<A> {
+impl<N, U, CW, A: Addr> Peer<N, U, CW, A> {
     pub fn new(
         buckets: Buckets<PublicKey, A>, // seed peers inserted
-        net: impl Net<A> + Send + Sync + 'static,
-        upcall: impl Upcall<A> + Send + Sync + 'static,
-        crypto_worker: CryptoWorker<A>,
+        net: N,
+        upcall: U,
+        crypto_worker: CW,
     ) -> Self {
         Self {
             record: buckets.origin.clone(),
             buckets,
-            net: Box::new(net),
-            upcall: Box::new(upcall),
+            net,
+            upcall,
             crypto_worker,
             query_states: Default::default(),
             refresh_targets: Default::default(),
             on_bootstrap: None,
-            find_peer_ok_seq: 0,
+            _m: Default::default(),
         }
     }
 }
 
-impl<A: Addr> Peer<A> {
+pub trait PeerCommon {
+    type N: Net<Self::A>;
+    type U: Upcall<Self::A>;
+    type CW: Submit<Crypto, dyn SendCryptoEvent<Self::A>>;
+    type A: Addr;
+}
+impl<N, U, CW, A> PeerCommon for PeerMarker<N, U, CW, A>
+where
+    N: Net<A>,
+    U: Upcall<A>,
+    CW: Submit<Crypto, dyn SendCryptoEvent<A>>,
+    A: Addr,
+{
+    type N = N;
+    type U = U;
+    type CW = CW;
+    type A = A;
+}
+
+impl<M: PeerCommon> Peer<M::N, M::U, M::CW, M::A, M> {
     pub fn bootstrap(&mut self, on_bootstrap: OnBootstrap) -> anyhow::Result<()> {
         // TODO assert only bootstrap once?
         // seems no harm to bootstrap multiple times anyway, so just assert a clear state for now
@@ -351,7 +391,7 @@ impl<A: Addr> Peer<A> {
     }
 }
 
-impl<A: Addr> OnEvent<Query> for Peer<A> {
+impl<M: PeerCommon> OnEvent<Query> for Peer<M::N, M::U, M::CW, M::A, M> {
     fn on_event(
         &mut self,
         Query(target, count): Query,
@@ -368,7 +408,7 @@ impl<A: Addr> OnEvent<Query> for Peer<A> {
     }
 }
 
-impl<A: Addr> Peer<A> {
+impl<M: PeerCommon> Peer<M::N, M::U, M::CW, M::A, M> {
     fn start_query(&mut self, target: &Target, count: NonZeroUsize) -> anyhow::Result<()> {
         // println!("start query {} {count}", primitive_types::H256(*target));
         let find_peer = FindPeer {
@@ -387,10 +427,10 @@ impl<A: Addr> Peer<A> {
 struct ResendFindPeer<A>(Target, PeerRecord<PublicKey, A>);
 const RESEND_FIND_PEER_DURATION: Duration = Duration::from_millis(2500);
 
-impl<A: Addr> OnEvent<Signed<FindPeer<A>>> for Peer<A> {
+impl<M: PeerCommon> OnEvent<Signed<FindPeer<M::A>>> for Peer<M::N, M::U, M::CW, M::A, M> {
     fn on_event(
         &mut self,
-        Signed(find_peer): Signed<FindPeer<A>>,
+        Signed(find_peer): Signed<FindPeer<M::A>>,
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let target = find_peer.target;
@@ -431,10 +471,10 @@ impl<A: Addr> OnEvent<Signed<FindPeer<A>>> for Peer<A> {
     }
 }
 
-impl<A: Addr> OnEvent<ResendFindPeer<A>> for Peer<A> {
+impl<M: PeerCommon> OnEvent<ResendFindPeer<M::A>> for Peer<M::N, M::U, M::CW, M::A, M> {
     fn on_event(
         &mut self,
-        ResendFindPeer(target, record): ResendFindPeer<A>,
+        ResendFindPeer(target, record): ResendFindPeer<M::A>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let state = self.query_states.get_mut(&target).unwrap();
@@ -453,10 +493,10 @@ impl<A: Addr> OnEvent<ResendFindPeer<A>> for Peer<A> {
     }
 }
 
-impl<A: Addr> OnEvent<Recv<Verifiable<FindPeer<A>>>> for Peer<A> {
+impl<M: PeerCommon> OnEvent<Recv<Verifiable<FindPeer<M::A>>>> for Peer<M::N, M::U, M::CW, M::A, M> {
     fn on_event(
         &mut self,
-        Recv(find_peer): Recv<Verifiable<FindPeer<A>>>,
+        Recv(find_peer): Recv<Verifiable<FindPeer<M::A>>>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         // eprintln!(
@@ -477,18 +517,16 @@ impl<A: Addr> OnEvent<Recv<Verifiable<FindPeer<A>>>> for Peer<A> {
     }
 }
 
-impl<A: Addr> OnEvent<Verified<FindPeer<A>>> for Peer<A> {
+impl<M: PeerCommon> OnEvent<Verified<FindPeer<M::A>>> for Peer<M::N, M::U, M::CW, M::A, M> {
     fn on_event(
         &mut self,
-        Verified(find_peer): Verified<FindPeer<A>>,
+        Verified(find_peer): Verified<FindPeer<M::A>>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let find_peer = find_peer.into_inner();
         let dest = find_peer.record.addr.clone();
         self.buckets.insert(find_peer.record)?;
-        self.find_peer_ok_seq += 1;
         let find_peer_ok = FindPeerOk {
-            seq: self.find_peer_ok_seq,
             target: find_peer.target,
             closest: self
                 .buckets
@@ -501,20 +539,22 @@ impl<A: Addr> OnEvent<Verified<FindPeer<A>>> for Peer<A> {
     }
 }
 
-impl<A> OnEvent<(A, Signed<FindPeerOk<A>>)> for Peer<A> {
+impl<M: PeerCommon> OnEvent<(M::A, Signed<FindPeerOk<M::A>>)> for Peer<M::N, M::U, M::CW, M::A, M> {
     fn on_event(
         &mut self,
-        (dest, Signed(find_peer_ok)): (A, Signed<FindPeerOk<A>>),
+        (dest, Signed(find_peer_ok)): (M::A, Signed<FindPeerOk<M::A>>),
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         self.net.send(dest, find_peer_ok)
     }
 }
 
-impl<A: Addr> OnEvent<Recv<Verifiable<FindPeerOk<A>>>> for Peer<A> {
+impl<M: PeerCommon> OnEvent<Recv<Verifiable<FindPeerOk<M::A>>>>
+    for Peer<M::N, M::U, M::CW, M::A, M>
+{
     fn on_event(
         &mut self,
-        Recv(find_peer_ok): Recv<Verifiable<FindPeerOk<A>>>,
+        Recv(find_peer_ok): Recv<Verifiable<FindPeerOk<M::A>>>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
@@ -532,10 +572,10 @@ impl<A: Addr> OnEvent<Recv<Verifiable<FindPeerOk<A>>>> for Peer<A> {
     }
 }
 
-impl<A: Addr> OnEvent<Verified<FindPeerOk<A>>> for Peer<A> {
+impl<M: PeerCommon> OnEvent<Verified<FindPeerOk<M::A>>> for Peer<M::N, M::U, M::CW, M::A, M> {
     fn on_event(
         &mut self,
-        Verified(find_peer_ok): Verified<FindPeerOk<A>>,
+        Verified(find_peer_ok): Verified<FindPeerOk<M::A>>,
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let find_peer_ok = find_peer_ok.into_inner();
@@ -665,7 +705,7 @@ impl<A: Addr> OnEvent<Verified<FindPeerOk<A>>> for Peer<A> {
     }
 }
 
-impl<A: Addr> Peer<A> {
+impl<M: PeerCommon> Peer<M::N, M::U, M::CW, M::A, M> {
     fn refresh_buckets(&mut self) -> anyhow::Result<()> {
         let mut start_index = 0;
         if self.on_bootstrap.is_some() {
@@ -809,7 +849,7 @@ proptest! {
 mod tests {
     use rand::thread_rng;
 
-    use crate::net::IterAddr;
+    use crate::{event::Void, net::IterAddr, worker::Worker};
 
     use super::*;
 
@@ -837,7 +877,12 @@ mod tests {
     fn refresh_buckets() -> anyhow::Result<()> {
         let origin = PeerRecord::new(Crypto::new_random(&mut thread_rng()).public_key(), ());
         let buckets = Buckets::new(origin.clone());
-        let mut peer = Peer::new(buckets, NullNet, NullUpcall, Worker::Null);
+        let mut peer = Peer::new(
+            buckets,
+            NullNet,
+            NullUpcall,
+            CryptoWorker::<_, Void>::from(Worker::Null),
+        );
         peer.refresh_buckets()
     }
 }
