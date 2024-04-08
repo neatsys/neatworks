@@ -319,6 +319,7 @@ async fn start_peer(
         )))) as _,
         Box::new(bulk_sender.clone()) as _,
         Box::new(upcall_sender) as _,
+        // TODO change to spawn (why i changed it to inline however?)
         Box::new(CodecWorker::from(Worker::Inline(
             (),
             Sender::from(peer_session.sender()),

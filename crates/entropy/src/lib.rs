@@ -831,11 +831,9 @@ pub mod fs {
     use augustus::{crypto::H256, event::SendEvent};
     use tokio::{
         fs::{create_dir, read, remove_dir_all, write},
-        net::TcpStream,
         sync::mpsc::UnboundedReceiver,
         task::JoinSet,
     };
-    use tokio_util::sync::CancellationToken;
 
     use crate::Chunk;
 
@@ -856,11 +854,6 @@ pub mod fs {
     // not particular useful in practice, but good for evaluation with bounded storage usage
     #[derive(Debug, Clone)]
     pub struct Load(pub Chunk, pub u32, pub bool);
-
-    // well, technically this is not a file system event
-    // added after most code already done, and don't bother add another async session= =
-    #[derive(Debug)]
-    pub struct Download(pub Chunk, pub u32, pub TcpStream, pub CancellationToken);
 
     #[derive(Debug, Clone)]
     pub struct StoreOk(pub Chunk);
