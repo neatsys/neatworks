@@ -296,9 +296,7 @@ impl<W: Submit<Crypto, E>, E: SendCryptoEvent<A> + 'static, A: 'static>
     }
 }
 
-pub struct PeerMarker<N, U, CW, A>(std::marker::PhantomData<(N, U, CW, A)>);
-
-pub struct Peer<N, U, CW, A, M = PeerMarker<N, U, CW, A>> {
+pub struct Peer<N, U, CW, A, M = (N, U, CW, A)> {
     record: PeerRecord<PublicKey, A>,
 
     buckets: Buckets<PublicKey, A>,
@@ -356,7 +354,7 @@ pub trait PeerCommon {
     type CW: Submit<Crypto, dyn SendCryptoEvent<Self::A>>;
     type A: Addr;
 }
-impl<N, U, CW, A> PeerCommon for PeerMarker<N, U, CW, A>
+impl<N, U, CW, A> PeerCommon for (N, U, CW, A)
 where
     N: Net<A>,
     U: Upcall<A>,

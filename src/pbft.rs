@@ -226,10 +226,7 @@ impl<W: Submit<S, E>, S: 'static, E: SendCryptoEvent<A> + 'static, A: Addr>
 }
 
 #[derive(Debug)]
-pub struct ReplicaMarker<N, CN, CW, S, A>(std::marker::PhantomData<(N, CN, CW, S, A)>);
-
-#[derive(Debug)]
-pub struct Replica<N, CN, CW, S, A, M = ReplicaMarker<N, CN, CW, S, A>> {
+pub struct Replica<N, CN, CW, S, A, M = (N, CN, CW, S, A)> {
     id: u8,
     num_replica: usize,
     num_faulty: usize,
@@ -316,7 +313,7 @@ pub trait ReplicaCommon {
     type S: App;
     type A: Addr;
 }
-impl<N, CN, CW, S, A> ReplicaCommon for ReplicaMarker<N, CN, CW, S, A>
+impl<N, CN, CW, S, A> ReplicaCommon for (N, CN, CW, S, A)
 where
     N: ToReplicaNet<A>,
     CN: ToClientNet<A>,
