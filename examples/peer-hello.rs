@@ -72,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
             Sender::from(control_session.sender()),
             Box::new(CryptoWorker::from(Worker::Inline(
                 crypto,
-                Box::new(Sender::from(peer_session.sender())),
+                Sender::from(peer_session.sender()),
             )))
                 as Box<dyn Submit<Crypto, dyn SendCryptoEvent<SocketAddr>> + Send + Sync>,
         );
@@ -93,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
             Sender::from(control_session.sender()),
             Box::new(CryptoWorker::from(Worker::Inline(
                 seed_crypto,
-                Box::new(Sender::from(peer_session.sender())),
+                Sender::from(peer_session.sender()),
             ))),
         );
         bootstrap_finished.cancel(); // skip bootstrap on seed peer

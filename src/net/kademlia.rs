@@ -236,3 +236,5 @@ impl<M: Clone, A: Addr> OnEvent<QueryResult<A>> for Control<M, A, PeerId> {
         Ok(())
     }
 }
+
+// cSpell:words upcall kademlia

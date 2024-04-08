@@ -25,12 +25,12 @@ use augustus::{
         },
         SendEvent,
     },
-    kademlia::{self, Buckets, PeerRecord},
+    kademlia::{self, Buckets, PeerRecord, SendCryptoEvent},
     net::{
         kademlia::{Control, PeerNet},
         session::{Dispatch, DispatchNet},
     },
-    worker::erased::Worker,
+    worker::{Submit, Worker},
 };
 use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, State},
@@ -39,7 +39,10 @@ use axum::{
     Json, Router,
 };
 
-use entropy::{Get, GetOk, MessageNet, Peer, Put, PutOk};
+use entropy::{
+    BulkService, CodecWorker, Get, GetOk, MessageNet, Net, Peer, Put, PutOk, SendCodecEvent,
+    SendFsEvent,
+};
 use entropy_control_messages::{
     GetConfig, GetResult, PeerUrl, PutConfig, PutResult, StartPeersConfig,
 };
@@ -93,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/start-peers", post(start_peers))
         .route("/stop-peers", post(stop_peers))
         // and the same time, it also includes the following endpoints that belongs to the internal
-        // of entropy, which happens to also communiate using HTTP (for aligning with IPFS)
+        // of entropy, which happens to also communicate using HTTP (for aligning with IPFS)
         .route(
             "/put-chunk/:peer_index",
             post(put_chunk).layer(DefaultBodyLimit::max(1 << 30)),
@@ -178,8 +181,21 @@ struct AppState {
 struct PeersState {
     sessions: JoinSet<anyhow::Result<()>>,
     #[allow(clippy::type_complexity)]
-    senders: Vec<Sender<Blanket<Buffered<Peer<[u8; 32]>>>>>,
+    senders: Vec<Sender<P>>,
 }
+
+type P = Blanket<
+    Buffered<
+        Peer<
+            Box<dyn Net + Send + Sync>,
+            Box<dyn BulkService + Send + Sync>,
+            Box<dyn entropy::Upcall<[u8; 32]> + Send + Sync>,
+            Box<dyn Submit<(), dyn SendCodecEvent> + Send + Sync>,
+            Box<dyn SendFsEvent + Send + Sync>,
+            [u8; 32],
+        >,
+    >,
+>;
 
 async fn ok(State(state): State<AppState>) -> (StatusCode, &'static str) {
     let mut peers = state.peers.lock().await;
@@ -243,7 +259,7 @@ async fn start_peer(
     crypto: Crypto,
     mut rng: StdRng,
     mut records: Vec<PeerRecord<PublicKey, SocketAddr>>,
-    mut peer_session: Session<Blanket<Buffered<Peer<[u8; 32]>>>>,
+    mut peer_session: Session<P>,
     upcall_sender: UnboundedSender<Upcall>,
     config: StartPeersConfig,
 ) -> anyhow::Result<()> {
@@ -269,20 +285,22 @@ async fn start_peer(
 
     let mut kademlia_session = Session::new();
     let mut kademlia_control_session = Session::new();
-    let (mut blob_sender, blob_receiver) = unbounded_channel();
+    let (mut bulk_sender, bulk_receiver) = unbounded_channel();
     let (fs_sender, fs_receiver) = unbounded_channel();
     let mut tcp_control_session = Session::new();
     // let mut quic_control_session = Session::new();
 
     let mut kademlia_peer = Blanket(Buffered::from(kademlia::Peer::new(
         buckets,
-        MessageNet::new(DispatchNet(Sender::from(tcp_control_session.sender()))),
+        Box::new(MessageNet::new(DispatchNet(Sender::from(
+            tcp_control_session.sender(),
+        )))) as Box<dyn kademlia::Net<SocketAddr> + Send + Sync>,
         // MessageNet::new(DispatchNet(Sender::from(quic_control_session.sender()))),
         Sender::from(kademlia_control_session.sender()),
-        Worker::new_inline(
+        Box::new(kademlia::CryptoWorker::from(Worker::Inline(
             crypto.clone(),
-            Box::new(Sender::from(kademlia_session.sender())),
-        ),
+            Sender::from(kademlia_session.sender()),
+        ))) as Box<dyn Submit<Crypto, dyn SendCryptoEvent<SocketAddr>> + Send + Sync>,
     )));
     let mut kademlia_control = Blanket(Buffered::from(Control::new(
         DispatchNet(Sender::from(tcp_control_session.sender())),
@@ -296,11 +314,16 @@ async fn start_peer(
         config.chunk_k,
         config.chunk_n,
         config.chunk_m,
-        MessageNet::<_, SocketAddr>::new(PeerNet(Sender::from(kademlia_control_session.sender()))),
-        blob_sender.clone(),
-        upcall_sender,
-        Worker::new_inline((), Box::new(Sender::from(peer_session.sender()))),
-        fs_sender,
+        Box::new(MessageNet::<_, SocketAddr>::new(PeerNet(Sender::from(
+            kademlia_control_session.sender(),
+        )))) as _,
+        Box::new(bulk_sender.clone()) as _,
+        Box::new(upcall_sender) as _,
+        Box::new(CodecWorker::from(Worker::Inline(
+            (),
+            Sender::from(peer_session.sender()),
+        ))) as _,
+        Box::new(fs_sender) as _,
     )));
     let mut tcp_control = Blanket(Unify(Dispatch::new(
         augustus::net::session::Tcp::new(addr)?,
@@ -309,11 +332,11 @@ async fn start_peer(
             let mut peer_sender = Sender::from(peer_session.sender());
             let mut kademlia_sender = Sender::from(kademlia_session.sender());
             move |buf: &_| {
-                entropy::on_buf(
+                entropy::on_buf::<SocketAddr>(
                     buf,
                     &mut peer_sender,
                     &mut kademlia_sender,
-                    &mut blob_sender,
+                    &mut bulk_sender,
                 )
             }
         },
@@ -330,7 +353,7 @@ async fn start_peer(
     let kademlia_session = kademlia_session.run(&mut kademlia_peer);
     let blob_session = bulk::session(
         ip,
-        blob_receiver,
+        bulk_receiver,
         MessageNet::<_, SocketAddr>::new(PeerNet(Sender::from(kademlia_control_session.sender()))),
         Sender::from(peer_session.sender()),
     );
@@ -638,3 +661,6 @@ async fn poll_benchmark_get(
         }
     }
 }
+
+// cSpell:words kademlia reqwest oneshot upcall ipfs quic rustix seedable
+// cSpell:ignore rlimit setrlimit getrlimit nofile

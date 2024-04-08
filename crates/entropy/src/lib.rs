@@ -18,7 +18,7 @@ use augustus::{
     },
     kademlia::{self, FindPeer, FindPeerOk, PeerId, Target},
     net::{deserialize, events::Recv, kademlia::Multicast, Addr, SendMessage},
-    worker::erased::Worker,
+    worker::Submit,
 };
 
 use bytes::Bytes;
@@ -62,7 +62,7 @@ pub struct Pull {
     peer_id: PeerId,
 }
 
-// TODO generialize on address types, lifting up underlying `PeerNet` type
+// TODO generalize on address types, lifting up underlying `PeerNet` type
 // parameter
 pub trait Net:
     SendMessage<Multicast, Invite>
@@ -122,16 +122,38 @@ impl<
 {
 }
 
+pub struct CodecWorker<W, E>(W, std::marker::PhantomData<E>);
+
+impl<W, E> From<W> for CodecWorker<W, E> {
+    fn from(value: W) -> Self {
+        Self(value, Default::default())
+    }
+}
+
+impl<W: Submit<(), E>, E: SendCodecEvent + 'static> Submit<(), dyn SendCodecEvent>
+    for CodecWorker<W, E>
+{
+    fn submit(
+        &mut self,
+        work: augustus::worker::Work<(), dyn SendCodecEvent>,
+    ) -> anyhow::Result<()> {
+        self.0.submit(Box::new(move |(), emit| work(&(), emit)))
+    }
+}
+
 pub trait SendFsEvent: SendEvent<fs::Store> + SendEvent<fs::Load> {}
 impl<T: SendEvent<fs::Store> + SendEvent<fs::Load>> SendFsEvent for T {}
 
 pub struct DownloadOk(pub Chunk, pub u32, pub Vec<u8>);
 
-pub struct Peer<K> {
+pub trait BulkService: bulk::Service<PeerId, SendFragment, DownloadOk> {}
+impl<T: bulk::Service<PeerId, SendFragment, DownloadOk>> BulkService for T {}
+
+pub struct Peer<N, BS, U, CW, F, K, M = (N, BS, U, CW, F, K)> {
     id: PeerId,
     fragment_len: u32,
     chunk_k: NonZeroUsize, // the number of honest peers to recover a chunk
-    // the number of peers that, with high probablity at least `k` peers of them are honest
+    // the number of peers that, with high probability at least `k` peers of them are honest
     chunk_n: NonZeroUsize,
     chunk_m: NonZeroUsize, // the number of peers that Put peer send Invite to
     // `n` should be derived from `k` and the upper bound of faulty portion
@@ -146,20 +168,20 @@ pub struct Peer<K> {
     persists: HashMap<Chunk, PersistState>,
     pending_pulls: HashMap<Chunk, Vec<PeerId>>,
 
-    net: Box<dyn Net + Send + Sync>,
-    blob: Box<dyn bulk::Service<PeerId, SendFragment, DownloadOk> + Send + Sync>,
-    upcall: Box<dyn Upcall<K> + Send + Sync>,
-    codec_worker: CodecWorker,
-    fs: Box<dyn SendFsEvent + Send + Sync>,
+    net: N,
+    blob: BS,
+    upcall: U,
+    codec_worker: CW,
+    fs: F,
     // well, in the context of entropy "computationally intensive" refers to some millisecond-scale
     // computational workload (which is what `codec_worker` for), and the system throughput is
     // tightly bounded on bandwidth (instead of pps) so saving stateful-processing overhead becomes
     // marginal for improving performance
     // in conclusion, do crypto inline, less event and less concurrency to consider :)
     crypto: Crypto,
-}
 
-pub type CodecWorker = Worker<(), dyn SendCodecEvent + Send + Sync>;
+    _m: std::marker::PhantomData<M>,
+}
 
 #[derive(Debug)]
 struct UploadState<K> {
@@ -212,13 +234,13 @@ enum PersistStatus {
     Available,
 }
 
-impl<K> Debug for Peer<K> {
+impl<N, BS, U, CW, F, K> Debug for Peer<N, BS, U, CW, F, K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Peer").finish_non_exhaustive()
     }
 }
 
-impl<K> Peer<K> {
+impl<N, BS, U, CW, F, K> Peer<N, BS, U, CW, F, K> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: PeerId,
@@ -227,11 +249,11 @@ impl<K> Peer<K> {
         chunk_k: NonZeroUsize,
         chunk_n: NonZeroUsize,
         chunk_m: NonZeroUsize,
-        net: impl Net + Send + Sync + 'static,
-        blob: impl bulk::Service<PeerId, SendFragment, DownloadOk> + Send + Sync + 'static,
-        upcall: impl Upcall<K> + Send + Sync + 'static,
-        codec_worker: CodecWorker,
-        fs: impl SendFsEvent + Send + Sync + 'static,
+        net: N,
+        bulk: BS,
+        upcall: U,
+        codec_worker: CW,
+        fs: F,
     ) -> Self {
         Self {
             id,
@@ -240,15 +262,17 @@ impl<K> Peer<K> {
             chunk_k,
             chunk_n,
             chunk_m,
-            net: Box::new(net),
-            blob: Box::new(blob),
-            upcall: Box::new(upcall),
+            net,
+            blob: bulk,
+            upcall,
             codec_worker,
-            fs: Box::new(fs),
+            fs,
+
             uploads: Default::default(),
             downloads: Default::default(),
             persists: Default::default(),
             pending_pulls: Default::default(),
+            _m: Default::default(),
         }
     }
 }
@@ -263,10 +287,35 @@ impl Preimage for [u8; 32] {
     }
 }
 
-impl<K: Preimage> OnEvent<Put<K>> for Peer<K> {
+pub trait PeerCommon {
+    type N: Net;
+    type BS: BulkService;
+    type U: Upcall<Self::K>;
+    type CW: Submit<(), dyn SendCodecEvent>;
+    type F: SendFsEvent;
+    type K: Preimage;
+}
+impl<N, BS, U, CW, F, K> PeerCommon for (N, BS, U, CW, F, K)
+where
+    N: Net,
+    BS: BulkService,
+    U: Upcall<K>,
+    CW: Submit<(), dyn SendCodecEvent>,
+    F: SendFsEvent,
+    K: Preimage,
+{
+    type N = N;
+    type BS = BS;
+    type U = U;
+    type CW = CW;
+    type F = F;
+    type K = K;
+}
+
+impl<M: PeerCommon> OnEvent<Put<M::K>> for Peer<M::N, M::BS, M::U, M::CW, M::F, M::K, M> {
     fn on_event(
         &mut self,
-        Put(preimage, buf): Put<K>,
+        Put(preimage, buf): Put<M::K>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(
@@ -300,7 +349,7 @@ impl<K: Preimage> OnEvent<Put<K>> for Peer<K> {
     }
 }
 
-impl<K> OnEvent<NewEncoder> for Peer<K> {
+impl<M: PeerCommon> OnEvent<NewEncoder> for Peer<M::N, M::BS, M::U, M::CW, M::F, M::K, M> {
     fn on_event(
         &mut self,
         NewEncoder(chunk, encoder): NewEncoder,
@@ -320,7 +369,7 @@ impl<K> OnEvent<NewEncoder> for Peer<K> {
     }
 }
 
-impl<K> OnEvent<Recv<Invite>> for Peer<K> {
+impl<M: PeerCommon> OnEvent<Recv<Invite>> for Peer<M::N, M::BS, M::U, M::CW, M::F, M::K, M> {
     fn on_event(
         &mut self,
         Recv(invite): Recv<Invite>,
@@ -338,7 +387,7 @@ impl<K> OnEvent<Recv<Invite>> for Peer<K> {
             status: PersistStatus::Recovering(RecoverState::new(self.fragment_len, self.chunk_k)?),
             notify: None,
         });
-        // TODO provide a way to supress unnecessary following `SendFragment`
+        // TODO provide a way to suppress unnecessary following `SendFragment`
         let invite_ok = InviteOk {
             chunk: invite.chunk,
             index,
@@ -349,7 +398,7 @@ impl<K> OnEvent<Recv<Invite>> for Peer<K> {
     }
 }
 
-impl<K> OnEvent<Recv<InviteOk>> for Peer<K> {
+impl<M: PeerCommon> OnEvent<Recv<InviteOk>> for Peer<M::N, M::BS, M::U, M::CW, M::F, M::K, M> {
     fn on_event(
         &mut self,
         Recv(invite_ok): Recv<InviteOk>,
@@ -379,7 +428,7 @@ impl<K> OnEvent<Recv<InviteOk>> for Peer<K> {
     }
 }
 
-impl<K> OnEvent<Encode> for Peer<K> {
+impl<M: PeerCommon> OnEvent<Encode> for Peer<M::N, M::BS, M::U, M::CW, M::F, M::K, M> {
     fn on_event(
         &mut self,
         Encode(chunk, index, fragment): Encode,
@@ -403,7 +452,9 @@ impl<K> OnEvent<Encode> for Peer<K> {
     }
 }
 
-impl<K> OnEvent<RecvOffer<SendFragment>> for Peer<K> {
+impl<M: PeerCommon> OnEvent<RecvOffer<SendFragment>>
+    for Peer<M::N, M::BS, M::U, M::CW, M::F, M::K, M>
+{
     fn on_event(
         &mut self,
         mut send_fragment: RecvOffer<SendFragment>,
@@ -454,7 +505,7 @@ impl<K> OnEvent<RecvOffer<SendFragment>> for Peer<K> {
     }
 }
 
-impl<K> OnEvent<DownloadOk> for Peer<K> {
+impl<M: PeerCommon> OnEvent<DownloadOk> for Peer<M::N, M::BS, M::U, M::CW, M::F, M::K, M> {
     fn on_event(
         &mut self,
         DownloadOk(chunk, index, fragment): DownloadOk,
@@ -499,7 +550,7 @@ impl RecoverState {
         index: u32,
         fragment: Vec<u8>,
         encode_index: Option<u32>,
-        worker: &mut CodecWorker,
+        worker: &mut impl Submit<(), dyn SendCodecEvent>,
     ) -> anyhow::Result<()> {
         if let Some(mut decoder) = self.decoder.take() {
             // println!("submit decode {} index {index}", H256(chunk));
@@ -521,7 +572,7 @@ impl RecoverState {
     }
 }
 
-impl<K> OnEvent<fs::StoreOk> for Peer<K> {
+impl<M: PeerCommon> OnEvent<fs::StoreOk> for Peer<M::N, M::BS, M::U, M::CW, M::F, M::K, M> {
     fn on_event(
         &mut self,
         fs::StoreOk(chunk): fs::StoreOk,
@@ -546,7 +597,9 @@ impl<K> OnEvent<fs::StoreOk> for Peer<K> {
     }
 }
 
-impl<K> OnEvent<Recv<Verifiable<FragmentAvailable>>> for Peer<K> {
+impl<M: PeerCommon> OnEvent<Recv<Verifiable<FragmentAvailable>>>
+    for Peer<M::N, M::BS, M::U, M::CW, M::F, M::K, M>
+{
     fn on_event(
         &mut self,
         Recv(fragment_available): Recv<Verifiable<FragmentAvailable>>,
@@ -574,8 +627,12 @@ impl<K> OnEvent<Recv<Verifiable<FragmentAvailable>>> for Peer<K> {
     }
 }
 
-impl<K: Preimage> OnEvent<Get<K>> for Peer<K> {
-    fn on_event(&mut self, Get(preimage): Get<K>, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
+impl<M: PeerCommon> OnEvent<Get<M::K>> for Peer<M::N, M::BS, M::U, M::CW, M::F, M::K, M> {
+    fn on_event(
+        &mut self,
+        Get(preimage): Get<M::K>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
         let chunk = preimage.target();
         let replaced = self.downloads.insert(
             chunk,
@@ -598,7 +655,7 @@ impl<K: Preimage> OnEvent<Get<K>> for Peer<K> {
     }
 }
 
-impl<K> OnEvent<Recv<Pull>> for Peer<K> {
+impl<M: PeerCommon> OnEvent<Recv<Pull>> for Peer<M::N, M::BS, M::U, M::CW, M::F, M::K, M> {
     fn on_event(&mut self, Recv(pull): Recv<Pull>, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
         let Some(state) = self.persists.get(&pull.chunk) else {
             // println!("recv Pull {} (unknown)", H256(pull.chunk));
@@ -617,7 +674,7 @@ impl<K> OnEvent<Recv<Pull>> for Peer<K> {
     }
 }
 
-impl<K> OnEvent<fs::LoadOk> for Peer<K> {
+impl<M: PeerCommon> OnEvent<fs::LoadOk> for Peer<M::N, M::BS, M::U, M::CW, M::F, M::K, M> {
     fn on_event(
         &mut self,
         fs::LoadOk(chunk, index, fragment): fs::LoadOk,
@@ -642,7 +699,7 @@ impl<K> OnEvent<fs::LoadOk> for Peer<K> {
     }
 }
 
-impl<K> OnEvent<Decode> for Peer<K> {
+impl<M: PeerCommon> OnEvent<Decode> for Peer<M::N, M::BS, M::U, M::CW, M::F, M::K, M> {
     fn on_event(
         &mut self,
         Decode(chunk, decoder): Decode,
@@ -670,7 +727,7 @@ impl RecoverState {
         chunk: Chunk,
         decoder: Decoder,
         encode_index: Option<u32>,
-        worker: &mut CodecWorker,
+        worker: &mut impl Submit<(), dyn SendCodecEvent>,
     ) -> anyhow::Result<()> {
         let replaced = self.decoder.replace(decoder);
         assert!(replaced.is_none());
@@ -683,7 +740,7 @@ impl RecoverState {
     }
 }
 
-impl<K> OnEvent<Recover> for Peer<K> {
+impl<M: PeerCommon> OnEvent<Recover> for Peer<M::N, M::BS, M::U, M::CW, M::F, M::K, M> {
     fn on_event(
         &mut self,
         Recover(chunk, buf): Recover,
@@ -699,7 +756,7 @@ impl<K> OnEvent<Recover> for Peer<K> {
     }
 }
 
-impl<K> OnEvent<RecoverEncode> for Peer<K> {
+impl<M: PeerCommon> OnEvent<RecoverEncode> for Peer<M::N, M::BS, M::U, M::CW, M::F, M::K, M> {
     fn on_event(
         &mut self,
         RecoverEncode(chunk, fragment): RecoverEncode,
@@ -796,7 +853,7 @@ pub mod fs {
     }
 
     // Load(chunk, index, true) will delete fragment file while loading
-    // not particual useful in practice, but good for evaluation with bounded storage usage
+    // not particular useful in practice, but good for evaluation with bounded storage usage
     #[derive(Debug, Clone)]
     pub struct Load(pub Chunk, pub u32, pub bool);
 
@@ -874,3 +931,5 @@ pub mod fs {
         }
     }
 }
+
+// cSpell:words kademlia upcall preimage rereplicate
