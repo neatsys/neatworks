@@ -93,7 +93,7 @@ impl<T: Hash> DigestHash for T {}
 
 pub use primitive_types::H256;
 
-#[derive(Debug, Clone, Serialize, Deserialize, derive_more::Deref)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, derive_more::Deref)]
 pub struct Verifiable<M, S = Signature> {
     #[deref]
     inner: M,
@@ -124,6 +124,25 @@ pub enum Signature {
     Plain(String), // for testing
     Secp256k1(secp256k1::ecdsa::Signature),
     Schnorrkel(peer::Signature),
+}
+
+impl Hash for Signature {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            Self::Plain(signature) => {
+                state.write_u8(0);
+                Hash::hash(signature, state)
+            }
+            Self::Secp256k1(signature) => {
+                state.write_u8(1);
+                Hash::hash(signature, state)
+            }
+            Self::Schnorrkel(signature) => {
+                state.write_u8(2);
+                Hash::hash(&signature.to_bytes(), state)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

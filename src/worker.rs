@@ -17,6 +17,7 @@ impl<W: ?Sized + Submit<S, E>, S, E: ?Sized> Submit<S, E> for Box<W> {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum Worker<S, E> {
     Null,
     Inline(S, E),

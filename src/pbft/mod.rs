@@ -1,8 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    fmt::Debug,
-    time::Duration,
-};
+use std::{collections::BTreeMap, fmt::Debug, time::Duration};
 
 use derive_where::derive_where;
 use serde::{Deserialize, Serialize};
@@ -23,14 +19,14 @@ use crate::{
     workload::{Invoke, InvokeOk},
 };
 
-#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PrePrepare {
     view_num: u32,
     op_num: u32,
     digest: H256,
 }
 
-#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Prepare {
     view_num: u32,
     op_num: u32,
@@ -38,7 +34,7 @@ pub struct Prepare {
     replica_id: u8,
 }
 
-#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Commit {
     view_num: u32,
     op_num: u32,
@@ -73,6 +69,7 @@ impl<
 {
 }
 
+#[derive(Clone)]
 #[derive_where(Debug, PartialEq, Eq, Hash; A)]
 pub struct Client<N, U, A> {
     id: u32,
@@ -89,7 +86,7 @@ pub struct Client<N, U, A> {
     upcall: U,
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct ClientInvoke {
     op: Payload,
     resend_timer: TimerId,
@@ -225,35 +222,39 @@ impl<W: Submit<S, E>, S: 'static, E: SendCryptoEvent<A> + 'static, A: Addr>
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone)]
+#[derive_where(Debug, PartialEq, Eq, Hash; S, A)]
 pub struct Replica<N, CN, CW, S, A, M = (N, CN, CW, S, A)> {
     id: u8,
     num_replica: usize,
     num_faulty: usize,
 
-    replies: HashMap<u32, (u32, Option<Reply>)>,
+    replies: BTreeMap<u32, (u32, Option<Reply>)>,
     requests: Vec<Request<A>>,
     view_num: u32,
     op_num: u32,
     log: Vec<LogEntry<A>>,
-    prepare_quorums: HashMap<u32, HashMap<u8, Verifiable<Prepare>>>,
-    commit_quorums: HashMap<u32, HashMap<u8, Verifiable<Commit>>>,
+    prepare_quorums: BTreeMap<u32, BTreeMap<u8, Verifiable<Prepare>>>,
+    commit_quorums: BTreeMap<u32, BTreeMap<u8, Verifiable<Commit>>>,
     commit_num: u32,
     app: S,
     // any op num presents in this maps -> there's ongoing verification submitted
     // entry presents but empty list -> no pending but one is verifying
     // no entry present -> no pending and not verifying
-    pending_prepares: HashMap<u32, Vec<Verifiable<Prepare>>>,
-    pending_commits: HashMap<u32, Vec<Verifiable<Commit>>>,
+    pending_prepares: BTreeMap<u32, Vec<Verifiable<Prepare>>>,
+    pending_commits: BTreeMap<u32, Vec<Verifiable<Commit>>>,
 
+    #[derive_where(skip)]
     net: N,
-    client_net: CN,    // C for client
+    #[derive_where(skip)]
+    client_net: CN, // C for client
+    #[derive_where(skip)]
     crypto_worker: CW, // C for crypto
 
     _m: std::marker::PhantomData<M>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[derive_where(Default)]
 struct LogEntry<A> {
     view_num: u32,
@@ -823,5 +824,8 @@ pub fn to_replica_on_buf<A: Addr>(
         ToReplica::Commit(message) => sender.send(Recv(message)),
     }
 }
+
+#[cfg(test)]
+mod tests;
 
 // cSpell:words upcall
