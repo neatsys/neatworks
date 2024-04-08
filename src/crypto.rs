@@ -93,7 +93,9 @@ impl<T: Hash> DigestHash for T {}
 
 pub use primitive_types::H256;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, derive_more::Deref)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, derive_more::Deref,
+)]
 pub struct Verifiable<M, S = Signature> {
     #[deref]
     inner: M,
@@ -119,30 +121,11 @@ pub mod events {
 // it would be better if the library supports prehashed message as well, but a
 // fallback `impl DigestHasher for Vec<u8>` is provided above anyway
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Signature {
     Plain(String), // for testing
     Secp256k1(secp256k1::ecdsa::Signature),
     Schnorrkel(peer::Signature),
-}
-
-impl Hash for Signature {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        match self {
-            Self::Plain(signature) => {
-                state.write_u8(0);
-                Hash::hash(signature, state)
-            }
-            Self::Secp256k1(signature) => {
-                state.write_u8(1);
-                Hash::hash(signature, state)
-            }
-            Self::Schnorrkel(signature) => {
-                state.write_u8(2);
-                Hash::hash(&signature.to_bytes(), state)
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -298,15 +281,35 @@ impl Crypto {
 }
 
 pub mod peer {
-    use std::fmt::Debug;
+    use std::{fmt::Debug, hash::Hash};
 
     use rand::{CryptoRng, RngCore};
     use schnorrkel::{context::SigningContext, Keypair};
+    use serde::{Deserialize, Serialize};
     use sha2::{Digest, Sha256};
 
     use super::DigestHash;
 
-    pub type Signature = schnorrkel::Signature;
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Signature(schnorrkel::Signature);
+
+    impl Ord for Signature {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.0.to_bytes().cmp(&other.0.to_bytes())
+        }
+    }
+
+    impl PartialOrd for Signature {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Hash for Signature {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            Hash::hash(&self.0.to_bytes(), state)
+        }
+    }
 
     pub type Verifiable<M> = super::Verifiable<M, Signature>;
 
@@ -352,7 +355,7 @@ pub mod peer {
             let signature = self.keypair.sign(self.context.hash256(state));
             Verifiable {
                 inner: message,
-                signature,
+                signature: Signature(signature),
             }
         }
 
@@ -368,7 +371,7 @@ pub mod peer {
             &self,
             public_key: &PublicKey,
             message: &M,
-            signature: &Signature,
+            Signature(signature): &Signature,
         ) -> anyhow::Result<()> {
             let mut state = Sha256::new();
             DigestHash::hash(message, &mut state);

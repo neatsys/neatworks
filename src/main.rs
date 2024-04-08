@@ -226,6 +226,7 @@ where
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_client_sessions<
     S: OnEventUniversal<SessionTimer, Event = Event<S, SessionTimer>>
         + OnTimerUniversal<SessionTimer>

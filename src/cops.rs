@@ -82,6 +82,7 @@ pub struct Server<N, CN, VS, V, A> {
     store: BTreeMap<KeyId, (Put<V, A>, V)>,
     net: N,
     client_net: CN,
+    #[allow(unused)]
     version_worker: VS,
 }
 

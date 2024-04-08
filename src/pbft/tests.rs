@@ -16,19 +16,25 @@ use crate::{
 
 use super::{Commit, PrePrepare, Prepare, Reply, Request};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Addr {
     Client(u8),
     Replica(u8),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, derive_more::From)]
-pub enum MessageEvent {
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, derive_more::From)]
+pub enum Message {
     Request(Request<Addr>),
     PrePrepare(Verifiable<PrePrepare>, Vec<Request<Addr>>),
     Prepare(Verifiable<Prepare>),
     Commit(Verifiable<Commit>),
     Reply(Reply),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MessageEvent {
+    dest: Addr,
+    message: Message,
 }
 
 #[derive(Debug, Clone, derive_more::From)]
@@ -41,10 +47,10 @@ pub enum CryptoEvent {
     VerifiedCommit(Verified<Commit>),
 }
 
-type Client = super::Client<Transient<MessageEvent>, Transient<InvokeOk>, Addr>;
+type Client = super::Client<Transient<Message>, Transient<InvokeOk>, Addr>;
 type Replica = super::Replica<
-    Transient<MessageEvent>,
-    Transient<MessageEvent>,
+    Transient<Message>,
+    Transient<Message>,
     Worker<Crypto, Transient<CryptoEvent>>,
     KVStore,
     Addr,
@@ -55,7 +61,7 @@ type Replica = super::Replica<
 pub struct State<W: Workload> {
     pub clients: Vec<ClientState<W>>,
     pub replicas: Vec<Replica>,
-    message_events: BTreeSet<MessageEvent>,
+    message_events: BTreeSet<Message>,
 }
 
 #[derive_where(PartialEq, Eq, Hash; W::Attach)]

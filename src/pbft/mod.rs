@@ -19,14 +19,14 @@ use crate::{
     workload::{Invoke, InvokeOk},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PrePrepare {
     view_num: u32,
     op_num: u32,
     digest: H256,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Prepare {
     view_num: u32,
     op_num: u32,
@@ -34,7 +34,7 @@ pub struct Prepare {
     replica_id: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Commit {
     view_num: u32,
     op_num: u32,
@@ -42,7 +42,7 @@ pub struct Commit {
     replica_id: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Reply {
     seq: u32,
     result: Payload,
