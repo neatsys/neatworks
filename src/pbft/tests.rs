@@ -1,6 +1,7 @@
 use std::{
     any::Any,
     collections::{BTreeMap, BTreeSet},
+    iter::Empty,
     mem::{replace, take},
 };
 
@@ -8,7 +9,10 @@ use derive_where::derive_where;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    app::KVStore,
+    app::{
+        kvstore::{self, static_workload},
+        KVStore,
+    },
     crypto::{
         events::{Signed, Verified},
         Crypto,
@@ -21,8 +25,10 @@ use crate::{
         linear, SendEvent, TimerId, Transient, UnreachableTimer,
     },
     net::{events::Recv, IndexNet, IterAddr, SendMessage},
+    search::State as _,
+    util::Payload,
     worker::Worker,
-    workload::{CloseLoop, Invoke, InvokeOk, Workload},
+    workload::{CloseLoop, Invoke, InvokeOk, Iter, Workload},
 };
 
 use super::{Commit, CryptoWorker, PrePrepare, Prepare, Reply, Request, Resend};
@@ -325,20 +331,39 @@ impl<W: Workload, const CHECK: bool> State<W, CHECK> {
 fn no_client() -> anyhow::Result<()> {
     let num_replica = 4;
     let num_faulty = 1;
-
-    struct Idle;
-    impl Workload for Idle {
-        type Attach = ();
-
-        fn next_op(&mut self) -> anyhow::Result<Option<(crate::util::Payload, Self::Attach)>> {
-            Ok(None)
-        }
-
-        fn on_result(&mut self, _: crate::util::Payload, _: Self::Attach) -> anyhow::Result<()> {
-            Ok(())
-        }
-    }
-
-    let mut state = State::<Idle>::new(num_replica, num_faulty);
+    let mut state = State::<Iter<Empty<Payload>>>::new(num_replica, num_faulty);
     state.launch()
 }
+
+#[test]
+fn one_op() -> anyhow::Result<()> {
+    let num_replica = 4;
+    let num_faulty = 1;
+    let mut state = State::<_>::new(num_replica, num_faulty);
+    let op = kvstore::Op::Put("hello".into(), "world".into());
+    let result = kvstore::Result::PutOk;
+    let workload = static_workload([(op.clone(), result)].into_iter())?;
+    state.push_client(workload, num_replica, num_faulty);
+    state.launch()?;
+
+    while !state.clients.iter().all(|client| client.close_loop.done) {
+        let Some(event) = state.events().pop() else {
+            anyhow::bail!("stuck")
+        };
+        state.step(event)?
+    }
+
+    let mut num_prepared = 0;
+    for replica in &state.replicas {
+        let Some(entry) = replica.log.get(1) else {
+            continue;
+        };
+        num_prepared += 1;
+        anyhow::ensure!(entry.requests.first().unwrap().op == Payload(serde_json::to_vec(&op)?));
+    }
+    anyhow::ensure!(num_prepared >= num_replica - num_faulty);
+
+    Ok(())
+}
+
+// cSpell:words upcall kvstore
