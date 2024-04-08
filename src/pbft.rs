@@ -54,9 +54,6 @@ pub struct Reply {
     replica_id: u8,
 }
 
-pub trait ToClientNet<A>: SendMessage<A, Reply> {}
-impl<T: SendMessage<A, Reply>, A> ToClientNet<A> for T {}
-
 pub trait ToReplicaNet<A>:
     SendMessage<u8, Request<A>>
     + SendMessage<All, Request<A>>
@@ -187,6 +184,9 @@ impl<N, U, A: Addr> Client<N, U, A> {
     }
 }
 
+pub trait ToClientNet<A>: SendMessage<A, Reply> {}
+impl<T: SendMessage<A, Reply>, A> ToClientNet<A> for T {}
+
 pub trait SendCryptoEvent<A>:
     SendEvent<(Signed<PrePrepare>, Vec<Request<A>>)>
     + SendEvent<(Verified<PrePrepare>, Vec<Request<A>>)>
@@ -226,7 +226,10 @@ impl<W: Submit<S, E>, S: 'static, E: SendCryptoEvent<A> + 'static, A: Addr>
 }
 
 #[derive(Debug)]
-pub struct Replica<N, CN, CW, S, A> {
+pub struct ReplicaMarker<N, CN, CW, S, A>(std::marker::PhantomData<(N, CN, CW, S, A)>);
+
+#[derive(Debug)]
+pub struct Replica<N, CN, CW, S, A, M = ReplicaMarker<N, CN, CW, S, A>> {
     id: u8,
     num_replica: usize,
     num_faulty: usize,
@@ -249,6 +252,8 @@ pub struct Replica<N, CN, CW, S, A> {
     net: N,
     client_net: CN,    // C for client
     crypto_worker: CW, // C for crypto
+
+    _m: std::marker::PhantomData<M>,
 }
 
 #[derive(Debug)]
@@ -290,11 +295,13 @@ impl<N, CN, CW, S, A> Replica<N, CN, CW, S, A> {
             commit_num: 0,
             pending_prepares: Default::default(),
             pending_commits: Default::default(),
+
+            _m: Default::default(),
         }
     }
 }
 
-impl<N, CN, CW, S, A> Replica<N, CN, CW, S, A> {
+impl<N, CN, CW, S, A, M> Replica<N, CN, CW, S, A, M> {
     fn is_primary(&self) -> bool {
         (self.id as usize % self.num_replica) == self.view_num as usize
     }
@@ -302,7 +309,15 @@ impl<N, CN, CW, S, A> Replica<N, CN, CW, S, A> {
     const NUM_CONCURRENT_PRE_PREPARE: u32 = 1;
 }
 
-impl<N, CN, CW, S, A> OnEvent<Recv<Request<A>>> for Replica<N, CN, CW, S, A>
+pub trait ReplicaCommon {
+    type N: ToReplicaNet<Self::A>;
+    type CN: ToClientNet<Self::A>;
+    type CW: Submit<Crypto, dyn SendCryptoEvent<Self::A>>;
+    type S: App;
+    type A: Addr;
+}
+
+impl<N, CN, CW, S, A> ReplicaCommon for ReplicaMarker<N, CN, CW, S, A>
 where
     N: ToReplicaNet<A>,
     CN: ToClientNet<A>,
@@ -310,9 +325,17 @@ where
     S: App,
     A: Addr,
 {
+    type N = N;
+    type CN = CN;
+    type CW = CW;
+    type S = S;
+    type A = A;
+}
+
+impl<M: ReplicaCommon> OnEvent<Recv<Request<M::A>>> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     fn on_event(
         &mut self,
-        Recv(request): Recv<Request<A>>,
+        Recv(request): Recv<Request<M::A>>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         match self.replies.get(&request.client_id) {
@@ -338,14 +361,7 @@ where
     }
 }
 
-impl<N, CN, CW, S, A> Replica<N, CN, CW, S, A>
-where
-    N: ToReplicaNet<A>,
-    CN: ToClientNet<A>,
-    CW: Submit<Crypto, dyn SendCryptoEvent<A>>,
-    S: App,
-    A: Addr,
-{
+impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     fn close_batch(&mut self) -> anyhow::Result<()> {
         assert!(self.is_primary());
         assert!(!self.requests.is_empty());
@@ -367,17 +383,12 @@ where
     }
 }
 
-impl<N, CN, CW, S, A> OnEvent<(Signed<PrePrepare>, Vec<Request<A>>)> for Replica<N, CN, CW, S, A>
-where
-    N: ToReplicaNet<A>,
-    CN: ToClientNet<A>,
-    CW: Submit<Crypto, dyn SendCryptoEvent<A>>,
-    S: App,
-    A: Addr,
+impl<M: ReplicaCommon> OnEvent<(Signed<PrePrepare>, Vec<Request<M::A>>)>
+    for Replica<M::N, M::CN, M::CW, M::S, M::A, M>
 {
     fn on_event(
         &mut self,
-        (Signed(pre_prepare), requests): (Signed<PrePrepare>, Vec<Request<A>>),
+        (Signed(pre_prepare), requests): (Signed<PrePrepare>, Vec<Request<M::A>>),
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if pre_prepare.view_num != self.view_num {
@@ -399,18 +410,12 @@ where
     }
 }
 
-impl<N, CN, CW, S, A> OnEvent<Recv<(Verifiable<PrePrepare>, Vec<Request<A>>)>>
-    for Replica<N, CN, CW, S, A>
-where
-    N: ToReplicaNet<A>,
-    CN: ToClientNet<A>,
-    CW: Submit<Crypto, dyn SendCryptoEvent<A>>,
-    S: App,
-    A: Addr,
+impl<M: ReplicaCommon> OnEvent<Recv<(Verifiable<PrePrepare>, Vec<Request<M::A>>)>>
+    for Replica<M::N, M::CN, M::CW, M::S, M::A, M>
 {
     fn on_event(
         &mut self,
-        Recv((pre_prepare, requests)): Recv<(Verifiable<PrePrepare>, Vec<Request<A>>)>,
+        Recv((pre_prepare, requests)): Recv<(Verifiable<PrePrepare>, Vec<Request<M::A>>)>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if pre_prepare.view_num != self.view_num {
@@ -440,17 +445,12 @@ where
     }
 }
 
-impl<N, CN, CW, S, A> OnEvent<(Verified<PrePrepare>, Vec<Request<A>>)> for Replica<N, CN, CW, S, A>
-where
-    N: ToReplicaNet<A>,
-    CN: ToClientNet<A>,
-    CW: Submit<Crypto, dyn SendCryptoEvent<A>>,
-    S: App,
-    A: Addr,
+impl<M: ReplicaCommon> OnEvent<(Verified<PrePrepare>, Vec<Request<M::A>>)>
+    for Replica<M::N, M::CN, M::CW, M::S, M::A, M>
 {
     fn on_event(
         &mut self,
-        (Verified(pre_prepare), requests): (Verified<PrePrepare>, Vec<Request<A>>),
+        (Verified(pre_prepare), requests): (Verified<PrePrepare>, Vec<Request<M::A>>),
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if pre_prepare.view_num != self.view_num {
@@ -487,14 +487,7 @@ where
     }
 }
 
-impl<N, CN, CW, S, A> OnEvent<Signed<Prepare>> for Replica<N, CN, CW, S, A>
-where
-    N: ToReplicaNet<A>,
-    CN: ToClientNet<A>,
-    CW: Submit<Crypto, dyn SendCryptoEvent<A>>,
-    S: App,
-    A: Addr,
-{
+impl<M: ReplicaCommon> OnEvent<Signed<Prepare>> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     fn on_event(
         &mut self,
         Signed(prepare): Signed<Prepare>,
@@ -511,13 +504,8 @@ where
     }
 }
 
-impl<N, CN, CW, S, A> OnEvent<Recv<Verifiable<Prepare>>> for Replica<N, CN, CW, S, A>
-where
-    N: ToReplicaNet<A>,
-    CN: ToClientNet<A>,
-    CW: Submit<Crypto, dyn SendCryptoEvent<A>>,
-    S: App,
-    A: Addr,
+impl<M: ReplicaCommon> OnEvent<Recv<Verifiable<Prepare>>>
+    for Replica<M::N, M::CN, M::CW, M::S, M::A, M>
 {
     fn on_event(
         &mut self,
@@ -537,14 +525,7 @@ where
     }
 }
 
-impl<N, CN, CW, S, A> Replica<N, CN, CW, S, A>
-where
-    N: ToReplicaNet<A>,
-    CN: ToClientNet<A>,
-    CW: Submit<Crypto, dyn SendCryptoEvent<A>>,
-    S: App,
-    A: Addr,
-{
+impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     fn submit_prepare(&mut self, prepare: Verifiable<Prepare>) -> anyhow::Result<bool> {
         if prepare.view_num != self.view_num {
             if prepare.view_num > self.view_num {
@@ -573,14 +554,7 @@ where
     }
 }
 
-impl<N, CN, CW, S, A> OnEvent<Verified<Prepare>> for Replica<N, CN, CW, S, A>
-where
-    N: ToReplicaNet<A>,
-    CN: ToClientNet<A>,
-    CW: Submit<Crypto, dyn SendCryptoEvent<A>>,
-    S: App,
-    A: Addr,
-{
+impl<M: ReplicaCommon> OnEvent<Verified<Prepare>> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     fn on_event(
         &mut self,
         Verified(prepare): Verified<Prepare>,
@@ -608,14 +582,7 @@ where
     }
 }
 
-impl<N, CN, CW, S, A> Replica<N, CN, CW, S, A>
-where
-    N: ToReplicaNet<A>,
-    CN: ToClientNet<A>,
-    CW: Submit<Crypto, dyn SendCryptoEvent<A>>,
-    S: App,
-    A: Addr,
-{
+impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     fn insert_prepare(&mut self, prepare: Verifiable<Prepare>) -> anyhow::Result<()> {
         let prepare_quorum = self.prepare_quorums.entry(prepare.op_num).or_default();
         prepare_quorum.insert(prepare.replica_id, prepare.clone());
@@ -653,14 +620,7 @@ where
     }
 }
 
-impl<N, CN, CW, S, A> OnEvent<Signed<Commit>> for Replica<N, CN, CW, S, A>
-where
-    N: ToReplicaNet<A>,
-    CN: ToClientNet<A>,
-    CW: Submit<Crypto, dyn SendCryptoEvent<A>>,
-    S: App,
-    A: Addr,
-{
+impl<M: ReplicaCommon> OnEvent<Signed<Commit>> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     fn on_event(
         &mut self,
         Signed(commit): Signed<Commit>,
@@ -677,13 +637,8 @@ where
     }
 }
 
-impl<N, CN, CW, S, A> OnEvent<Recv<Verifiable<Commit>>> for Replica<N, CN, CW, S, A>
-where
-    N: ToReplicaNet<A>,
-    CN: ToClientNet<A>,
-    CW: Submit<Crypto, dyn SendCryptoEvent<A>>,
-    S: App,
-    A: Addr,
+impl<M: ReplicaCommon> OnEvent<Recv<Verifiable<Commit>>>
+    for Replica<M::N, M::CN, M::CW, M::S, M::A, M>
 {
     fn on_event(
         &mut self,
@@ -703,14 +658,7 @@ where
     }
 }
 
-impl<N, CN, CW, S, A> Replica<N, CN, CW, S, A>
-where
-    N: ToReplicaNet<A>,
-    CN: ToClientNet<A>,
-    CW: Submit<Crypto, dyn SendCryptoEvent<A>>,
-    S: App,
-    A: Addr,
-{
+impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     fn submit_commit(&mut self, commit: Verifiable<Commit>) -> anyhow::Result<bool> {
         if commit.view_num != self.view_num {
             if commit.view_num > self.view_num {
@@ -739,14 +687,7 @@ where
     }
 }
 
-impl<N, CN, CW, S, A> OnEvent<Verified<Commit>> for Replica<N, CN, CW, S, A>
-where
-    N: ToReplicaNet<A>,
-    CN: ToClientNet<A>,
-    CW: Submit<Crypto, dyn SendCryptoEvent<A>>,
-    S: App,
-    A: Addr,
-{
+impl<M: ReplicaCommon> OnEvent<Verified<Commit>> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     fn on_event(
         &mut self,
         Verified(commit): Verified<Commit>,
@@ -774,14 +715,7 @@ where
     }
 }
 
-impl<N, CN, CW, S, A> Replica<N, CN, CW, S, A>
-where
-    N: ToReplicaNet<A>,
-    CN: ToClientNet<A>,
-    CW: Submit<Crypto, dyn SendCryptoEvent<A>>,
-    S: App,
-    A: Addr,
-{
+impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     fn insert_commit(&mut self, commit: Verifiable<Commit>) -> anyhow::Result<()> {
         let commit_quorum = self.commit_quorums.entry(commit.op_num).or_default();
         commit_quorum.insert(commit.replica_id, commit.clone());
