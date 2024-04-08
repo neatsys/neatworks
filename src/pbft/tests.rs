@@ -20,7 +20,7 @@ use crate::{
         Verifiable,
     },
     event::{
-        any::{self, TryIntoTimerData},
+        any::{self, DowncastEvent},
         erased::{events::Init, OnEvent as _, OnEventRichTimer as _},
         linear, SendEvent, TimerId, Transient, UnreachableTimer,
     },
@@ -88,12 +88,10 @@ enum TimerData {
     // replica timers
 }
 
-struct IntoTimerData;
-
-impl TryIntoTimerData<TimerData> for IntoTimerData {
-    fn try_into<M: 'static>(event: M) -> anyhow::Result<TimerData> {
+impl DowncastEvent for TimerData {
+    fn try_from<M: 'static>(event: M) -> anyhow::Result<Self> {
         if (&event as &dyn Any).is::<Resend>() {
-            Ok(TimerData::Resend)
+            Ok(Self::Resend)
         } else {
             Err(anyhow::anyhow!("unknown timer data"))
         }
@@ -125,7 +123,7 @@ struct State<W: Workload, const CHECK: bool = false> {
     pub clients: Vec<ClientState<W>>,
     pub replicas: Vec<Replica>,
     message_events: BTreeSet<MessageEvent>,
-    timers: BTreeMap<Addr, any::Timer<linear::Timer, IntoTimerData, TimerData>>,
+    timers: BTreeMap<Addr, any::Timer<linear::Timer, TimerData>>,
 }
 
 #[derive_where(Debug, Clone; W, W::Attach)]

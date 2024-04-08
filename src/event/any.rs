@@ -4,23 +4,22 @@ use derive_where::derive_where;
 
 use super::TimerId;
 
-#[derive(derive_more::Deref, derive_more::DerefMut)]
-#[derive_where(Debug, Clone, PartialEq, Eq, Hash; T, D)]
+#[derive(derive_more::Deref, derive_more::DerefMut, Debug, Clone, PartialEq, Eq, Hash)]
 #[derive_where(Default; T)]
-pub struct Timer<T, F, D> {
+pub struct Timer<T, D> {
     #[deref]
     #[deref_mut]
     inner: T,
     attach: BTreeMap<u32, D>,
-    #[derive_where(skip)]
-    _m: std::marker::PhantomData<F>,
 }
 
-pub trait TryIntoTimerData<D> {
-    fn try_into<M: 'static>(event: M) -> anyhow::Result<D>;
+pub trait DowncastEvent {
+    fn try_from<M: 'static>(event: M) -> anyhow::Result<Self>
+    where
+        Self: Sized;
 }
 
-impl<T: super::Timer, F: TryIntoTimerData<D>, D, S> super::erased::RichTimer<S> for Timer<T, F, D> {
+impl<T: super::Timer, D: DowncastEvent, S> super::erased::RichTimer<S> for Timer<T, D> {
     fn set<M: Clone + Send + Sync + 'static>(
         &mut self,
         period: std::time::Duration,
@@ -29,7 +28,7 @@ impl<T: super::Timer, F: TryIntoTimerData<D>, D, S> super::erased::RichTimer<S> 
     where
         S: super::erased::OnEventRichTimer<M>,
     {
-        let data = F::try_into(event)?;
+        let data = D::try_from(event)?;
         let TimerId(timer_id) = self.inner.set(period)?;
         self.attach.insert(timer_id, data);
         Ok(TimerId(timer_id))
@@ -41,12 +40,11 @@ impl<T: super::Timer, F: TryIntoTimerData<D>, D, S> super::erased::RichTimer<S> 
     }
 }
 
-impl<T, F, D> Timer<T, F, D> {
+impl<T, D> Timer<T, D> {
     pub fn new(inner: T) -> Self {
         Self {
             inner,
             attach: Default::default(),
-            _m: Default::default(),
         }
     }
 
