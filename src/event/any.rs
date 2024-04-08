@@ -4,8 +4,9 @@ use derive_where::derive_where;
 
 use super::TimerId;
 
-#[derive(Clone, derive_more::Deref, derive_more::DerefMut)]
-#[derive_where(Debug, PartialEq, Eq, Hash; T, D)]
+#[derive(derive_more::Deref, derive_more::DerefMut)]
+#[derive_where(Debug, Clone, PartialEq, Eq, Hash; T, D)]
+#[derive_where(Default; T)]
 pub struct Timer<T, F, D> {
     #[deref]
     #[deref_mut]
@@ -16,7 +17,7 @@ pub struct Timer<T, F, D> {
 }
 
 pub trait TryIntoTimerData<D> {
-    fn try_into<M>(event: M) -> anyhow::Result<D>;
+    fn try_into<M: 'static>(event: M) -> anyhow::Result<D>;
 }
 
 impl<T: super::Timer, F: TryIntoTimerData<D>, D, S> super::erased::RichTimer<S> for Timer<T, F, D> {

@@ -205,6 +205,7 @@ impl<
 {
 }
 
+#[derive_where(Debug, Clone; W)]
 pub struct CryptoWorker<W, E>(W, std::marker::PhantomData<E>);
 
 impl<W, E> From<W> for CryptoWorker<W, E> {

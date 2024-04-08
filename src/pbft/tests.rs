@@ -1,4 +1,8 @@
-use std::collections::BTreeSet;
+use std::{
+    any::Any,
+    collections::{BTreeMap, BTreeSet},
+    mem::{replace, take},
+};
 
 use derive_where::derive_where;
 use serde::{Deserialize, Serialize};
@@ -11,22 +15,26 @@ use crate::{
         CryptoFlavor::Plain,
         Verifiable,
     },
-    event::{linear::Timer, SendEvent, TimerId, Transient},
-    net::{IndexNet, SendMessage},
+    event::{
+        any::{self, TryIntoTimerData},
+        erased::{events::Init, OnEvent as _, OnEventRichTimer as _},
+        linear, SendEvent, TimerId, Transient, UnreachableTimer,
+    },
+    net::{events::Recv, IndexNet, IterAddr, SendMessage},
     worker::Worker,
     workload::{CloseLoop, Invoke, InvokeOk, Workload},
 };
 
-use super::{Commit, PrePrepare, Prepare, Reply, Request};
+use super::{Commit, CryptoWorker, PrePrepare, Prepare, Reply, Request, Resend};
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum Addr {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+enum Addr {
     Client(u8),
     Replica(u8),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, derive_more::From)]
-pub enum Message {
+enum Message {
     Request(Request<Addr>),
     PrePrepare(Verifiable<PrePrepare>, Vec<Request<Addr>>),
     Prepare(Verifiable<Prepare>),
@@ -35,7 +43,7 @@ pub enum Message {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct MessageEvent {
+struct MessageEvent {
     dest: Addr,
     message: Message,
 }
@@ -52,14 +60,42 @@ impl<M: Into<Message>> SendMessage<Addr, M> for Transient<MessageEvent> {
     }
 }
 
+impl<M: Into<Message> + Clone> SendMessage<IterAddr<'_, Addr>, M> for Transient<MessageEvent> {
+    fn send(&mut self, dest: IterAddr<'_, Addr>, message: M) -> anyhow::Result<()> {
+        // special bookkeeping if useful
+        for addr in dest.0 {
+            SendMessage::send(self, addr, message.clone())?
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TimerEvent {
+struct TimerEvent {
     addr: Addr,
     timer_id: TimerId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum TimerData {
+    Resend,
+    // replica timers
+}
+
+struct IntoTimerData;
+
+impl TryIntoTimerData<TimerData> for IntoTimerData {
+    fn try_into<M: 'static>(event: M) -> anyhow::Result<TimerData> {
+        if (&event as &dyn Any).is::<Resend>() {
+            Ok(TimerData::Resend)
+        } else {
+            Err(anyhow::anyhow!("unknown timer data"))
+        }
+    }
+}
+
 #[derive(Debug, Clone, derive_more::From)]
-pub enum CryptoEvent {
+enum CryptoEvent {
     SignedPrePrepare(Signed<PrePrepare>, Vec<Request<Addr>>),
     VerifiedPrePrepare(Verified<PrePrepare>, Vec<Request<Addr>>),
     SignedPrepare(Signed<Prepare>),
@@ -72,35 +108,29 @@ type Client = super::Client<IndexNet<Transient<MessageEvent>, Addr>, Transient<I
 type Replica = super::Replica<
     IndexNet<Transient<MessageEvent>, Addr>,
     Transient<MessageEvent>,
-    Worker<Crypto, Transient<CryptoEvent>>,
+    CryptoWorker<Worker<Crypto, Transient<CryptoEvent>>, Transient<CryptoEvent>>,
     KVStore,
     Addr,
 >;
 
 #[derive_where(PartialEq, Eq, Hash; W::Attach)]
 #[derive_where(Debug, Clone; W, W::Attach)]
-pub struct State<W: Workload, const CHECK: bool = false> {
+struct State<W: Workload, const CHECK: bool = false> {
     pub clients: Vec<ClientState<W>>,
-    pub replicas: Vec<ReplicaState>,
+    pub replicas: Vec<Replica>,
     message_events: BTreeSet<MessageEvent>,
+    timers: BTreeMap<Addr, any::Timer<linear::Timer, IntoTimerData, TimerData>>,
 }
 
 #[derive_where(Debug, Clone; W, W::Attach)]
 #[derive_where(PartialEq, Eq, Hash; W::Attach)]
-pub struct ClientState<W: Workload> {
+struct ClientState<W: Workload> {
     pub state: Client,
-    timer: Timer,
     pub close_loop: CloseLoop<W, Transient<Invoke>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ReplicaState {
-    pub state: Replica,
-    timer: Timer,
-}
-
 impl<W: Workload, const CHECK: bool> State<W, CHECK> {
-    pub fn new(num_replica: usize, num_faulty: usize) -> Self {
+    fn new(num_replica: usize, num_faulty: usize) -> Self {
         let addrs = (0..num_replica)
             .map(|i| Addr::Replica(i as _))
             .collect::<Vec<_>>();
@@ -113,25 +143,24 @@ impl<W: Workload, const CHECK: bool> State<W, CHECK> {
                         KVStore::new(),
                         IndexNet::new(Transient::default(), addrs.clone(), i),
                         Transient::default(),
-                        Worker::Inline(
+                        CryptoWorker::from(Worker::Inline(
                             Crypto::new_hardcoded_replication(num_replica, i, Plain)
                                 .expect("plain crypto always can be created"),
                             Transient::default(),
-                        ),
+                        )),
                         num_replica,
                         num_faulty,
                     )
                 })
-                .map(|state| ReplicaState {
-                    state,
-                    timer: Timer::default(),
-                })
+                .collect(),
+            timers: (0..num_replica)
+                .map(|i| (Addr::Replica(i as _), Default::default()))
                 .collect(),
             message_events: Default::default(),
         }
     }
 
-    pub fn push_client(&mut self, workload: W, num_replica: usize, num_faulty: usize) {
+    fn push_client(&mut self, workload: W, num_replica: usize, num_faulty: usize) {
         let addrs = (0..num_replica)
             .map(|i| Addr::Replica(i as _))
             .collect::<Vec<_>>();
@@ -145,14 +174,15 @@ impl<W: Workload, const CHECK: bool> State<W, CHECK> {
                 num_replica,
                 num_faulty,
             ),
-            timer: Timer::default(),
             close_loop: CloseLoop::new(Transient::default(), workload),
         });
+        self.timers
+            .insert(Addr::Client(index as _), Default::default());
     }
 }
 
 #[derive(Debug, Clone)]
-pub enum Event {
+enum Event {
     Message(MessageEvent),
     Timer(TimerEvent),
 }
@@ -169,27 +199,14 @@ where
             .iter()
             .cloned()
             .map(Event::Message)
-            .chain(self.clients.iter().enumerate().flat_map(|(index, client)| {
-                client.timer.events().into_iter().map(move |timer_id| {
+            .chain(self.timers.iter().flat_map(|(addr, timer)| {
+                timer.events().into_iter().map(move |timer_id| {
                     Event::Timer(TimerEvent {
                         timer_id,
-                        addr: Addr::Client(index as _),
+                        addr: *addr,
                     })
                 })
-            }))
-            .chain(
-                self.replicas
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(index, replica)| {
-                        replica.timer.events().into_iter().map(move |timer_id| {
-                            Event::Timer(TimerEvent {
-                                timer_id,
-                                addr: Addr::Replica(index as _),
-                            })
-                        })
-                    }),
-            );
+            }));
         if CHECK {
             events.collect()
         } else {
@@ -198,20 +215,130 @@ where
     }
 
     fn step(&mut self, event: Self::Event) -> anyhow::Result<()> {
-        // match event {
-        //     Event::Message(event) => {
-        //         if CHECK {
-        //             self.message_events.remove(&event); // assert exist
-        //         }
-        //     }
-        //     Event::Timer(TimerEvent {
-        //         addr: Addr::Client(index),
-        //         timer_id,
-        //     }) => {
-        //         let client = &mut self.clients[index as usize];
-        //         // client.state
-        //     }
-        // }
+        match event {
+            Event::Message(event) => {
+                if !CHECK {
+                    self.message_events.remove(&event); // assert exist
+                }
+                let timer = self
+                    .timers
+                    .get_mut(&event.dest)
+                    .ok_or(anyhow::anyhow!("missing timer for {:?}", event.dest))?;
+                match (event.dest, event.message) {
+                    (Addr::Client(index), Message::Reply(reply)) => self.clients[index as usize]
+                        .state
+                        .on_event(Recv(reply), timer)?,
+                    (Addr::Replica(index), message) => {
+                        let replica = &mut self.replicas[index as usize];
+                        match message {
+                            Message::Request(request) => replica.on_event(Recv(request), timer)?,
+                            Message::PrePrepare(pre_prepare, requests) => {
+                                replica.on_event(Recv((pre_prepare, requests)), timer)?
+                            }
+                            Message::Prepare(prepare) => replica.on_event(Recv(prepare), timer)?,
+                            Message::Commit(commit) => replica.on_event(Recv(commit), timer)?,
+                            _ => anyhow::bail!("unimplemented"),
+                        }
+                    }
+                    _ => anyhow::bail!("unimplemented"),
+                }
+            }
+            Event::Timer(TimerEvent { addr, timer_id }) => {
+                let timer = self
+                    .timers
+                    .get_mut(&addr)
+                    .ok_or(anyhow::anyhow!("missing timer for {addr:?}"))?;
+                let timer_data = timer.get_timer_data(&timer_id)?.clone();
+                timer.step_timer(&timer_id)?;
+                match (addr, timer_data) {
+                    (Addr::Client(index), TimerData::Resend) => {
+                        self.clients[index as usize].state.on_event(Resend, timer)?
+                    }
+                    _ => anyhow::bail!("unimplemented"),
+                }
+            }
+        }
+        self.flush()
+    }
+}
+
+impl<W: Workload, const CHECK: bool> State<W, CHECK> {
+    fn launch(&mut self) -> anyhow::Result<()> {
+        for client in &mut self.clients {
+            client.close_loop.on_event(Init, &mut UnreachableTimer)?
+        }
+        self.flush()
+    }
+
+    fn flush(&mut self) -> anyhow::Result<()> {
+        let mut rerun = true;
+        while replace(&mut rerun, false) {
+            for (index, replica) in self.replicas.iter_mut().enumerate() {
+                self.message_events.extend(replica.net.drain(..));
+                self.message_events.extend(replica.client_net.drain(..));
+                let Worker::Inline(_, events) = &mut replica.crypto_worker.0 else {
+                    unreachable!()
+                };
+                let timer = self
+                    .timers
+                    .get_mut(&Addr::Replica(index as _))
+                    .ok_or(anyhow::anyhow!("missing timer for replica {index}"))?;
+                for event in take(&mut **events) {
+                    rerun = true;
+                    match event {
+                        CryptoEvent::SignedPrePrepare(pre_prepare, requests) => {
+                            replica.on_event((pre_prepare, requests), timer)?
+                        }
+                        CryptoEvent::VerifiedPrePrepare(pre_prepare, requests) => {
+                            replica.on_event((pre_prepare, requests), timer)?
+                        }
+                        CryptoEvent::SignedPrepare(prepare) => replica.on_event(prepare, timer)?,
+                        CryptoEvent::VerifiedPrepare(prepare) => {
+                            replica.on_event(prepare, timer)?
+                        }
+                        CryptoEvent::SignedCommit(commit) => replica.on_event(commit, timer)?,
+                        CryptoEvent::VerifiedCommit(commit) => replica.on_event(commit, timer)?,
+                    }
+                }
+            }
+            for (index, client) in self.clients.iter_mut().enumerate() {
+                self.message_events.extend(client.state.net.drain(..));
+                let timer = self
+                    .timers
+                    .get_mut(&Addr::Client(index as _))
+                    .ok_or(anyhow::anyhow!("missing timer for client {index}"))?;
+                for invoke in client.close_loop.sender.drain(..) {
+                    rerun = true;
+                    client.state.on_event(invoke, timer)?
+                }
+                for upcall in client.state.upcall.drain(..) {
+                    rerun = true;
+                    client.close_loop.on_event(upcall, &mut UnreachableTimer)?
+                }
+            }
+        }
         Ok(())
     }
+}
+
+#[test]
+fn no_client() -> anyhow::Result<()> {
+    let num_replica = 4;
+    let num_faulty = 1;
+
+    struct Idle;
+    impl Workload for Idle {
+        type Attach = ();
+
+        fn next_op(&mut self) -> anyhow::Result<Option<(crate::util::Payload, Self::Attach)>> {
+            Ok(None)
+        }
+
+        fn on_result(&mut self, _: crate::util::Payload, _: Self::Attach) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut state = State::<Idle>::new(num_replica, num_faulty);
+    state.launch()
 }

@@ -429,11 +429,11 @@ pub mod check {
         }
 
         fn flush(&mut self) -> anyhow::Result<()> {
-            self.message_events.extend(self.replica.net.drain(..));
-            for client in &mut self.clients {
-                self.message_events.extend(client.state.net.drain(..));
-                let mut rerun = true;
-                while replace(&mut rerun, false) {
+            let mut rerun = true;
+            while replace(&mut rerun, false) {
+                self.message_events.extend(self.replica.net.drain(..));
+                for client in &mut self.clients {
+                    self.message_events.extend(client.state.net.drain(..));
                     for invoke in client.close_loop.sender.drain(..) {
                         rerun = true;
                         client.state.on_event(invoke, &mut client.timer)?
