@@ -353,8 +353,6 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
             CryptoFlavor::Schnorrkel,
             // CryptoFlavor::Secp256k1,
         )?;
-        let (crypto_worker, mut crypto_executor) = spawn_backend();
-
         match config.protocol {
             Protocol::Unreplicated => {
                 assert_eq!(config.replica_id, 0);
@@ -371,6 +369,7 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
                 ))
             }
             Protocol::Pbft => {
+                let (crypto_worker, mut crypto_executor) = spawn_backend();
                 let state = Blanket(Buffered::from(pbft::Replica::new(
                     config.replica_id,
                     app,
@@ -450,3 +449,5 @@ async fn stop_replica(State(state): State<AppState>) {
     cancel.cancel();
     handle.await.unwrap().unwrap()
 }
+
+// cSpell:words unreplicated pbft upcall ycsb seedable schnorrkel secp256k1

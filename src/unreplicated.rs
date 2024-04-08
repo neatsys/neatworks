@@ -545,3 +545,5 @@ pub mod check {
 // * and demands to support protocols that may/can do anything
 // fortunately the performance speedup kind of pays off. however, when things
 // come to unit testing, a less-effort approach is very desirable
+
+// cSpell:words paxos blackbox upcall

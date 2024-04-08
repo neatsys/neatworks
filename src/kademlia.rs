@@ -262,14 +262,14 @@ impl<T: SendEvent<QueryResult<A>>, A> Upcall<A> for T {}
 
 pub trait SendCryptoEvent<A>:
     SendEvent<Signed<FindPeer<A>>>
-    + SendEvent<Signed<FindPeerOk<A>>>
+    + SendEvent<(A, Signed<FindPeerOk<A>>)>
     + SendEvent<Verified<FindPeer<A>>>
     + SendEvent<Verified<FindPeerOk<A>>>
 {
 }
 impl<
         T: SendEvent<Signed<FindPeer<A>>>
-            + SendEvent<Signed<FindPeerOk<A>>>
+            + SendEvent<(A, Signed<FindPeerOk<A>>)>
             + SendEvent<Verified<FindPeer<A>>>
             + SendEvent<Verified<FindPeerOk<A>>>,
         A,
@@ -285,7 +285,6 @@ pub struct Peer<A> {
     refresh_targets: HashSet<Target>,
     on_bootstrap: Option<OnBootstrap>, // TODO change to impl SendEventOnce
     find_peer_ok_seq: u32,
-    find_peer_ok_dests: HashMap<u32, A>,
 
     net: Box<dyn Net<A> + Send + Sync>,
     upcall: Box<dyn Upcall<A> + Send + Sync>,
@@ -326,7 +325,6 @@ impl<A: Addr> Peer<A> {
             refresh_targets: Default::default(),
             on_bootstrap: None,
             find_peer_ok_seq: 0,
-            find_peer_ok_dests: Default::default(),
         }
     }
 }
@@ -497,26 +495,18 @@ impl<A: Addr> OnEvent<Verified<FindPeer<A>>> for Peer<A> {
                 .find_closest(&find_peer.target, find_peer.count),
             record: self.record.clone(),
         };
-        self.find_peer_ok_dests.insert(self.find_peer_ok_seq, dest);
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
-            sender.send(Signed(crypto.sign(find_peer_ok)))
+            sender.send((dest, Signed(crypto.sign(find_peer_ok))))
         }))
     }
 }
 
-impl<A> OnEvent<Signed<FindPeerOk<A>>> for Peer<A> {
+impl<A> OnEvent<(A, Signed<FindPeerOk<A>>)> for Peer<A> {
     fn on_event(
         &mut self,
-        Signed(find_peer_ok): Signed<FindPeerOk<A>>,
+        (dest, Signed(find_peer_ok)): (A, Signed<FindPeerOk<A>>),
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        let dest = self
-            .find_peer_ok_dests
-            .remove(&find_peer_ok.seq)
-            .ok_or(anyhow::anyhow!(
-                "unknown FindPeerOk seq {}",
-                find_peer_ok.seq
-            ))?;
         self.net.send(dest, find_peer_ok)
     }
 }
@@ -853,6 +843,7 @@ mod tests {
 }
 
 // run with
+// cSpell:disable
 // cargo kani \
 //   --enable-unstable $@ \
 //   --cbmc-args \
@@ -866,6 +857,7 @@ mod tests {
 //   --unwindset _RINvXs2T_NtNtCsiCvmSzcCjPe_4core5slice4iterINtB7_4IterINtNtCskqTXbRBwjM9_8augustus8kademlia10PeerRecorduuEENtNtNtNtBb_4iter6traits8iterator8Iterator8positionNCNvMs1_BT_INtBT_7BucketsuuKj8_E6inserts_0EBV_.0:21 \
 //   --unwindset _RINvNtCsiCvmSzcCjPe_4core5array18try_from_fn_erasedINtNtCskqTXbRBwjM9_8augustus8kademlia6BucketuuEINtNtNtB4_3ops9try_trait17NeverShortCircuitBN_ENCINvMB1B_B1y_10wrap_mut_1jNCNvMs1_BQ_INtBQ_7BucketsuuKj8_E3new0E0EBS_.0:9 \
 //   --unwindset _RNvNtNtCskqTXbRBwjM9_8augustus8kademlia12verification15ordered_closest.0:3
+// cSpell:enable
 // to set proper unwind depth for various loops
 // easily get invalid by name mangling rule change or implementation update
 #[cfg(kani)]
@@ -924,3 +916,5 @@ mod verification {
         assert_eq!(buckets.index(&target), i);
     }
 }
+
+// cSpell:words upcall kani proptest libp2p

@@ -183,3 +183,5 @@ pub mod workload;
 // server goes wrong, so i know where to find the relevant log later.
 // propagating complete error context may be desirable if servers cannot be
 // accessed easily, but that's not my case for now
+
+// cSpell:words unreachability kademlia pbft unreplicated dpdk libclang
