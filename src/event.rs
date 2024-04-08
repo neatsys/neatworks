@@ -10,6 +10,7 @@
 // messages = =)
 // https://zhuanlan.zhihu.com/p/685275310
 
+pub mod any;
 pub mod blocking;
 pub mod linear;
 pub mod ordered;
@@ -336,10 +337,12 @@ pub mod erased {
     }
 
     #[derive(derive_more::Deref, derive_more::DerefMut)]
+    #[derive_where(Debug; S)]
     pub struct Buffered<S, T> {
         #[deref]
         #[deref_mut]
         inner: S,
+        #[derive_where(skip)]
         attached: Attached<S, T>,
     }
 
@@ -352,14 +355,6 @@ pub mod erased {
                 + Sync,
         >,
     >;
-
-    impl<S: Debug, T> Debug for Buffered<S, T> {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("Buffered")
-                .field("inner", &self.inner)
-                .finish_non_exhaustive()
-        }
-    }
 
     impl<S, T> From<S> for Buffered<S, T> {
         fn from(value: S) -> Self {
@@ -422,6 +417,7 @@ pub mod erased {
         }
     }
 
+    use derive_where::derive_where;
     pub use session::Session;
 
     pub mod events {

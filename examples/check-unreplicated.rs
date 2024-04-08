@@ -37,7 +37,7 @@ fn main() -> anyhow::Result<()> {
             ),
         ]
         .into_iter(),
-    )?)?;
+    )?);
     state.launch()?;
 
     let settings = Settings {
@@ -72,7 +72,7 @@ fn main() -> anyhow::Result<()> {
                 Op::Append(format!("KEY-{i}"), x.to_string()),
                 Result::AppendResult((0..=x).map(|x| x.to_string()).collect::<Vec<_>>().concat()),
             )
-        }))?)?
+        }))?)
     }
     state.launch()?;
 
@@ -109,7 +109,7 @@ fn main() -> anyhow::Result<()> {
                 .map(|op| Ok(Payload(serde_json::to_vec(&op)?)))
                 .collect::<anyhow::Result<Vec<_>>>()?
                 .into_iter(),
-        )))?
+        )))
     }
     state.launch()?;
 
@@ -166,8 +166,8 @@ fn main() -> anyhow::Result<()> {
 
     println!("* Infinite workload searches (with 2 clients)");
     let mut state = State::new();
-    state.push_client(Check::new(InfinitePutGet::new("KEY1", &mut thread_rng())?))?;
-    state.push_client(Check::new(InfinitePutGet::new("KEY2", &mut thread_rng())?))?;
+    state.push_client(Check::new(InfinitePutGet::new("KEY1", &mut thread_rng())?));
+    state.push_client(Check::new(InfinitePutGet::new("KEY2", &mut thread_rng())?));
     state.launch()?;
     let mut settings = Settings {
         invariant: |_: &_| Ok(()),

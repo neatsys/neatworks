@@ -247,10 +247,7 @@ pub mod erased {
 }
 
 pub mod check {
-    use std::{
-        collections::{BTreeMap, BTreeSet},
-        mem::replace,
-    };
+    use std::{collections::BTreeSet, mem::replace};
 
     use derive_where::derive_where;
     use serde::{Deserialize, Serialize};
@@ -319,12 +316,6 @@ pub mod check {
         client_index: usize,
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-    pub struct DryReplica {
-        replies: BTreeMap<u32, Reply>,
-        app: KVStore,
-    }
-
     impl<M: Into<Message>> SendMessage<Addr, M> for Transient<MessageEvent> {
         fn send(&mut self, dest: Addr, message: M) -> anyhow::Result<()> {
             self.push(MessageEvent {
@@ -355,13 +346,13 @@ pub mod check {
     impl<W: Workload> State<W> {
         pub fn new() -> Self {
             Self {
-                replica: Replica::new(KVStore::new(), Transient::default()),
                 clients: Default::default(),
+                replica: Replica::new(KVStore::new(), Transient::default()),
                 message_events: Default::default(),
             }
         }
 
-        pub fn push_client(&mut self, workload: W) -> anyhow::Result<()> {
+        pub fn push_client(&mut self, workload: W) {
             let index = self.clients.len();
             self.clients.push(ClientState {
                 state: Client::new(
@@ -372,8 +363,7 @@ pub mod check {
                 ),
                 timer: Timer::default(),
                 close_loop: CloseLoop::new(Transient::default(), workload),
-            });
-            Ok(())
+            })
         }
     }
 
