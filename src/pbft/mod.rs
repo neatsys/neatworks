@@ -110,13 +110,15 @@ impl<N, U, A> Client<N, U, A> {
     }
 }
 
+const CLIENT_RESEND_INTERVAL: Duration = Duration::from_millis(1000);
+
 impl<N: ToReplicaNet<A>, U, A: Addr> OnEvent<Invoke> for Client<N, U, A> {
     fn on_event(&mut self, Invoke(op): Invoke, timer: &mut impl Timer<Self>) -> anyhow::Result<()> {
         anyhow::ensure!(self.invoke.is_none(), "concurrent invocation");
         self.seq += 1;
         let invoke = ClientInvoke {
             op,
-            resend_timer: timer.set(Duration::from_millis(1000), Resend)?,
+            resend_timer: timer.set(CLIENT_RESEND_INTERVAL, Resend)?,
             replies: Default::default(),
         };
         self.invoke = Some(invoke);
@@ -302,7 +304,7 @@ impl<N, CN, CW, S, A> Replica<N, CN, CW, S, A> {
 
 impl<N, CN, CW, S, A, M> Replica<N, CN, CW, S, A, M> {
     fn is_primary(&self) -> bool {
-        (self.id as usize % self.num_replica) == self.view_num as usize
+        (self.view_num as usize % self.num_replica) == self.id as usize
     }
 
     const NUM_CONCURRENT_PRE_PREPARE: u32 = 1;
@@ -347,7 +349,10 @@ impl<M: ReplicaCommon> OnEvent<Recv<Request<M::A>>> for Replica<M::N, M::CN, M::
             _ => {}
         }
         if !self.is_primary() {
-            todo!("forward request")
+            self.net
+                .send((self.view_num as usize % self.num_replica) as u8, request)?;
+            // TODO set view change timer
+            return Ok(());
         }
         self.replies.insert(request.client_id, (request.seq, None));
         self.requests.push(request);

@@ -6,9 +6,14 @@ use super::TimerId;
 pub struct Timer {
     events: Vec<(u32, Duration)>,
     timer_id: u32,
+    pub elapsed: Duration,
 }
 
 impl Timer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     pub fn events(&self) -> Vec<TimerId> {
         let mut events = Vec::new();
         let mut prev_period = None;
@@ -34,8 +39,9 @@ impl Timer {
     }
 
     pub fn step_timer(&mut self, timer_id: &TimerId) -> anyhow::Result<()> {
-        let event = self.unset(timer_id)?;
-        self.events.push(event);
+        let (timer_id, period) = self.unset(timer_id)?;
+        self.elapsed += period;
+        self.events.push((timer_id, period));
         Ok(())
     }
 }

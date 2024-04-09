@@ -29,6 +29,7 @@ use crate::{
         linear, SendEvent, TimerId, Transient, UnreachableTimer,
     },
     net::{events::Recv, IndexNet, IterAddr, SendMessage},
+    pbft::CLIENT_RESEND_INTERVAL,
     search::State as _,
     util::Payload,
     worker::Worker,
@@ -484,6 +485,34 @@ fn t04_progress_in_majority() -> anyhow::Result<()> {
 
     anyhow::ensure!(state.replicas[5].log.get(1).is_none());
     anyhow::ensure!(state.replicas[6].log.get(1).is_none());
+    Ok(())
+}
+
+#[test]
+fn t05_no_progress_in_minority() -> anyhow::Result<()> {
+    let num_replica = 7;
+    let num_faulty = 2;
+    let mut state = State::<_, _>::new(num_replica, num_faulty).with_filter(Partition(vec![
+        Addr::Client(0),
+        Addr::Replica(0),
+        Addr::Replica(1),
+        Addr::Replica(2),
+        Addr::Replica(3),
+    ]));
+    let op = Put("hello".into(), "world".into());
+    let result = PutOk;
+    let workload = static_workload([(op.clone(), result)].into_iter())?;
+    let index = state.push_client(workload, num_replica, num_faulty);
+    state.launch()?;
+
+    while state.timers[&Addr::Client(index as _)].elapsed < CLIENT_RESEND_INTERVAL * 20 {
+        let Some(event) = state.events().pop() else {
+            anyhow::bail!("stuck")
+        };
+        state.step(event)?
+    }
+    anyhow::ensure!(!state.clients.iter().any(|client| client.close_loop.done));
+    anyhow::ensure!(state.replicas.iter().all(|replica| replica.commit_num == 0));
     Ok(())
 }
 
