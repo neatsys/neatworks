@@ -1,4 +1,4 @@
-// TLDR
+// TL;DR
 // wrap `OnEvent + OnTimer` with `Unify(_)`
 // wrap `OnEventRichTimer` with `Unify(Buffered(_))`
 // wrap `erased::OnEvent<_> + OnTimer` with `erased::Blanket(erased::Unify(_))`
@@ -10,8 +10,8 @@
 // messages = =)
 // https://zhuanlan.zhihu.com/p/685275310
 
-pub mod any;
 pub mod blocking;
+pub mod downcast;
 pub mod linear;
 pub mod ordered;
 pub mod session;
@@ -452,3 +452,5 @@ pub mod erased {
         pub type Buffered<S> = super::Buffered<S, Timer>;
     }
 }
+
+// cSpell:words newtype

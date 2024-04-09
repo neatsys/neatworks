@@ -20,7 +20,7 @@ use crate::{
         Verifiable,
     },
     event::{
-        any::{self, DowncastEvent},
+        downcast::{self, DowncastEvent},
         erased::{events::Init, OnEvent as _, OnEventRichTimer as _},
         linear, SendEvent, TimerId, Transient, UnreachableTimer,
     },
@@ -123,7 +123,7 @@ struct State<W: Workload, const CHECK: bool = false> {
     pub clients: Vec<ClientState<W>>,
     pub replicas: Vec<Replica>,
     message_events: BTreeSet<MessageEvent>,
-    timers: BTreeMap<Addr, any::Timer<linear::Timer, TimerData>>,
+    timers: BTreeMap<Addr, downcast::Timer<linear::Timer, TimerData>>,
 }
 
 #[derive_where(Debug, Clone; W, W::Attach)]
