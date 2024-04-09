@@ -273,18 +273,17 @@ impl<W: Workload, F: Filter + Clone, const CHECK: bool> crate::search::State
             .cloned()
             .map(Event::Message)
             .chain(self.timers.iter().flat_map(|(addr, timer)| {
-                if self.filter.deliver_timer(timer) {
-                    timer.events()
-                } else {
-                    Default::default()
-                }
-                .into_iter()
-                .map(move |timer_id| {
-                    Event::Timer(TimerEvent {
-                        timer_id,
-                        addr: *addr,
+                let deliver_timer = self.filter.deliver_timer(timer);
+                timer
+                    .events()
+                    // very lazy to deal with matching types, also hate for introducing nonsense dyn
+                    .filter(move |_| deliver_timer)
+                    .map(move |timer_id| {
+                        Event::Timer(TimerEvent {
+                            timer_id,
+                            addr: *addr,
+                        })
                     })
-                })
             }));
         if CHECK {
             events.collect()

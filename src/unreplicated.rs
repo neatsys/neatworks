@@ -378,7 +378,7 @@ pub mod check {
                 .map(Event::Message)
                 .collect::<Vec<_>>();
             for (index, client) in self.clients.iter().enumerate() {
-                events.extend(client.timer.events().into_iter().map(|timer_id| {
+                events.extend(client.timer.events().map(|timer_id| {
                     Event::Timer(TimerEvent {
                         timer_id,
                         client_index: index,

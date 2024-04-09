@@ -1,7 +1,11 @@
 use std::{thread::available_parallelism, time::Duration};
 
 use augustus::{
-    app::kvstore::{static_workload, InfinitePutGet, Op, Result},
+    app::kvstore::{
+        self, static_workload, InfinitePutGet,
+        Op::{Append, Get, Put},
+        Result::{AppendResult, GetResult, PutOk},
+    },
     search::{breadth_first, random_depth_first, Settings},
     unreplicated::check::State,
     util::Payload,
@@ -16,25 +20,17 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-type DryState<W> = State<W>;
-
 fn main() -> anyhow::Result<()> {
     println!("* Single client; Put, Append, Get");
     let mut state = State::new();
     state.push_client(static_workload(
         [
+            (Put(String::from("foo"), String::from("bar")), PutOk),
             (
-                Op::Put(String::from("foo"), String::from("bar")),
-                Result::PutOk,
+                Append(String::from("foo"), String::from("baz")),
+                AppendResult(String::from("barbaz")),
             ),
-            (
-                Op::Append(String::from("foo"), String::from("baz")),
-                Result::AppendResult(String::from("barbaz")),
-            ),
-            (
-                Op::Get(String::from("foo")),
-                Result::GetResult(String::from("barbaz")),
-            ),
+            (Get(String::from("foo")), GetResult(String::from("barbaz"))),
         ]
         .into_iter(),
     )?);
@@ -46,7 +42,7 @@ fn main() -> anyhow::Result<()> {
         prune: |_: &_| false,
         max_depth: None,
     };
-    let result = breadth_first::<_, DryState<_>, _, _, _>(
+    let result = breadth_first::<_, State<_>, _, _, _>(
         state.clone(),
         settings.clone(),
         1.try_into().unwrap(),
@@ -61,7 +57,7 @@ fn main() -> anyhow::Result<()> {
         max_depth: None,
     };
     let result =
-        breadth_first::<_, DryState<_>, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
+        breadth_first::<_, State<_>, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
     println!("{result:?}");
 
     println!("* Multi-client different keys");
@@ -69,8 +65,8 @@ fn main() -> anyhow::Result<()> {
     for i in 0..2 {
         state.push_client(static_workload((0..3).map(move |x| {
             (
-                Op::Append(format!("KEY-{i}"), x.to_string()),
-                Result::AppendResult((0..=x).map(|x| x.to_string()).collect::<Vec<_>>().concat()),
+                Append(format!("KEY-{i}"), x.to_string()),
+                AppendResult((0..=x).map(|x| x.to_string()).collect::<Vec<_>>().concat()),
             )
         }))?)
     }
@@ -82,7 +78,7 @@ fn main() -> anyhow::Result<()> {
         prune: |_: &_| false,
         max_depth: None,
     };
-    let result = breadth_first::<_, DryState<_>, _, _, _>(
+    let result = breadth_first::<_, State<_>, _, _, _>(
         state.clone(),
         settings.clone(),
         1.try_into().unwrap(),
@@ -97,7 +93,7 @@ fn main() -> anyhow::Result<()> {
         max_depth: None,
     };
     let result =
-        breadth_first::<_, DryState<_>, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
+        breadth_first::<_, State<_>, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
     println!("{result:?}");
 
     println!("* Multi-client same key");
@@ -105,7 +101,7 @@ fn main() -> anyhow::Result<()> {
     for _ in 0..2 {
         state.push_client(Recorded::from(Iter(
             (0..3)
-                .map(move |x| (Op::Append(String::from("foo"), x.to_string())))
+                .map(move |x| (Append(String::from("foo"), x.to_string())))
                 .map(|op| Ok(Payload(serde_json::to_vec(&op)?)))
                 .collect::<anyhow::Result<Vec<_>>>()?
                 .into_iter(),
@@ -117,10 +113,10 @@ fn main() -> anyhow::Result<()> {
         let mut all_results = Vec::new();
         for client in &state.clients {
             for (op, result) in &client.close_loop.workload.invocations {
-                let Op::Append(_, append_value) = serde_json::from_slice::<Op>(op)? else {
+                let Append(_, append_value) = serde_json::from_slice::<kvstore::Op>(op)? else {
                     anyhow::bail!("unexpected {op:?}")
                 };
-                let Result::AppendResult(value) = serde_json::from_slice::<Result>(result)? else {
+                let AppendResult(value) = serde_json::from_slice::<kvstore::Result>(result)? else {
                     anyhow::bail!("unexpected {result:?}")
                 };
                 anyhow::ensure!(value.ends_with(&append_value), "{op:?} get {result:?}");
@@ -146,7 +142,7 @@ fn main() -> anyhow::Result<()> {
         prune: |_: &_| false,
         max_depth: None,
     };
-    let result = breadth_first::<_, DryState<_>, _, _, _>(
+    let result = breadth_first::<_, State<_>, _, _, _>(
         state.clone(),
         settings.clone(),
         1.try_into().unwrap(),
@@ -161,7 +157,7 @@ fn main() -> anyhow::Result<()> {
         max_depth: None,
     };
     let result =
-        breadth_first::<_, DryState<_>, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
+        breadth_first::<_, State<_>, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
     println!("{result:?}");
 
     println!("* Infinite workload searches (with 2 clients)");
@@ -175,7 +171,7 @@ fn main() -> anyhow::Result<()> {
         prune: |_: &_| false,
         max_depth: None,
     };
-    let result = breadth_first::<_, DryState<_>, _, _, _>(
+    let result = breadth_first::<_, State<_>, _, _, _>(
         state.clone(),
         settings.clone(),
         available_parallelism()?,
@@ -184,7 +180,7 @@ fn main() -> anyhow::Result<()> {
     )?;
     println!("{result:?}");
     settings.max_depth = Some(1000.try_into().unwrap());
-    let result = random_depth_first::<_, DryState<_>, _, _, _>(
+    let result = random_depth_first::<_, State<_>, _, _, _>(
         state,
         settings,
         available_parallelism()?,
@@ -195,3 +191,6 @@ fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+// cSpell:words jemalloc jemallocator tikv msvc kvstore unreplicated linearizable
+// cSpell:ignore barbaz

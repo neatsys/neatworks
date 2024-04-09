@@ -78,7 +78,7 @@ impl<N: Into<M>, M> SendEvent<N> for Transient<M> {
 // is, calling `unset` consume the TimerId so the timer cannot be referred
 // anymore
 // this does not solve leak though so Clone is permitted
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TimerId(u32);
 
 pub trait Timer {
