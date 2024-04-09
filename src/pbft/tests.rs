@@ -3,6 +3,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     iter::Empty,
     mem::{replace, take},
+    time::Duration,
 };
 
 use derive_where::derive_where;
@@ -36,7 +37,7 @@ use crate::{
     workload::{CloseLoop, Invoke, InvokeOk, Iter, Workload},
 };
 
-use super::{Commit, CryptoWorker, PrePrepare, Prepare, Reply, Request, Resend};
+use super::{Commit, CryptoWorker, PrePrepare, Prepare, Progress, Reply, Request, Resend};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 enum Addr {
@@ -90,16 +91,19 @@ struct TimerEvent {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum TimerData {
     Resend,
-    // replica timers
+    Progress(Progress),
 }
 
 impl DowncastEvent for TimerData {
     fn try_from<M: 'static>(event: M) -> anyhow::Result<Self> {
         if (&event as &dyn Any).is::<Resend>() {
-            Ok(Self::Resend)
-        } else {
-            Err(anyhow::anyhow!("unknown timer data"))
+            return Ok(Self::Resend);
         }
+        let event = Box::new(event) as Box<dyn Any>;
+        if let Ok(event) = event.downcast::<Progress>() {
+            return Ok(Self::Progress(*event));
+        }
+        Err(anyhow::anyhow!("unknown timer data"))
     }
 }
 
@@ -142,7 +146,7 @@ struct ClientState<W: Workload> {
 
 trait Filter {
     fn deliver_message(&self, source: Addr, event: &MessageEvent) -> bool;
-    // TODO deliver timer
+    fn deliver_timer(&self, timer: &linear::Timer) -> bool;
 }
 
 #[derive(Debug, Clone)]
@@ -152,14 +156,37 @@ impl Filter for AllowAll {
     fn deliver_message(&self, _: Addr, _: &MessageEvent) -> bool {
         true
     }
+
+    fn deliver_timer(&self, _: &linear::Timer) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone)]
-struct Partition(Vec<Addr>);
+struct WithPartition<F>(F, Vec<Addr>);
 
-impl Filter for Partition {
+impl<F: Filter> Filter for WithPartition<F> {
     fn deliver_message(&self, source: Addr, event: &MessageEvent) -> bool {
-        self.0.contains(&source) && self.0.contains(&event.dest)
+        self.1.contains(&source)
+            && self.1.contains(&event.dest)
+            && self.0.deliver_message(source, event)
+    }
+
+    fn deliver_timer(&self, timer: &linear::Timer) -> bool {
+        self.0.deliver_timer(timer)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SoftDeadline<F>(F, Duration);
+
+impl<F: Filter> Filter for SoftDeadline<F> {
+    fn deliver_message(&self, source: Addr, event: &MessageEvent) -> bool {
+        self.0.deliver_message(source, event)
+    }
+
+    fn deliver_timer(&self, timer: &linear::Timer) -> bool {
+        timer.elapsed <= self.1 && self.0.deliver_timer(timer)
     }
 }
 
@@ -218,13 +245,13 @@ impl<W: Workload, F, const CHECK: bool> State<W, F, CHECK> {
         index
     }
 
-    fn with_filter<G>(self, filter: G) -> State<W, G, CHECK> {
+    fn map_filter<G>(self, f: impl FnOnce(F) -> G) -> State<W, G, CHECK> {
         State {
             clients: self.clients,
             replicas: self.replicas,
             message_events: self.message_events,
             timers: self.timers,
-            filter,
+            filter: f(self.filter),
         }
     }
 }
@@ -249,7 +276,13 @@ where
             .cloned()
             .map(Event::Message)
             .chain(self.timers.iter().flat_map(|(addr, timer)| {
-                timer.events().into_iter().map(move |timer_id| {
+                if self.filter.deliver_timer(timer) {
+                    timer.events()
+                } else {
+                    Default::default()
+                }
+                .into_iter()
+                .map(move |timer_id| {
                     Event::Timer(TimerEvent {
                         timer_id,
                         addr: *addr,
@@ -302,6 +335,9 @@ where
                 match (addr, timer_data) {
                     (Addr::Client(index), TimerData::Resend) => {
                         self.clients[index as usize].state.on_event(Resend, timer)?
+                    }
+                    (Addr::Replica(index), TimerData::Progress(event)) => {
+                        self.replicas[index as usize].on_event(event, timer)?
                     }
                     _ => anyhow::bail!("unimplemented"),
                 }
@@ -407,8 +443,7 @@ fn t02_basic() -> anyhow::Result<()> {
     let num_faulty = 1;
     let mut state = State::<_, _>::new(num_replica, num_faulty);
     let op = Put("hello".into(), "world".into());
-    let result = PutOk;
-    let workload = static_workload([(op.clone(), result)].into_iter())?;
+    let workload = static_workload([(op.clone(), PutOk)].into_iter())?;
     state.push_client(workload, num_replica, num_faulty);
     state.launch()?;
 
@@ -443,7 +478,7 @@ fn t03_no_partition() -> anyhow::Result<()> {
         (Put("foo".into(), "baz".into()), PutOk),
         (Get("foo".into()), GetResult("baz".into())),
     ] {
-        let workload = static_workload([(op.clone(), result)].into_iter())?;
+        let workload = static_workload([(op, result)].into_iter())?;
         let index = state.push_client(workload, num_replica, num_faulty);
         state.launch_client(index)?;
 
@@ -462,17 +497,20 @@ fn t03_no_partition() -> anyhow::Result<()> {
 fn t04_progress_in_majority() -> anyhow::Result<()> {
     let num_replica = 7;
     let num_faulty = 2;
-    let mut state = State::<_, _>::new(num_replica, num_faulty).with_filter(Partition(vec![
-        Addr::Client(0),
-        Addr::Replica(0),
-        Addr::Replica(1),
-        Addr::Replica(2),
-        Addr::Replica(3),
-        Addr::Replica(4),
-    ]));
-    let op = Put("hello".into(), "world".into());
-    let result = PutOk;
-    let workload = static_workload([(op.clone(), result)].into_iter())?;
+    let mut state = State::<_, _>::new(num_replica, num_faulty).map_filter(|filter| {
+        WithPartition(
+            filter,
+            vec![
+                Addr::Client(0),
+                Addr::Replica(0),
+                Addr::Replica(1),
+                Addr::Replica(2),
+                Addr::Replica(3),
+                Addr::Replica(4),
+            ],
+        )
+    });
+    let workload = static_workload([(Put("hello".into(), "world".into()), PutOk)].into_iter())?;
     state.push_client(workload, num_replica, num_faulty);
     state.launch()?;
 
@@ -492,27 +530,86 @@ fn t04_progress_in_majority() -> anyhow::Result<()> {
 fn t05_no_progress_in_minority() -> anyhow::Result<()> {
     let num_replica = 7;
     let num_faulty = 2;
-    let mut state = State::<_, _>::new(num_replica, num_faulty).with_filter(Partition(vec![
-        Addr::Client(0),
-        Addr::Replica(0),
-        Addr::Replica(1),
-        Addr::Replica(2),
-        Addr::Replica(3),
-    ]));
-    let op = Put("hello".into(), "world".into());
-    let result = PutOk;
-    let workload = static_workload([(op.clone(), result)].into_iter())?;
-    let index = state.push_client(workload, num_replica, num_faulty);
+    let mut state = State::<_, _>::new(num_replica, num_faulty)
+        .map_filter(|filter| {
+            WithPartition(
+                filter,
+                vec![
+                    Addr::Client(0),
+                    Addr::Replica(0),
+                    Addr::Replica(1),
+                    Addr::Replica(2),
+                    Addr::Replica(3),
+                ],
+            )
+        })
+        .map_filter(|filter| SoftDeadline(filter, CLIENT_RESEND_INTERVAL * 20));
+    let workload = static_workload([(Put("hello".into(), "world".into()), PutOk)].into_iter())?;
+    state.push_client(workload, num_replica, num_faulty);
     state.launch()?;
 
-    while state.timers[&Addr::Client(index as _)].elapsed < CLIENT_RESEND_INTERVAL * 20 {
-        let Some(event) = state.events().pop() else {
-            anyhow::bail!("stuck")
-        };
+    while let Some(event) = state.events().pop() {
+        // println!("{event:?}");
         state.step(event)?
     }
     anyhow::ensure!(!state.clients.iter().any(|client| client.close_loop.done));
     anyhow::ensure!(state.replicas.iter().all(|replica| replica.commit_num == 0));
+    Ok(())
+}
+
+#[test]
+fn t06_progress_after_heal() -> anyhow::Result<()> {
+    let num_replica = 7;
+    let num_faulty = 2;
+
+    let mut deadline = CLIENT_RESEND_INTERVAL * 20;
+    let mut state = State::<_, _>::new(num_replica, num_faulty)
+        .map_filter(|filter| {
+            WithPartition(
+                filter,
+                vec![
+                    Addr::Client(0),
+                    Addr::Replica(0),
+                    Addr::Replica(1),
+                    Addr::Replica(2),
+                    Addr::Replica(3),
+                ],
+            )
+        })
+        .map_filter(|filter| SoftDeadline(filter, deadline));
+    let workload = static_workload([(Put("hello".into(), "world".into()), PutOk)].into_iter())?;
+    let index = state.push_client(workload, num_replica, num_faulty);
+    state.launch_client(index)?;
+
+    while let Some(event) = state.events().pop() {
+        // println!("{event:?}");
+        state.step(event)?
+    }
+
+    deadline += CLIENT_RESEND_INTERVAL;
+    let mut state = state
+        .map_filter(|_| AllowAll)
+        .map_filter(|filter| SoftDeadline(filter, deadline));
+
+    while !state.clients[index].close_loop.done {
+        let Some(event) = state.events().pop() else {
+            anyhow::bail!("stuck")
+        };
+        // println!("{event:?}");
+        state.step(event)?
+    }
+
+    let workload = static_workload([(Get("hello".into()), GetResult("world".into()))].into_iter())?;
+    let index = state.push_client(workload, num_replica, num_faulty);
+    state.launch_client(index)?;
+    while !state.clients[index].close_loop.done {
+        let Some(event) = state.events().pop() else {
+            anyhow::bail!("stuck")
+        };
+        // println!("{event:?}");
+        state.step(event)?
+    }
+
     Ok(())
 }
 

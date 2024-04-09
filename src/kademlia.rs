@@ -779,77 +779,77 @@ impl<
 }
 
 #[cfg(test)]
-use proptest::prelude::*;
-
-#[cfg(test)]
-fn ordered_closest<const N: usize>(id: PeerId, insert_ids: [PeerId; N], targets: [Target; 100]) {
-    let origin = PeerRecord {
-        id,
-        key: (),
-        addr: (),
-    };
-    let mut buckets = Buckets::<_, _>::new(origin);
-    for insert_id in insert_ids {
-        if insert_id == id {
-            continue;
-        }
-        let record = PeerRecord {
-            id: insert_id,
-            key: (),
-            addr: (),
-        };
-        buckets.insert(record).unwrap()
-    }
-    for target in targets {
-        let records = buckets.find_closest(&target, 20.try_into().unwrap());
-        assert_eq!(records.len(), 20.min(N + 1)) // plus `origin`
-    }
-}
-
-#[cfg(test)]
-proptest! {
-    #[test]
-    fn distance_inversion(id: PeerId, d: [u8; 32]) {
-        let d = U256::from_little_endian(&d);
-        assert_eq!(distance(&id, &distance_from(&id, d)), d)
-    }
-
-    #[test]
-    fn bucket_index(id: PeerId, target: Target) {
-        let origin = PeerRecord {
-            id,
-            key: (),
-            addr: (),
-        };
-        let buckets = Buckets::<_, _>::new(origin);
-        if target != id {
-            let d = distance(&id, &target);
-            let index = buckets.index(&target);
-            assert!(d.bit(index));
-            for i in index + 1..U256_BITS {
-                assert!(!d.bit(i))
-            }
-        }
-    }
-
-    #[test]
-    fn ordered_closest_sufficient(id: PeerId, insert_ids: [PeerId; 1000], targets: [Target; 100]) {
-        ordered_closest(id, insert_ids, targets)
-    }
-
-    #[test]
-    fn ordered_closest_insufficient(id: PeerId, insert_ids: [PeerId; 10], targets: [Target; 100]) {
-        ordered_closest(id, insert_ids, targets)
-    }
-}
-
-#[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
     use rand::thread_rng;
 
     use crate::{event::Void, net::IterAddr, worker::Worker};
 
     use super::*;
+
+    fn ordered_closest<const N: usize>(
+        id: PeerId,
+        insert_ids: [PeerId; N],
+        targets: [Target; 100],
+    ) {
+        let origin = PeerRecord {
+            id,
+            key: (),
+            addr: (),
+        };
+        let mut buckets = Buckets::<_, _>::new(origin);
+        for insert_id in insert_ids {
+            if insert_id == id {
+                continue;
+            }
+            let record = PeerRecord {
+                id: insert_id,
+                key: (),
+                addr: (),
+            };
+            buckets.insert(record).unwrap()
+        }
+        for target in targets {
+            let records = buckets.find_closest(&target, 20.try_into().unwrap());
+            assert_eq!(records.len(), 20.min(N + 1)) // plus `origin`
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn distance_inversion(id: PeerId, d: [u8; 32]) {
+            let d = U256::from_little_endian(&d);
+            assert_eq!(distance(&id, &distance_from(&id, d)), d)
+        }
+
+        #[test]
+        fn bucket_index(id: PeerId, target: Target) {
+            let origin = PeerRecord {
+                id,
+                key: (),
+                addr: (),
+            };
+            let buckets = Buckets::<_, _>::new(origin);
+            if target != id {
+                let d = distance(&id, &target);
+                let index = buckets.index(&target);
+                assert!(d.bit(index));
+                for i in index + 1..U256_BITS {
+                    assert!(!d.bit(i))
+                }
+            }
+        }
+
+        #[test]
+        fn ordered_closest_sufficient(id: PeerId, insert_ids: [PeerId; 1000], targets: [Target; 100]) {
+            ordered_closest(id, insert_ids, targets)
+        }
+
+        #[test]
+        fn ordered_closest_insufficient(id: PeerId, insert_ids: [PeerId; 10], targets: [Target; 100]) {
+            ordered_closest(id, insert_ids, targets)
+        }
+    }
 
     struct NullNet;
     impl SendMessage<IterAddr<'_, ()>, Verifiable<FindPeer<()>>> for NullNet {

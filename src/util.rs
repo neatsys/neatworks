@@ -10,7 +10,7 @@ pub struct Payload(pub Vec<u8>);
 impl Debug for Payload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Ok(s) = std::str::from_utf8(&self.0) {
-            write!(f, "b{s:?}")
+            write!(f, "b##\"{s}\"##")
         } else {
             write!(
                 f,
