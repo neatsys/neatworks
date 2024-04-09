@@ -10,7 +10,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     app::{
-        kvstore::{self, static_workload},
+        kvstore::{
+            static_workload,
+            Op::{Get, Put},
+            Result::{GetResult, PutOk},
+        },
         KVStore,
     },
     crypto::{
@@ -118,12 +122,14 @@ type Replica = super::Replica<
 >;
 
 #[derive_where(PartialEq, Eq, Hash; W::Attach)]
-#[derive_where(Debug, Clone; W, W::Attach)]
-struct State<W: Workload, const CHECK: bool = false> {
+#[derive_where(Debug, Clone; W, W::Attach, F)]
+struct State<W: Workload, F, const CHECK: bool = false> {
     pub clients: Vec<ClientState<W>>,
     pub replicas: Vec<Replica>,
     message_events: BTreeSet<MessageEvent>,
     timers: BTreeMap<Addr, downcast::Timer<linear::Timer, TimerData>>,
+    #[derive_where(skip(EqHashOrd))]
+    filter: F,
 }
 
 #[derive_where(Debug, Clone; W, W::Attach)]
@@ -133,7 +139,30 @@ struct ClientState<W: Workload> {
     pub close_loop: CloseLoop<W, Transient<Invoke>>,
 }
 
-impl<W: Workload, const CHECK: bool> State<W, CHECK> {
+trait Filter {
+    fn deliver_message(&self, source: Addr, event: &MessageEvent) -> bool;
+    // TODO deliver timer
+}
+
+#[derive(Debug, Clone)]
+struct AllowAll;
+
+impl Filter for AllowAll {
+    fn deliver_message(&self, _: Addr, _: &MessageEvent) -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Partition(Vec<Addr>);
+
+impl Filter for Partition {
+    fn deliver_message(&self, source: Addr, event: &MessageEvent) -> bool {
+        self.0.contains(&source) && self.0.contains(&event.dest)
+    }
+}
+
+impl<W: Workload, const CHECK: bool> State<W, AllowAll, CHECK> {
     fn new(num_replica: usize, num_faulty: usize) -> Self {
         let addrs = (0..num_replica)
             .map(|i| Addr::Replica(i as _))
@@ -161,18 +190,22 @@ impl<W: Workload, const CHECK: bool> State<W, CHECK> {
                 .map(|i| (Addr::Replica(i as _), Default::default()))
                 .collect(),
             message_events: Default::default(),
+            filter: AllowAll,
         }
     }
+}
 
-    fn push_client(&mut self, workload: W, num_replica: usize, num_faulty: usize) {
+impl<W: Workload, F, const CHECK: bool> State<W, F, CHECK> {
+    fn push_client(&mut self, workload: W, num_replica: usize, num_faulty: usize) -> usize {
         let addrs = (0..num_replica)
             .map(|i| Addr::Replica(i as _))
             .collect::<Vec<_>>();
         let index = self.clients.len();
+        let addr = Addr::Client(index as _);
         self.clients.push(ClientState {
             state: Client::new(
                 index as u32 + 1000,
-                Addr::Client(index as _),
+                addr,
                 IndexNet::new(Transient::default(), addrs, None),
                 Transient::default(),
                 num_replica,
@@ -180,8 +213,18 @@ impl<W: Workload, const CHECK: bool> State<W, CHECK> {
             ),
             close_loop: CloseLoop::new(Transient::default(), workload),
         });
-        self.timers
-            .insert(Addr::Client(index as _), Default::default());
+        self.timers.insert(addr, Default::default());
+        index
+    }
+
+    fn with_filter<G>(self, filter: G) -> State<W, G, CHECK> {
+        State {
+            clients: self.clients,
+            replicas: self.replicas,
+            message_events: self.message_events,
+            timers: self.timers,
+            filter,
+        }
     }
 }
 
@@ -191,7 +234,8 @@ enum Event {
     Timer(TimerEvent),
 }
 
-impl<W: Clone + Workload, const CHECK: bool> crate::search::State for State<W, CHECK>
+impl<W: Clone + Workload, F: Filter + Clone, const CHECK: bool> crate::search::State
+    for State<W, F, CHECK>
 where
     W::Attach: Clone,
 {
@@ -266,7 +310,7 @@ where
     }
 }
 
-impl<W: Workload, const CHECK: bool> State<W, CHECK> {
+impl<W: Workload, F: Filter, const CHECK: bool> State<W, F, CHECK> {
     fn launch(&mut self) -> anyhow::Result<()> {
         for client in &mut self.clients {
             client.close_loop.on_event(Init, &mut UnreachableTimer)?
@@ -274,18 +318,31 @@ impl<W: Workload, const CHECK: bool> State<W, CHECK> {
         self.flush()
     }
 
+    fn launch_client(&mut self, index: usize) -> anyhow::Result<()> {
+        self.clients[index]
+            .close_loop
+            .on_event(Init, &mut UnreachableTimer)?;
+        self.flush()
+    }
+
     fn flush(&mut self) -> anyhow::Result<()> {
         let mut rerun = true;
         while replace(&mut rerun, false) {
             for (index, replica) in self.replicas.iter_mut().enumerate() {
-                self.message_events.extend(replica.net.drain(..));
+                let addr = Addr::Replica(index as _);
+                self.message_events.extend(
+                    replica
+                        .net
+                        .drain(..)
+                        .filter(|event| self.filter.deliver_message(addr, event)),
+                );
                 self.message_events.extend(replica.client_net.drain(..));
                 let Worker::Inline(_, events) = &mut replica.crypto_worker.0 else {
                     unreachable!()
                 };
                 let timer = self
                     .timers
-                    .get_mut(&Addr::Replica(index as _))
+                    .get_mut(&addr)
                     .ok_or(anyhow::anyhow!("missing timer for replica {index}"))?;
                 for event in take(&mut **events) {
                     rerun = true;
@@ -306,10 +363,17 @@ impl<W: Workload, const CHECK: bool> State<W, CHECK> {
                 }
             }
             for (index, client) in self.clients.iter_mut().enumerate() {
-                self.message_events.extend(client.state.net.drain(..));
+                let addr = Addr::Client(index as _);
+                self.message_events.extend(
+                    client
+                        .state
+                        .net
+                        .drain(..)
+                        .filter(|event| self.filter.deliver_message(addr, event)),
+                );
                 let timer = self
                     .timers
-                    .get_mut(&Addr::Client(index as _))
+                    .get_mut(&addr)
                     .ok_or(anyhow::anyhow!("missing timer for client {index}"))?;
                 for invoke in client.close_loop.sender.drain(..) {
                     rerun = true;
@@ -329,17 +393,20 @@ impl<W: Workload, const CHECK: bool> State<W, CHECK> {
 fn no_client() -> anyhow::Result<()> {
     let num_replica = 4;
     let num_faulty = 1;
-    let mut state = State::<Iter<Empty<Payload>>>::new(num_replica, num_faulty);
+    let mut state = State::<Iter<Empty<Payload>>, _>::new(num_replica, num_faulty);
     state.launch()
 }
 
+// the following test naming are based on the adapted DSLabs lab 3 test cases
+// those are not expected to change, hopefully forever
+
 #[test]
-fn one_op() -> anyhow::Result<()> {
+fn t02_basic() -> anyhow::Result<()> {
     let num_replica = 4;
     let num_faulty = 1;
-    let mut state = State::<_>::new(num_replica, num_faulty);
-    let op = kvstore::Op::Put("hello".into(), "world".into());
-    let result = kvstore::Result::PutOk;
+    let mut state = State::<_, _>::new(num_replica, num_faulty);
+    let op = Put("hello".into(), "world".into());
+    let result = PutOk;
     let workload = static_workload([(op.clone(), result)].into_iter())?;
     state.push_client(workload, num_replica, num_faulty);
     state.launch()?;
@@ -361,6 +428,62 @@ fn one_op() -> anyhow::Result<()> {
     }
     anyhow::ensure!(num_prepared >= num_replica - num_faulty);
 
+    Ok(())
+}
+
+#[test]
+fn t03_no_partition() -> anyhow::Result<()> {
+    let num_replica = 7;
+    let num_faulty = 2;
+    let mut state = State::<_, _>::new(num_replica, num_faulty);
+
+    for (op, result) in [
+        (Put("foo".into(), "bar".into()), PutOk),
+        (Put("foo".into(), "baz".into()), PutOk),
+        (Get("foo".into()), GetResult("baz".into())),
+    ] {
+        let workload = static_workload([(op.clone(), result)].into_iter())?;
+        let index = state.push_client(workload, num_replica, num_faulty);
+        state.launch_client(index)?;
+
+        while !state.clients[index].close_loop.done {
+            let Some(event) = state.events().pop() else {
+                anyhow::bail!("stuck")
+            };
+            state.step(event)?
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn t04_progress_in_majority() -> anyhow::Result<()> {
+    let num_replica = 7;
+    let num_faulty = 2;
+    let mut state = State::<_, _>::new(num_replica, num_faulty).with_filter(Partition(vec![
+        Addr::Client(0),
+        Addr::Replica(0),
+        Addr::Replica(1),
+        Addr::Replica(2),
+        Addr::Replica(3),
+        Addr::Replica(4),
+    ]));
+    let op = Put("hello".into(), "world".into());
+    let result = PutOk;
+    let workload = static_workload([(op.clone(), result)].into_iter())?;
+    state.push_client(workload, num_replica, num_faulty);
+    state.launch()?;
+
+    while !state.clients.iter().all(|client| client.close_loop.done) {
+        let Some(event) = state.events().pop() else {
+            anyhow::bail!("stuck")
+        };
+        state.step(event)?
+    }
+
+    anyhow::ensure!(state.replicas[5].log.get(1).is_none());
+    anyhow::ensure!(state.replicas[6].log.get(1).is_none());
     Ok(())
 }
 
