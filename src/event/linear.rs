@@ -34,16 +34,14 @@ impl Timer {
 
     pub fn events(&self) -> impl Iterator<Item = TimerId> + '_ {
         let mut prev_period = None;
-        self.events
-            .iter()
-            .take_while(move |(_, period)| {
-                if let Some(prev_period) = prev_period.replace(*period) {
-                    *period < prev_period
-                } else {
-                    true
+        self.events.iter().map_while(move |(id, period)| {
+            if let Some(prev_period) = prev_period.replace(*period) {
+                if *period >= prev_period {
+                    return None;
                 }
-            })
-            .map(|(id, _)| TimerId(*id))
+            }
+            Some(TimerId(*id))
+        })
     }
 
     fn unset(&mut self, TimerId(id): &TimerId) -> anyhow::Result<(u32, Duration)> {

@@ -101,10 +101,6 @@ enum TimerData {
 
 impl DowncastEvent for TimerData {
     fn try_from<M: 'static>(event: M) -> anyhow::Result<Self> {
-        if (&event as &dyn Any).is::<Resend>() {
-            return Ok(Self::Resend);
-        }
-
         fn downcast_or<T: 'static>(
             wrap: impl Fn(T) -> TimerData,
             default: impl Fn(Box<dyn Any>) -> anyhow::Result<TimerData>,
@@ -116,9 +112,10 @@ impl DowncastEvent for TimerData {
         }
 
         let downcast = |_| Err(anyhow::anyhow!("unknown timer data"));
-        let downcast = downcast_or::<DoViewChange>(TimerData::DoViewChange, downcast);
-        let downcast = downcast_or::<Progress>(TimerData::Progress, downcast);
-        downcast(Box::new(event) as Box<dyn Any>)
+        let downcast = downcast_or(|_: Resend| TimerData::Resend, downcast);
+        let downcast = downcast_or(TimerData::DoViewChange, downcast);
+        let downcast = downcast_or(TimerData::Progress, downcast);
+        downcast(Box::new(event))
     }
 }
 
@@ -130,6 +127,10 @@ enum CryptoEvent {
     VerifiedPrepare(Verified<Prepare>),
     SignedCommit(Signed<Commit>),
     VerifiedCommit(Verified<Commit>),
+    SignedViewChange(Signed<ViewChange>),
+    VerifiedViewChange(Verified<ViewChange>),
+    SignedNewView(Signed<NewView>),
+    VerifiedNewView(Verified<NewView>),
 }
 
 type Client = super::Client<IndexNet<Transient<MessageEvent>, Addr>, Transient<InvokeOk>, Addr>;
@@ -319,18 +320,22 @@ impl<W: Workload, F: Filter + Clone, const CHECK: bool> crate::search::State
                     .get_mut(&event.dest)
                     .ok_or(anyhow::anyhow!("missing timer for {:?}", event.dest))?;
                 match (event.dest, event.message) {
-                    (Addr::Client(index), Message::Reply(reply)) => self.clients[index as usize]
+                    (Addr::Client(index), Message::Reply(message)) => self.clients[index as usize]
                         .state
-                        .on_event(Recv(reply), timer)?,
+                        .on_event(Recv(message), timer)?,
                     (Addr::Replica(index), message) => {
                         let replica = &mut self.replicas[index as usize];
                         match message {
-                            Message::Request(request) => replica.on_event(Recv(request), timer)?,
+                            Message::Request(message) => replica.on_event(Recv(message), timer)?,
                             Message::PrePrepare(pre_prepare, requests) => {
                                 replica.on_event(Recv((pre_prepare, requests)), timer)?
                             }
-                            Message::Prepare(prepare) => replica.on_event(Recv(prepare), timer)?,
-                            Message::Commit(commit) => replica.on_event(Recv(commit), timer)?,
+                            Message::Prepare(message) => replica.on_event(Recv(message), timer)?,
+                            Message::Commit(message) => replica.on_event(Recv(message), timer)?,
+                            Message::ViewChange(message) => {
+                                replica.on_event(Recv(message), timer)?
+                            }
+                            Message::NewView(message) => replica.on_event(Recv(message), timer)?,
                             _ => anyhow::bail!("unimplemented"),
                         }
                     }
@@ -413,6 +418,18 @@ impl<W: Workload, F: Filter, const CHECK: bool> State<W, F, CHECK> {
                         }
                         CryptoEvent::SignedCommit(commit) => replica.on_event(commit, timer)?,
                         CryptoEvent::VerifiedCommit(commit) => replica.on_event(commit, timer)?,
+                        CryptoEvent::SignedViewChange(view_change) => {
+                            replica.on_event(view_change, timer)?
+                        }
+                        CryptoEvent::VerifiedViewChange(view_change) => {
+                            replica.on_event(view_change, timer)?
+                        }
+                        CryptoEvent::SignedNewView(new_view) => {
+                            replica.on_event(new_view, timer)?
+                        }
+                        CryptoEvent::VerifiedNewView(new_view) => {
+                            replica.on_event(new_view, timer)?
+                        }
                     }
                 }
             }
