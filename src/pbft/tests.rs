@@ -36,7 +36,10 @@ use crate::{
     workload::{CloseLoop, Invoke, InvokeOk, Iter, Workload},
 };
 
-use super::{Commit, CryptoWorker, PrePrepare, Prepare, Progress, Reply, Request, Resend};
+use super::{
+    Commit, CryptoWorker, NewView, PrePrepare, Prepare, Progress, Reply, Request, Resend,
+    ViewChange,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 enum Addr {
@@ -51,6 +54,8 @@ enum Message {
     Prepare(Verifiable<Prepare>),
     Commit(Verifiable<Commit>),
     Reply(Reply),
+    ViewChange(Verifiable<ViewChange>),
+    NewView(Verifiable<NewView>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

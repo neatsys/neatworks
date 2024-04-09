@@ -50,12 +50,28 @@ pub struct Reply {
     replica_id: u8,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ViewChange {
+    view_num: u32,
+    log: Vec<(Verifiable<PrePrepare>, Vec<(u8, Verifiable<Prepare>)>)>,
+    replica_id: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct NewView {
+    view_num: u32,
+    logs: Vec<(u8, Verifiable<ViewChange>)>,
+    pre_prepares: Vec<Verifiable<PrePrepare>>,
+}
+
 pub trait ToReplicaNet<A>:
     SendMessage<u8, Request<A>>
     + SendMessage<All, Request<A>>
     + SendMessage<All, (Verifiable<PrePrepare>, Vec<Request<A>>)>
     + SendMessage<All, Verifiable<Prepare>>
     + SendMessage<All, Verifiable<Commit>>
+    + SendMessage<All, Verifiable<ViewChange>>
+    + SendMessage<All, Verifiable<NewView>>
 {
 }
 impl<
@@ -63,7 +79,9 @@ impl<
             + SendMessage<All, Request<A>>
             + SendMessage<All, (Verifiable<PrePrepare>, Vec<Request<A>>)>
             + SendMessage<All, Verifiable<Prepare>>
-            + SendMessage<All, Verifiable<Commit>>,
+            + SendMessage<All, Verifiable<Commit>>
+            + SendMessage<All, Verifiable<ViewChange>>
+            + SendMessage<All, Verifiable<NewView>>,
         A,
     > ToReplicaNet<A> for T
 {
@@ -241,6 +259,7 @@ pub struct Replica<N, CN, CW, S, A, M = (N, CN, CW, S, A)> {
     commit_quorums: BTreeMap<u32, BTreeMap<u8, Verifiable<Commit>>>,
     commit_num: u32,
     app: S,
+    do_view_change_timer: Option<TimerId>,
     // any op num presents in this maps -> there's ongoing verification submitted
     // entry presents but empty list -> no pending but one is verifying
     // no entry present -> no pending and not verifying
@@ -295,6 +314,7 @@ impl<N, CN, CW, S, A> Replica<N, CN, CW, S, A> {
             prepare_quorums: Default::default(),
             commit_quorums: Default::default(),
             commit_num: 0,
+            do_view_change_timer: Default::default(),
             pending_prepares: Default::default(),
             pending_commits: Default::default(),
 
@@ -333,11 +353,14 @@ where
     type A = A;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DoViewChange(u32); // view number to enter
+
 impl<M: ReplicaCommon> OnEvent<Recv<Request<M::A>>> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     fn on_event(
         &mut self,
         Recv(request): Recv<Request<M::A>>,
-        _: &mut impl Timer<Self>,
+        timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         match self.replies.get(&request.client_id) {
             Some((seq, _)) if *seq > request.seq => return Ok(()),
@@ -352,7 +375,13 @@ impl<M: ReplicaCommon> OnEvent<Recv<Request<M::A>>> for Replica<M::N, M::CN, M::
         if !self.is_primary() {
             self.net
                 .send((self.view_num as usize % self.num_replica) as u8, request)?;
-            // TODO set view change timer
+            if self.do_view_change_timer.is_none() {
+                // i don't know what's a good delay to begin; tentatively choose this to
+                // hopefully resolve the liveness issue before next client resending, while
+                // leave enough time for primary to continue trying
+                self.do_view_change_timer =
+                    Some(timer.set(CLIENT_RESEND_INTERVAL / 2, DoViewChange(self.view_num + 1))?)
+            }
             return Ok(());
         }
         self.replies.insert(request.client_id, (request.seq, None));
@@ -826,12 +855,33 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
                 self.client_net.send(request.client_addr.clone(), reply)?
             }
         }
-        while self.is_primary()
-            && !self.requests.is_empty()
-            && self.op_num <= self.commit_num + Self::NUM_CONCURRENT_PRE_PREPARE
-        {
-            self.close_batch()?
+        if self.is_primary() {
+            while !self.requests.is_empty()
+                && self.op_num <= self.commit_num + Self::NUM_CONCURRENT_PRE_PREPARE
+            {
+                self.close_batch()?
+            }
+        } else if let Some(timer_id) = self.do_view_change_timer.take() {
+            timer.unset(timer_id)?
         }
+        Ok(())
+    }
+}
+
+impl<M: ReplicaCommon> OnEvent<DoViewChange> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+    fn on_event(
+        &mut self,
+        DoViewChange(view_num): DoViewChange,
+        timer: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()>
+    where
+        Self: Sized,
+    {
+        timer.unset(
+            self.do_view_change_timer
+                .take()
+                .ok_or(anyhow::anyhow!("missing view change timer"))?,
+        )?;
         Ok(())
     }
 }
@@ -851,6 +901,8 @@ pub enum ToReplica<A> {
     PrePrepare(Verifiable<PrePrepare>, Vec<Request<A>>),
     Prepare(Verifiable<Prepare>),
     Commit(Verifiable<Commit>),
+    ViewChange(Verifiable<ViewChange>),
+    NewView(Verifiable<NewView>),
 }
 
 pub type ToReplicaMessageNet<T, A> = MessageNet<T, ToReplica<A>>;
@@ -881,6 +933,8 @@ pub fn to_replica_on_buf<A: Addr>(
         ToReplica::PrePrepare(message, requests) => sender.send(Recv((message, requests))),
         ToReplica::Prepare(message) => sender.send(Recv(message)),
         ToReplica::Commit(message) => sender.send(Recv(message)),
+        ToReplica::ViewChange(message) => todo!(),
+        ToReplica::NewView(message) => todo!(),
     }
 }
 
