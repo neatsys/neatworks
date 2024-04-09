@@ -3,7 +3,6 @@
 // maybe not the most reasonable organization but makes enough sense to me
 
 use std::{
-    fmt::{Debug, Display},
     mem::replace,
     sync::{
         atomic::{AtomicU32, Ordering::SeqCst},
@@ -176,19 +175,12 @@ impl<I> Check<I> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display(fmt = "{self:?}")]
 pub struct UnexpectedResult {
     pub expect: Payload,
     pub actual: Payload,
 }
-
-impl Display for UnexpectedResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
-    }
-}
-
-impl std::error::Error for UnexpectedResult {}
 
 impl<I: Iterator<Item = (Payload, Payload)>> Workload for Check<I> {
     type Attach = ();

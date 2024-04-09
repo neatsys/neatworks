@@ -367,10 +367,7 @@ pub mod check {
         }
     }
 
-    impl<W: Clone + Workload> crate::search::State for State<W>
-    where
-        W::Attach: Clone,
-    {
+    impl<W: Workload> crate::search::State for State<W> {
         type Event = Event;
 
         fn events(&self) -> Vec<Self::Event> {

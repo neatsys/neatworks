@@ -31,7 +31,6 @@ use crate::{
     },
     net::{events::Recv, IndexNet, IterAddr, SendMessage},
     pbft::CLIENT_RESEND_INTERVAL,
-    search::State as _,
     util::Payload,
     worker::Worker,
     workload::{CloseLoop, Invoke, InvokeOk, Iter, Workload},
@@ -262,10 +261,8 @@ enum Event {
     Timer(TimerEvent),
 }
 
-impl<W: Clone + Workload, F: Filter + Clone, const CHECK: bool> crate::search::State
+impl<W: Workload, F: Filter + Clone, const CHECK: bool> crate::search::State
     for State<W, F, CHECK>
-where
-    W::Attach: Clone,
 {
     type Event = Event;
 
@@ -426,6 +423,23 @@ impl<W: Workload, F: Filter, const CHECK: bool> State<W, F, CHECK> {
     }
 }
 
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+pub struct ProgressExhausted;
+
+pub trait SimulateState: crate::search::State {
+    fn step_simulate(&mut self) -> anyhow::Result<()> {
+        let Some(event) = self.events().pop() else {
+            anyhow::bail!(ProgressExhausted)
+        };
+        self.step(event)
+    }
+}
+
+impl<W: Workload + Clone, F: Filter + Clone> SimulateState for State<W, F, false> where
+    W::Attach: Clone
+{
+}
+
 #[test]
 fn no_client() -> anyhow::Result<()> {
     let num_replica = 4;
@@ -448,10 +462,7 @@ fn t02_basic() -> anyhow::Result<()> {
     state.launch()?;
 
     while !state.clients.iter().all(|client| client.close_loop.done) {
-        let Some(event) = state.events().pop() else {
-            anyhow::bail!("stuck")
-        };
-        state.step(event)?
+        state.step_simulate()?
     }
 
     let mut num_prepared = 0;
@@ -483,10 +494,7 @@ fn t03_no_partition() -> anyhow::Result<()> {
         state.launch_client(index)?;
 
         while !state.clients[index].close_loop.done {
-            let Some(event) = state.events().pop() else {
-                anyhow::bail!("stuck")
-            };
-            state.step(event)?
+            state.step_simulate()?
         }
     }
 
@@ -515,10 +523,7 @@ fn t04_progress_in_majority() -> anyhow::Result<()> {
     state.launch()?;
 
     while !state.clients.iter().all(|client| client.close_loop.done) {
-        let Some(event) = state.events().pop() else {
-            anyhow::bail!("stuck")
-        };
-        state.step(event)?
+        state.step_simulate()?
     }
 
     anyhow::ensure!(state.replicas[5].log.get(1).is_none());
@@ -548,9 +553,12 @@ fn t05_no_progress_in_minority() -> anyhow::Result<()> {
     state.push_client(workload, num_replica, num_faulty);
     state.launch()?;
 
-    while let Some(event) = state.events().pop() {
-        // println!("{event:?}");
-        state.step(event)?
+    loop {
+        match state.step_simulate() {
+            Ok(()) => {}
+            Err(err) if err.is::<ProgressExhausted>() => break,
+            err => err?,
+        }
     }
     anyhow::ensure!(!state.clients.iter().any(|client| client.close_loop.done));
     anyhow::ensure!(state.replicas.iter().all(|replica| replica.commit_num == 0));
@@ -581,9 +589,12 @@ fn t06_progress_after_heal() -> anyhow::Result<()> {
     let index = state.push_client(workload, num_replica, num_faulty);
     state.launch_client(index)?;
 
-    while let Some(event) = state.events().pop() {
-        // println!("{event:?}");
-        state.step(event)?
+    loop {
+        match state.step_simulate() {
+            Ok(()) => {}
+            Err(err) if err.is::<ProgressExhausted>() => break,
+            err => err?,
+        }
     }
 
     deadline += CLIENT_RESEND_INTERVAL;
@@ -592,25 +603,17 @@ fn t06_progress_after_heal() -> anyhow::Result<()> {
         .map_filter(|filter| SoftDeadline(filter, deadline));
 
     while !state.clients[index].close_loop.done {
-        let Some(event) = state.events().pop() else {
-            anyhow::bail!("stuck")
-        };
-        // println!("{event:?}");
-        state.step(event)?
+        state.step_simulate()?
     }
 
     let workload = static_workload([(Get("hello".into()), GetResult("world".into()))].into_iter())?;
     let index = state.push_client(workload, num_replica, num_faulty);
     state.launch_client(index)?;
     while !state.clients[index].close_loop.done {
-        let Some(event) = state.events().pop() else {
-            anyhow::bail!("stuck")
-        };
-        // println!("{event:?}");
-        state.step(event)?
+        state.step_simulate()?
     }
 
     Ok(())
 }
 
-// cSpell:words upcall kvstore
+// cSpell:words upcall kvstore pbft

@@ -18,30 +18,16 @@ use dashmap::DashMap;
 use rand::{seq::SliceRandom, thread_rng};
 use rustc_hash::FxHasher;
 
-pub trait State: Clone {
+pub trait State {
     type Event;
 
     fn events(&self) -> Vec<Self::Event>;
 
     fn step(&mut self, event: Self::Event) -> anyhow::Result<()>;
 
-    fn steps(&self) -> Vec<anyhow::Result<Self>>
-    where
-        Self: Sized,
-    {
-        self.events()
-            .into_iter()
-            .map(|event| {
-                let mut system = self.clone();
-                system.step(event)?;
-                Ok(system)
-            })
-            .collect()
-    }
-
     fn step_catch_unwind(mut self, event: Self::Event) -> anyhow::Result<Self>
     where
-        Self: UnwindSafe,
+        Self: UnwindSafe + Sized,
         Self::Event: UnwindSafe,
     {
         catch_unwind(move || {
@@ -121,7 +107,7 @@ pub fn breadth_first<S, T, I, G, P>(
     max_duration: impl Into<Option<Duration>>,
 ) -> anyhow::Result<SearchResult<S, T, S::Event>>
 where
-    S: State + Into<T> + Send + UnwindSafe + 'static,
+    S: State + Clone + Into<T> + Send + UnwindSafe + 'static,
     S::Event: Clone + Send + Sync + UnwindSafe,
     T: Clone + Eq + Hash + Send + Sync + 'static,
     I: Fn(&S) -> anyhow::Result<()> + Clone + Send + 'static,
@@ -205,7 +191,7 @@ pub fn random_depth_first<S, T, I, G, P>(
     max_duration: impl Into<Option<Duration>>,
 ) -> anyhow::Result<SearchResult<S, T, S::Event>>
 where
-    S: State + Into<T> + Send + UnwindSafe + 'static,
+    S: State + Clone + Into<T> + Send + UnwindSafe + 'static,
     S::Event: Clone + Send + Sync + UnwindSafe,
     T: Eq + Hash + Send + Sync + 'static,
     I: Fn(&S) -> anyhow::Result<()> + Clone + Send + 'static,
@@ -360,7 +346,7 @@ fn breath_first_worker<S, T, I, G, P>(
     depth_barrier: Arc<Barrier>,
     search_finished: SearchFinished<SearchWorkerResult<S, S::Event>>,
 ) where
-    S: State + Into<T> + UnwindSafe,
+    S: State + Clone + Into<T> + UnwindSafe,
     S::Event: Clone + UnwindSafe,
     T: Eq + Hash,
     I: Fn(&S) -> anyhow::Result<()>,
@@ -460,7 +446,7 @@ fn random_depth_first_worker<S, T, I, G, P>(
     num_state: Arc<AtomicU32>,
     search_finished: SearchFinished<SearchResult<S, T, S::Event>>,
 ) where
-    S: State + Into<T> + UnwindSafe,
+    S: State + Clone + Into<T> + UnwindSafe,
     S::Event: Clone + UnwindSafe,
     T: Eq + Hash,
     I: Fn(&S) -> anyhow::Result<()>,
@@ -510,3 +496,5 @@ fn random_depth_first_worker<S, T, I, G, P>(
         }
     }
 }
+
+// cSpell:words hasher dashmap rustc condvar
