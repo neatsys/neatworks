@@ -53,14 +53,14 @@ pub struct Reply {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ViewChange {
     view_num: u32,
-    log: Vec<(Verifiable<PrePrepare>, Vec<(u8, Verifiable<Prepare>)>)>,
+    log: Vec<(Verifiable<PrePrepare>, Quorum<Prepare>)>,
     replica_id: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NewView {
     view_num: u32,
-    logs: Vec<(u8, Verifiable<ViewChange>)>,
+    logs: Quorum<ViewChange>,
     pre_prepares: Vec<Verifiable<PrePrepare>>,
 }
 
@@ -243,6 +243,9 @@ impl<W: Submit<S, E>, S: 'static, E: SendCryptoEvent<A> + 'static, A: Addr>
     }
 }
 
+type Quorum<M> = BTreeMap<u8, Verifiable<M>>;
+type Quorums<K, M> = BTreeMap<K, Quorum<M>>;
+
 #[derive(Clone)]
 #[derive_where(Debug, PartialEq, Eq, Hash; S, A)]
 pub struct Replica<N, CN, CW, S, A, M = (N, CN, CW, S, A)> {
@@ -255,11 +258,14 @@ pub struct Replica<N, CN, CW, S, A, M = (N, CN, CW, S, A)> {
     view_num: u32,
     op_num: u32,
     log: Vec<LogEntry<A>>,
-    prepare_quorums: BTreeMap<u32, BTreeMap<u8, Verifiable<Prepare>>>,
-    commit_quorums: BTreeMap<u32, BTreeMap<u8, Verifiable<Commit>>>,
+    prepare_quorums: Quorums<u32, Prepare>, // `K` = op number
+    commit_quorums: Quorums<u32, Commit>,
     commit_num: u32,
     app: S,
+
     do_view_change_timer: Option<TimerId>,
+    view_changes: Quorums<u32, ViewChange>, // `K` = view number
+
     // any op num presents in this maps -> there's ongoing verification submitted
     // entry presents but empty list -> no pending but one is verifying
     // no entry present -> no pending and not verifying
@@ -281,8 +287,8 @@ pub struct Replica<N, CN, CW, S, A, M = (N, CN, CW, S, A)> {
 struct LogEntry<A> {
     pre_prepare: Option<Verifiable<PrePrepare>>,
     requests: Vec<Request<A>>,
-    prepares: Vec<(u8, Verifiable<Prepare>)>,
-    commits: Vec<(u8, Verifiable<Commit>)>,
+    prepares: Quorum<Prepare>,
+    commits: Quorum<Commit>,
 
     timer_id: Option<TimerId>,
 }
@@ -315,6 +321,7 @@ impl<N, CN, CW, S, A> Replica<N, CN, CW, S, A> {
             commit_quorums: Default::default(),
             commit_num: 0,
             do_view_change_timer: Default::default(),
+            view_changes: Default::default(),
             pending_prepares: Default::default(),
             pending_commits: Default::default(),
 
@@ -670,12 +677,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
             return Ok(());
         };
         assert!(entry.prepares.is_empty());
-        entry.prepares = self
-            .prepare_quorums
-            .remove(&prepare.op_num)
-            .unwrap()
-            .into_iter()
-            .collect();
+        entry.prepares = self.prepare_quorums.remove(&prepare.op_num).unwrap();
 
         let commit = Commit {
             view_num: self.view_num,
@@ -809,12 +811,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
         if entry.prepares.is_empty() {
             return Ok(());
         }
-        entry.commits = self
-            .commit_quorums
-            .remove(&commit.op_num)
-            .unwrap()
-            .into_iter()
-            .collect();
+        entry.commits = self.commit_quorums.remove(&commit.op_num).unwrap();
 
         let is_primary = self.is_primary();
         while let Some(entry) = self.log.get_mut(self.commit_num as usize + 1) {

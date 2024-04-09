@@ -37,8 +37,8 @@ use crate::{
 };
 
 use super::{
-    Commit, CryptoWorker, NewView, PrePrepare, Prepare, Progress, Reply, Request, Resend,
-    ViewChange,
+    Commit, CryptoWorker, DoViewChange, NewView, PrePrepare, Prepare, Progress, Reply, Request,
+    Resend, ViewChange,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -96,6 +96,7 @@ struct TimerEvent {
 enum TimerData {
     Resend,
     Progress(Progress),
+    DoViewChange(DoViewChange),
 }
 
 impl DowncastEvent for TimerData {
@@ -103,11 +104,21 @@ impl DowncastEvent for TimerData {
         if (&event as &dyn Any).is::<Resend>() {
             return Ok(Self::Resend);
         }
-        let event = Box::new(event) as Box<dyn Any>;
-        if let Ok(event) = event.downcast::<Progress>() {
-            return Ok(Self::Progress(*event));
+
+        fn downcast_or<T: 'static>(
+            wrap: impl Fn(T) -> TimerData,
+            default: impl Fn(Box<dyn Any>) -> anyhow::Result<TimerData>,
+        ) -> impl Fn(Box<dyn Any>) -> anyhow::Result<TimerData> {
+            move |event| match event.downcast::<T>() {
+                Ok(event) => Ok(wrap(*event)),
+                Err(event) => default(event),
+            }
         }
-        Err(anyhow::anyhow!("unknown timer data"))
+
+        let downcast = |_| Err(anyhow::anyhow!("unknown timer data"));
+        let downcast = downcast_or::<DoViewChange>(TimerData::DoViewChange, downcast);
+        let downcast = downcast_or::<Progress>(TimerData::Progress, downcast);
+        downcast(Box::new(event) as Box<dyn Any>)
     }
 }
 
@@ -337,8 +348,13 @@ impl<W: Workload, F: Filter + Clone, const CHECK: bool> crate::search::State
                     (Addr::Client(index), TimerData::Resend) => {
                         self.clients[index as usize].state.on_event(Resend, timer)?
                     }
-                    (Addr::Replica(index), TimerData::Progress(event)) => {
-                        self.replicas[index as usize].on_event(event, timer)?
+                    (Addr::Replica(index), event) => {
+                        let replica = &mut self.replicas[index as usize];
+                        match event {
+                            TimerData::Progress(event) => replica.on_event(event, timer)?,
+                            TimerData::DoViewChange(event) => replica.on_event(event, timer)?,
+                            _ => anyhow::bail!("unimplemented"),
+                        }
                     }
                     _ => anyhow::bail!("unimplemented"),
                 }
