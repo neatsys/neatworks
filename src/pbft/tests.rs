@@ -36,8 +36,8 @@ use crate::{
 };
 
 use super::{
-    Commit, CryptoWorker, DoViewChange, NewView, PrePrepare, Prepare, Progress, Reply, Request,
-    Resend, ToReplica, ViewChange,
+    Commit, CryptoWorker, DoViewChange, NewView, PrePrepare, Prepare, ProgressPrepared,
+    ProgressViewChange, Reply, Request, Resend, ToReplica, ViewChange,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -91,8 +91,9 @@ struct TimerEvent {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum TimerData {
     Resend,
-    Progress(Progress),
+    ProgressPrepared(ProgressPrepared),
     DoViewChange(DoViewChange),
+    ProgressViewChange(ProgressViewChange),
 }
 
 impl DowncastEvent for TimerData {
@@ -110,7 +111,8 @@ impl DowncastEvent for TimerData {
         let downcast = |_| Err(anyhow::anyhow!("unknown timer data"));
         let downcast = downcast_or(|_: Resend| TimerData::Resend, downcast);
         let downcast = downcast_or(TimerData::DoViewChange, downcast);
-        let downcast = downcast_or(TimerData::Progress, downcast);
+        let downcast = downcast_or(TimerData::ProgressPrepared, downcast);
+        let downcast = downcast_or(TimerData::ProgressViewChange, downcast);
         downcast(Box::new(event))
     }
 }
@@ -352,7 +354,7 @@ impl<W: Workload, F: Filter + Clone, const CHECK: bool> crate::search::State
                     .get_mut(&addr)
                     .ok_or(anyhow::anyhow!("missing timer for {addr:?}"))?;
                 let timer_data = timer.get_timer_data(&timer_id)?.clone();
-                timer.step_timer(&timer_id)?;
+                timer.step_timer(&timer_id, !CHECK)?;
                 match (addr, timer_data) {
                     (Addr::Client(index), TimerData::Resend) => {
                         self.clients[index as usize].state.on_event(Resend, timer)?
@@ -360,8 +362,11 @@ impl<W: Workload, F: Filter + Clone, const CHECK: bool> crate::search::State
                     (Addr::Replica(index), event) => {
                         let replica = &mut self.replicas[index as usize];
                         match event {
-                            TimerData::Progress(event) => replica.on_event(event, timer)?,
+                            TimerData::ProgressPrepared(event) => replica.on_event(event, timer)?,
                             TimerData::DoViewChange(event) => replica.on_event(event, timer)?,
+                            TimerData::ProgressViewChange(event) => {
+                                replica.on_event(event, timer)?
+                            }
                             _ => anyhow::bail!("unimplemented"),
                         }
                     }
@@ -621,7 +626,6 @@ fn t06_progress_after_heal() -> anyhow::Result<()> {
     let num_replica = 7;
     let num_faulty = 2;
 
-    let mut deadline = CLIENT_RESEND_INTERVAL * 20;
     let mut state = State::<_, _>::new(num_replica, num_faulty)
         .map_filter(|filter| {
             WithPartition(
@@ -635,7 +639,7 @@ fn t06_progress_after_heal() -> anyhow::Result<()> {
                 ],
             )
         })
-        .map_filter(|filter| SoftDeadline(filter, deadline));
+        .map_filter(|filter| SoftDeadline(filter, CLIENT_RESEND_INTERVAL * 20));
     let workload = static_workload([(Put("hello".into(), "world".into()), PutOk)].into_iter())?;
     let index = state.push_client(workload, num_replica, num_faulty);
     state.launch_client(index)?;
@@ -648,12 +652,10 @@ fn t06_progress_after_heal() -> anyhow::Result<()> {
         }
     }
 
-    deadline += CLIENT_RESEND_INTERVAL;
-    let mut state = state
-        .map_filter(|_| AllowAll)
-        .map_filter(|filter| SoftDeadline(filter, deadline));
-
+    let mut state = state.map_filter(|_| AllowAll);
     while !state.clients[index].close_loop.done {
+        use crate::search::State;
+        println!("{:?}", state.events());
         state.step_simulate()?
     }
 

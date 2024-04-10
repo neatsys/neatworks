@@ -62,6 +62,8 @@ pub struct NewView {
     view_num: u32,
     view_changes: Quorum<ViewChange>,
     pre_prepares: Vec<Verifiable<PrePrepare>>,
+    // the `min_s` and `max_s` are implied by the op numbers of `pre_prepares`
+    // new primary should always send nonempty `pre_prepares`, pad a no-op if necessary
 }
 
 pub trait ToReplicaNet<A>:
@@ -261,7 +263,7 @@ pub struct Replica<N, CN, CW, S, A, M = (N, CN, CW, S, A)> {
     num_replica: usize,
     num_faulty: usize,
 
-    replies: BTreeMap<u32, (u32, Option<Reply>)>,
+    results: BTreeMap<u32, (u32, Option<Payload>)>, // client id -> (seq, result)
     requests: Vec<Request<A>>,
     view_num: u32,
     new_views: BTreeMap<u32, Verifiable<NewView>>,
@@ -277,7 +279,10 @@ pub struct Replica<N, CN, CW, S, A, M = (N, CN, CW, S, A)> {
     commit_num: u32,
     app: S,
 
+    // keep track of the timing of start sending ViewChange for a view
     do_view_change_timer: Option<TimerId>,
+    // for periodically resending ViewChange
+    progress_view_change_timer: Option<TimerId>,
     view_changes: Quorums<u32, ViewChange>, // `K` = view number
 
     // any op num presents in this maps -> there's ongoing verification submitted
@@ -303,7 +308,7 @@ struct LogEntry<A> {
     requests: Vec<Request<A>>,
     prepares: Quorum<Prepare>,
     commits: Quorum<Commit>,
-    timer_id: Option<TimerId>,
+    progress_timer: Option<TimerId>,
 }
 
 const NO_OP_DIGEST: H256 = H256::zero();
@@ -327,7 +332,7 @@ impl<N, CN, CW, S, A> Replica<N, CN, CW, S, A> {
             num_replica,
             num_faulty,
 
-            replies: Default::default(),
+            results: Default::default(),
             requests: Default::default(),
             view_num: 0,
             new_views: Default::default(),
@@ -336,6 +341,7 @@ impl<N, CN, CW, S, A> Replica<N, CN, CW, S, A> {
             commit_quorums: Default::default(),
             commit_num: 0,
             do_view_change_timer: Default::default(),
+            progress_view_change_timer: Default::default(),
             view_changes: Default::default(),
             pending_prepares: Default::default(),
             pending_commits: Default::default(),
@@ -395,11 +401,17 @@ impl<M: ReplicaCommon> OnEvent<Recv<Request<M::A>>> for Replica<M::N, M::CN, M::
         if self.view_change() {
             return Ok(());
         }
-        match self.replies.get(&request.client_id) {
+        match self.results.get(&request.client_id) {
             Some((seq, _)) if *seq > request.seq => return Ok(()),
-            Some((seq, reply)) if *seq == request.seq => {
-                if let Some(reply) = reply {
-                    self.client_net.send(request.client_addr, reply.clone())?
+            Some((seq, result)) if *seq == request.seq => {
+                if let Some(result) = result {
+                    let reply = Reply {
+                        seq: request.seq,
+                        result: result.clone(),
+                        view_num: self.view_num,
+                        replica_id: self.id,
+                    };
+                    self.client_net.send(request.client_addr, reply)?
                 }
                 return Ok(());
             }
@@ -417,7 +429,7 @@ impl<M: ReplicaCommon> OnEvent<Recv<Request<M::A>>> for Replica<M::N, M::CN, M::
             }
             return Ok(());
         }
-        self.replies.insert(request.client_id, (request.seq, None));
+        self.results.insert(request.client_id, (request.seq, None));
         self.requests.push(request);
         if self.op_num() <= self.commit_num + Self::NUM_CONCURRENT_PRE_PREPARE {
             self.close_batch()
@@ -430,6 +442,7 @@ impl<M: ReplicaCommon> OnEvent<Recv<Request<M::A>>> for Replica<M::N, M::CN, M::
 impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     fn close_batch(&mut self) -> anyhow::Result<()> {
         assert!(self.is_primary());
+        assert!(!self.view_change());
         assert!(!self.requests.is_empty());
         let requests = self
             .requests
@@ -449,7 +462,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Progress(u32); // op number
+pub struct ProgressPrepared(u32); // op number
 
 impl<M: ReplicaCommon> OnEvent<(Signed<PrePrepare>, Vec<Request<M::A>>)>
     for Replica<M::N, M::CN, M::CW, M::S, M::A, M>
@@ -471,17 +484,20 @@ impl<M: ReplicaCommon> OnEvent<(Signed<PrePrepare>, Vec<Request<M::A>>)>
         assert!(replaced.is_none());
 
         self.log[op_num].requests.clone_from(&requests);
-        let timer_id = timer.set(CLIENT_RESEND_INTERVAL / 5, Progress(op_num as _))?;
-        self.log[op_num].timer_id = Some(timer_id);
+        let timer_id = timer.set(CLIENT_RESEND_INTERVAL / 5, ProgressPrepared(op_num as _))?;
+        self.log[op_num].progress_timer = Some(timer_id);
 
         self.net.send(All, (pre_prepare, requests))
     }
 }
 
-impl<M: ReplicaCommon> OnEvent<Progress> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+// it could be the case that when this is triggered primary has been moving on
+// to a higher view i.e. collected majority of ViewChange and pending NewView
+// should be safe since we are just resending old PrePrepare
+impl<M: ReplicaCommon> OnEvent<ProgressPrepared> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     fn on_event(
         &mut self,
-        Progress(op_num): Progress,
+        ProgressPrepared(op_num): ProgressPrepared,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()>
     where
@@ -844,7 +860,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
         if is_primary {
             timer.unset(
                 entry
-                    .timer_id
+                    .progress_timer
                     .take()
                     .ok_or(anyhow::anyhow!("missing progress timer"))?,
             )?
@@ -861,23 +877,21 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
 
             for request in &entry.requests {
                 let result = Payload(self.app.execute(&request.op)?);
-                let seq = request.seq;
-                let reply = Reply {
-                    seq,
-                    result,
-                    view_num: self.view_num,
-                    replica_id: self.id,
-                };
-
                 if self
-                    .replies
+                    .results
                     .get(&request.client_id)
                     .map(|(seq, _)| *seq <= request.seq)
                     .unwrap_or(true)
                 {
-                    self.replies
-                        .insert(request.client_id, (request.seq, Some(reply.clone())));
+                    self.results
+                        .insert(request.client_id, (request.seq, Some(result.clone())));
                 }
+                let reply = Reply {
+                    seq: request.seq,
+                    result,
+                    view_num: entry.pre_prepare.as_ref().unwrap().view_num,
+                    replica_id: self.id,
+                };
                 self.client_net.send(request.client_addr.clone(), reply)?
             }
         }
@@ -893,15 +907,46 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProgressViewChange;
+
 impl<M: ReplicaCommon> OnEvent<DoViewChange> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     fn on_event(
         &mut self,
         DoViewChange(view_num): DoViewChange,
+        timer: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()>
+    where
+        Self: Sized,
+    {
+        assert!(view_num >= self.view_num);
+        self.view_num = view_num;
+        timer.unset(self.do_view_change_timer.take().unwrap())?;
+        let replaced = self
+            .progress_view_change_timer
+            .replace(timer.set(CLIENT_RESEND_INTERVAL / 10, ProgressViewChange)?);
+        if let Some(timer_id) = replaced {
+            timer.unset(timer_id)?
+        }
+        self.do_view_change()
+    }
+}
+
+impl<M: ReplicaCommon> OnEvent<ProgressViewChange> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+    fn on_event(
+        &mut self,
+        ProgressViewChange: ProgressViewChange,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()>
     where
         Self: Sized,
     {
+        self.do_view_change()
+    }
+}
+
+impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+    fn do_view_change(&mut self) -> Result<(), anyhow::Error> {
         let log = self
             .log
             .iter()
@@ -914,7 +959,7 @@ impl<M: ReplicaCommon> OnEvent<DoViewChange> for Replica<M::N, M::CN, M::CW, M::
             })
             .collect();
         let view_change = ViewChange {
-            view_num,
+            view_num: self.view_num,
             log,
             replica_id: self.id,
         };
@@ -933,8 +978,8 @@ impl<M: ReplicaCommon> OnEvent<Signed<ViewChange>> for Replica<M::N, M::CN, M::C
     where
         Self: Sized,
     {
-        self.net.send(All, view_change.clone())?;
-        if view_change.view_num > self.view_num {
+        if view_change.view_num == self.view_num {
+            self.net.send(All, view_change.clone())?;
             self.insert_view_change(view_change, timer)?
         }
         Ok(())
@@ -970,7 +1015,7 @@ impl<M: ReplicaCommon> OnEvent<Recv<Verifiable<ViewChange>>>
     where
         Self: Sized,
     {
-        if view_change.view_num <= self.view_num {
+        if view_change.view_num < self.view_num {
             return Ok(());
         }
         let num_replica = self.num_replica;
@@ -996,10 +1041,7 @@ impl<M: ReplicaCommon> OnEvent<Verified<ViewChange>>
     where
         Self: Sized,
     {
-        if view_change.view_num > self.view_num {
-            self.insert_view_change(view_change, timer)?
-        }
-        Ok(())
+        self.insert_view_change(view_change, timer)
     }
 }
 
@@ -1007,26 +1049,25 @@ fn pre_prepares_for_view_changes(
     view_num: u32,
     view_changes: &Quorum<ViewChange>,
 ) -> anyhow::Result<Vec<PrePrepare>> {
-    let mut redo_pre_prepares = BTreeMap::new();
+    let mut carried_pre_prepares = BTreeMap::new();
     for view_change in view_changes.values() {
         for (prepared, _) in &view_change.log {
-            let pre_prepare =
-                redo_pre_prepares
-                    .entry(prepared.op_num)
-                    .or_insert_with(|| PrePrepare {
-                        view_num,
-                        op_num: prepared.op_num,
-                        digest: prepared.digest,
-                    });
+            let pre_prepare = carried_pre_prepares
+                .entry(prepared.op_num)
+                .or_insert_with(|| PrePrepare {
+                    view_num,
+                    op_num: prepared.op_num,
+                    digest: prepared.digest,
+                });
             anyhow::ensure!(
                 pre_prepare.digest == prepared.digest,
                 "prepared invariant violated"
             )
         }
     }
-    let mut redo_pre_prepares = redo_pre_prepares.into_values();
-    let mut pre_prepares = redo_pre_prepares.next().into_iter().collect::<Vec<_>>();
-    for pre_prepare in redo_pre_prepares {
+    let mut carried_pre_prepares = carried_pre_prepares.into_values();
+    let mut pre_prepares = carried_pre_prepares.next().into_iter().collect::<Vec<_>>();
+    for pre_prepare in carried_pre_prepares {
         let last_op = pre_prepares.last().as_ref().unwrap().op_num;
         assert!(last_op <= pre_prepare.op_num, "BTreeMap should be ordered");
         pre_prepares.extend((last_op..pre_prepare.op_num).map(|op_num| PrePrepare {
@@ -1035,6 +1076,14 @@ fn pre_prepares_for_view_changes(
             digest: NO_OP_DIGEST,
         }));
         pre_prepares.push(pre_prepare)
+    }
+    if pre_prepares.is_empty() {
+        pre_prepares.push(PrePrepare {
+            view_num,
+            // it's always 1 for now, should be decided from checkpoint positions of `ViewChange`s
+            op_num: 1,
+            digest: NO_OP_DIGEST,
+        })
     }
     Ok(pre_prepares)
 }
@@ -1045,27 +1094,28 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
         view_change: Verifiable<ViewChange>,
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        let quorum = self.view_changes.entry(view_change.view_num).or_default();
-        quorum.insert(view_change.replica_id, view_change.clone());
-        println!(
-            "[{}] view {} ViewChange {}",
-            self.id,
-            view_change.view_num,
-            quorum.len()
-        );
-        // poor man's job deduplication, make sure only "join" each view number at most once
-        // probably no liveness concern
-        if quorum.len() == self.num_replica - self.num_faulty {
-            assert!(self.view_num < view_change.view_num);
-            println!(
-                "[{}] Update view number to {}",
-                self.id, view_change.view_num
-            );
+        if view_change.view_num < self.view_num
+            || view_change.view_num == self.view_num && !self.view_change()
+        {
+            return Ok(());
+        }
+        let view_change_quorum = self.view_changes.entry(view_change.view_num).or_default();
+        if view_change_quorum.len() >= self.num_replica - self.num_faulty {
+            return Ok(());
+        }
+
+        view_change_quorum.insert(view_change.replica_id, view_change.clone());
+        // println!(
+        //     "[{}] view {} ViewChange {}",
+        //     self.id,
+        //     view_change.view_num,
+        //     quorum.len()
+        // );
+        if view_change_quorum.len() == self.num_replica - self.num_faulty {
+            // it is possible that i'm working on view change into view v while collecting a
+            // majority that working on view change into view v' > v
             self.view_num = view_change.view_num;
-            if let Some(timer_id) = self.do_view_change_timer.take() {
-                timer.unset(timer_id)?
-            }
-            let view_changes = quorum.clone();
+            let view_changes = view_change_quorum.clone();
             if self.is_primary() {
                 let view_num = self.view_num;
                 self.crypto_worker.submit(Box::new(move |crypto, sender| {
@@ -1080,8 +1130,12 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
                     sender.send(Signed(crypto.sign(new_view)))
                 }))?
             } else {
-                self.do_view_change_timer =
-                    Some(timer.set(CLIENT_RESEND_INTERVAL / 2, DoViewChange(self.view_num + 1))?)
+                let replaced = self.do_view_change_timer.replace(
+                    timer.set(CLIENT_RESEND_INTERVAL / 2, DoViewChange(self.view_num + 1))?,
+                );
+                if let Some(timer_id) = replaced {
+                    timer.unset(timer_id)?
+                }
             }
         }
         // TODO "shortcut" sending ViewChange of view v after collecting f + 1 ViewChange of view
@@ -1099,8 +1153,11 @@ impl<M: ReplicaCommon> OnEvent<Signed<NewView>> for Replica<M::N, M::CN, M::CW, 
     where
         Self: Sized,
     {
-        self.net.send(All, new_view.clone())?;
-        self.enter_view(new_view, timer)
+        if self.view_num == new_view.view_num {
+            self.net.send(All, new_view.clone())?;
+            self.enter_view(new_view, timer)?
+        }
+        Ok(())
     }
 }
 
@@ -1112,7 +1169,8 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     ) -> anyhow::Result<()> {
         assert!(self.view_change());
         assert_eq!(new_view.view_num, self.view_num);
-        let is_primary = self.is_primary();
+        self.prepare_quorums.clear();
+        self.commit_quorums.clear();
         for pre_prepare in &new_view.pre_prepares {
             // somehow duplicating `impl OnEvent<(Verified<PrePrepare>, Vec<Request<M::A>>)>`
             // less concurrency management, but may require additional state transfer
@@ -1120,17 +1178,35 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
                 self.log
                     .resize_with(pre_prepare.op_num as usize + 1, Default::default)
             }
+            let is_primary = self.is_primary();
+
             let log_entry = &mut self.log[pre_prepare.op_num as usize];
             if let Some(prev_pre_prepare) = &mut log_entry.pre_prepare {
                 if prev_pre_prepare.digest != pre_prepare.digest {
-                    log_entry.pre_prepare = Some(pre_prepare.clone());
                     log_entry.requests.clear()
                 }
             }
+            log_entry.pre_prepare = Some(pre_prepare.clone());
+            log_entry.prepares.clear();
+            log_entry.commits.clear();
             if pre_prepare.digest != NO_OP_DIGEST && log_entry.requests.is_empty() {
                 anyhow::bail!("TODO state transfer")
             }
-            if !is_primary {
+            // i don't know whether this is possible on primary, maybe the view change happens to
+            // rotate back to the original primary? = =
+            // just get ready for anything weird that may (i.e. will) happen during model
+            // checking
+            if let Some(timer_id) = log_entry.progress_timer.take() {
+                timer.unset(timer_id)?
+            }
+
+            if is_primary {
+                log_entry.progress_timer = Some(timer.set(
+                    CLIENT_RESEND_INTERVAL / 5,
+                    ProgressPrepared(pre_prepare.op_num),
+                )?)
+            } else {
+                // println!("[{}] Redo Prepare {}", self.id, pre_prepare.op_num);
                 let prepare = Prepare {
                     view_num: self.view_num,
                     op_num: pre_prepare.op_num,
@@ -1140,20 +1216,26 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
                 self.crypto_worker.submit(Box::new(move |crypto, sender| {
                     sender.send(Signed(crypto.sign(prepare)))
                 }))?
-            } else {
-                let replaced = log_entry
-                    .timer_id
-                    .replace(timer.set(CLIENT_RESEND_INTERVAL / 5, Progress(pre_prepare.op_num))?);
-                // i don't know whether this is possible, maybe the view change happens to rotate
-                // back to the original primary? = =
-                // just get ready for anything weird that may (i.e. will) happen during model
-                // checking
-                if let Some(timer_id) = replaced {
+            }
+        }
+        if let Some(log_entries) = self
+            .log
+            .get_mut(new_view.pre_prepares.last().as_ref().unwrap().op_num as usize..)
+        {
+            for log_entry in log_entries {
+                if let Some(timer_id) = log_entry.progress_timer.take() {
                     timer.unset(timer_id)?
                 }
+                *log_entry = Default::default()
             }
         }
         self.new_views.insert(self.view_num, new_view);
+        if let Some(timer_id) = self.do_view_change_timer.take() {
+            timer.unset(timer_id)?
+        }
+        if let Some(timer_id) = self.progress_view_change_timer.take() {
+            timer.unset(timer_id)?
+        }
         while let Some((view_num, _)) = self.view_changes.first_key_value() {
             if *view_num > self.view_num {
                 break;
@@ -1222,12 +1304,10 @@ impl<M: ReplicaCommon> OnEvent<Verified<NewView>> for Replica<M::N, M::CN, M::CW
     where
         Self: Sized,
     {
-        if self.view_num > new_view.view_num
-            || self.view_num == new_view.view_num && !self.view_change()
-        {
-            return Ok(());
+        if self.view_num == new_view.view_num && self.view_change() {
+            self.enter_view(new_view, timer)?
         }
-        self.enter_view(new_view, timer)
+        Ok(())
     }
 }
 

@@ -408,7 +408,7 @@ pub mod check {
                     client_index: index,
                 }) => {
                     let client = &mut self.clients[index];
-                    client.timer.step_timer(&timer_id)?;
+                    client.timer.step_timer(&timer_id, false)?;
                     client.state.on_timer(timer_id, &mut client.timer)?
                 }
                 _ => anyhow::bail!("unexpected event {event:?}"),

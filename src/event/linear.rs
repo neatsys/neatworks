@@ -1,30 +1,12 @@
-use std::{collections::BTreeSet, hash::Hash, time::Duration};
+use std::time::Duration;
 
 use super::TimerId;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Timer {
     events: Vec<(u32, Duration)>,
     timer_id: u32,
     pub elapsed: Duration,
-}
-
-// Eq and Hash implements are delegated to `Timer::events`, that is, two timers
-// are considered equal as long as same set of events are *observed* from
-// outside
-// not sure how sound this definition is. not very good for performance for sure
-
-impl PartialEq for Timer {
-    fn eq(&self, other: &Self) -> bool {
-        self.events().collect::<BTreeSet<_>>() == other.events().collect()
-    }
-}
-impl Eq for Timer {}
-
-impl Hash for Timer {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.events().collect::<BTreeSet<_>>().hash(state)
-    }
 }
 
 impl Timer {
@@ -53,9 +35,11 @@ impl Timer {
         Ok(self.events.remove(i))
     }
 
-    pub fn step_timer(&mut self, timer_id: &TimerId) -> anyhow::Result<()> {
+    pub fn step_timer(&mut self, timer_id: &TimerId, elapse: bool) -> anyhow::Result<()> {
         let (timer_id, period) = self.unset(timer_id)?;
-        self.elapsed += period;
+        if elapse {
+            self.elapsed += period
+        }
         self.events.push((timer_id, period));
         Ok(())
     }
