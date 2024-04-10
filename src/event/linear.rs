@@ -74,3 +74,5 @@ impl crate::event::Timer for Timer {
         Ok(())
     }
 }
+
+// cSpell:words Hasher

@@ -285,19 +285,33 @@ impl<W: Workload, F: Filter + Clone, const CHECK: bool> crate::search::State
             .iter()
             .cloned()
             .map(Event::Message)
-            .chain(self.timers.iter().flat_map(|(addr, timer)| {
-                let deliver_timer = self.filter.deliver_timer(timer);
-                timer
-                    .events()
-                    // very lazy to deal with matching types, also hate for introducing nonsense dyn
-                    .filter(move |_| deliver_timer)
-                    .map(move |timer_id| {
-                        Event::Timer(TimerEvent {
-                            timer_id,
-                            addr: *addr,
-                        })
+            .chain({
+                let min_elapsed = self
+                    .timers
+                    .values()
+                    .filter_map(|timer| {
+                        if timer.events().count() != 0 {
+                            Some(timer.elapsed)
+                        } else {
+                            None
+                        }
                     })
-            }));
+                    .min();
+                self.timers.iter().flat_map(move |(addr, timer)| {
+                    let deliver_timer =
+                        Some(timer.elapsed) == min_elapsed && self.filter.deliver_timer(timer);
+                    timer
+                        .events()
+                        // very lazy to deal with matching types, also hate for introducing nonsense dyn
+                        .filter(move |_| deliver_timer)
+                        .map(move |timer_id| {
+                            Event::Timer(TimerEvent {
+                                timer_id,
+                                addr: *addr,
+                            })
+                        })
+                })
+            });
         if CHECK {
             events.collect()
         } else {
@@ -497,8 +511,8 @@ fn t02_basic() -> anyhow::Result<()> {
     state.launch()?;
 
     while !state.clients.iter().all(|client| client.close_loop.done) {
-        use crate::search::State;
-        println!("{:?}", state.events());
+        // use crate::search::State;
+        // println!("{:?}", state.events());
         state.step_simulate()?
     }
 
@@ -647,6 +661,60 @@ fn t06_progress_after_heal() -> anyhow::Result<()> {
     let index = state.push_client(workload, num_replica, num_faulty);
     state.launch_client(index)?;
     while !state.clients[index].close_loop.done {
+        state.step_simulate()?
+    }
+
+    Ok(())
+}
+
+#[test]
+fn t07_server_switches_partitions() -> anyhow::Result<()> {
+    let num_replica = 7;
+    let num_faulty = 2;
+    let mut state = State::<_, _>::new(num_replica, num_faulty);
+    let workload = static_workload([(Put("hello".into(), "world".into()), PutOk)].into_iter())?;
+    let index = state.push_client(workload, num_replica, num_faulty);
+    let mut state = state.map_filter(|filter| {
+        WithPartition(
+            filter,
+            vec![
+                Addr::Client(index as _),
+                Addr::Replica(0),
+                Addr::Replica(1),
+                Addr::Replica(2),
+                Addr::Replica(3),
+                Addr::Replica(4),
+            ],
+        )
+    });
+    state.launch_client(index)?;
+
+    while !state.clients[index].close_loop.done {
+        use crate::search::State;
+        println!("{:?}", state.events());
+        state.step_simulate()?
+    }
+
+    let workload = static_workload([(Get("hello".into()), GetResult("world".into()))].into_iter())?;
+    let index = state.push_client(workload, num_replica, num_faulty);
+    let mut state = state.map_filter(|_| AllowAll).map_filter(|filter| {
+        WithPartition(
+            filter,
+            vec![
+                Addr::Client(index as _),
+                Addr::Replica(2),
+                Addr::Replica(3),
+                Addr::Replica(4),
+                Addr::Replica(5),
+                Addr::Replica(6),
+            ],
+        )
+    });
+    state.launch_client(index)?;
+
+    while !state.clients[index].close_loop.done {
+        use crate::search::State;
+        println!("{:?}", state.events());
         state.step_simulate()?
     }
 
