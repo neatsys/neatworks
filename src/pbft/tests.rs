@@ -327,9 +327,7 @@ impl<W: Workload, F: Filter + Clone, const CHECK: bool> crate::search::State
                                 self.0.on_event(event, self.1)
                             }
                         }
-
-                        let replica = &mut self.replicas[index as usize];
-                        message.send(&mut Inline(replica, timer))?
+                        message.send(&mut Inline(&mut self.replicas[index as usize], timer))?
                     }
                     _ => anyhow::bail!("unimplemented"),
                 }
@@ -499,6 +497,8 @@ fn t02_basic() -> anyhow::Result<()> {
     state.launch()?;
 
     while !state.clients.iter().all(|client| client.close_loop.done) {
+        use crate::search::State;
+        println!("{:?}", state.events());
         state.step_simulate()?
     }
 
@@ -508,7 +508,7 @@ fn t02_basic() -> anyhow::Result<()> {
             continue;
         };
         num_prepared += 1;
-        anyhow::ensure!(entry.requests.first().unwrap().op == Payload(serde_json::to_vec(&op)?));
+        anyhow::ensure!(entry.requests.first().unwrap().op == Payload(serde_json::to_vec(&op)?))
     }
     anyhow::ensure!(num_prepared >= num_replica - num_faulty);
 

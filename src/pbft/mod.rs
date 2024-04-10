@@ -264,7 +264,13 @@ pub struct Replica<N, CN, CW, S, A, M = (N, CN, CW, S, A)> {
     replies: BTreeMap<u32, (u32, Option<Reply>)>,
     requests: Vec<Request<A>>,
     view_num: u32,
-    op_num: u32,
+    new_view: Option<Verifiable<NewView>>,
+    // convention: log[0] is unused offset and always LogEntry::default()
+    // log[op_num as usize].pre_prepare.op_num == op_num
+    // for no-op slot during view change, requests == Default::default() (i.e. empty vector)
+    // pre_prepare = Some(pre_prepare) where pre_prepare.digest = DIGEST_NO_OP
+    // DIGEST_NO_OP is probably not empty `requests`'s digest, but it's more convenient in this way
+    // better consistency design may be log[0] also has some `pre_prepare`, but i don't bother
     log: Vec<LogEntry<A>>,
     prepare_quorums: Quorums<u32, Prepare>, // `K` = op number
     commit_quorums: Quorums<u32, Commit>,
@@ -300,6 +306,8 @@ struct LogEntry<A> {
     timer_id: Option<TimerId>,
 }
 
+const NO_OP_DIGEST: H256 = H256::zero();
+
 impl<N, CN, CW, S, A> Replica<N, CN, CW, S, A> {
     pub fn new(
         id: u8,
@@ -322,7 +330,7 @@ impl<N, CN, CW, S, A> Replica<N, CN, CW, S, A> {
             replies: Default::default(),
             requests: Default::default(),
             view_num: 0,
-            op_num: 0,
+            new_view: Default::default(),
             log: Default::default(),
             prepare_quorums: Default::default(),
             commit_quorums: Default::default(),
@@ -343,12 +351,11 @@ impl<N, CN, CW, S, A, M> Replica<N, CN, CW, S, A, M> {
     }
 
     fn view_change(&self) -> bool {
-        self.view_num != 0
-            && self
-                .view_changes
-                .get(&self.view_num)
-                .map(|quorum| quorum.len() < self.num_replica - self.num_faulty)
-                .unwrap_or(true)
+        self.view_num != 0 && self.new_view.is_none()
+    }
+
+    fn op_num(&self) -> u32 {
+        (self.log.len() as u32).max(1)
     }
 
     const NUM_CONCURRENT_PRE_PREPARE: u32 = 1;
@@ -412,7 +419,7 @@ impl<M: ReplicaCommon> OnEvent<Recv<Request<M::A>>> for Replica<M::N, M::CN, M::
         }
         self.replies.insert(request.client_id, (request.seq, None));
         self.requests.push(request);
-        if self.op_num < self.commit_num + Self::NUM_CONCURRENT_PRE_PREPARE {
+        if self.op_num() <= self.commit_num + Self::NUM_CONCURRENT_PRE_PREPARE {
             self.close_batch()
         } else {
             Ok(())
@@ -424,13 +431,12 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     fn close_batch(&mut self) -> anyhow::Result<()> {
         assert!(self.is_primary());
         assert!(!self.requests.is_empty());
-        self.op_num += 1;
         let requests = self
             .requests
             .drain(..self.requests.len().min(100))
             .collect::<Vec<_>>();
         let view_num = self.view_num;
-        let op_num = self.op_num;
+        let op_num = self.op_num();
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
             let pre_prepare = PrePrepare {
                 view_num,
@@ -813,16 +819,18 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     ) -> anyhow::Result<()> {
         let commit_quorum = self.commit_quorums.entry(commit.op_num).or_default();
         commit_quorum.insert(commit.replica_id, commit.clone());
-        // println!(
-        //     "[{}] {} PrePrepare {} Commit {}",
-        //     self.id,
-        //     commit.op_num,
-        //     self.log.get(commit.op_num as usize).is_some(),
-        //     commit_quorum.len()
-        // );
+        println!(
+            "[{}] {} PrePrepare {} Commit {}",
+            self.id,
+            commit.op_num,
+            self.log.get(commit.op_num as usize).is_some(),
+            commit_quorum.len()
+        );
+
         if commit_quorum.len() < self.num_replica - self.num_faulty {
             return Ok(());
         }
+        let is_primary = self.is_primary();
         let Some(entry) = self.log.get_mut(commit.op_num as usize) else {
             return Ok(());
         };
@@ -830,24 +838,26 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
         if entry.prepares.is_empty() {
             return Ok(());
         }
-        entry.commits = self.commit_quorums.remove(&commit.op_num).unwrap();
 
-        let is_primary = self.is_primary();
+        entry.commits = self.commit_quorums.remove(&commit.op_num).unwrap();
+        println!("[{}] Commit {}", self.id, commit.op_num);
+        if is_primary {
+            timer.unset(
+                entry
+                    .timer_id
+                    .take()
+                    .ok_or(anyhow::anyhow!("missing progress timer"))?,
+            )?
+        } else if let Some(timer_id) = self.do_view_change_timer.take() {
+            timer.unset(timer_id)?
+        }
+
         while let Some(entry) = self.log.get_mut(self.commit_num as usize + 1) {
             if entry.commits.is_empty() {
                 break;
             }
             self.commit_num += 1;
-            // println!("[{}] Commit {}", self.id, self.commit_num);
-
-            if is_primary {
-                timer.unset(
-                    entry
-                        .timer_id
-                        .take()
-                        .ok_or(anyhow::anyhow!("missing progress timer"))?,
-                )?
-            }
+            println!("[{}] Execute {}", self.id, self.commit_num);
 
             for request in &entry.requests {
                 let result = Payload(self.app.execute(&request.op)?);
@@ -871,14 +881,13 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
                 self.client_net.send(request.client_addr.clone(), reply)?
             }
         }
+
         if self.is_primary() {
             while !self.requests.is_empty()
-                && self.op_num <= self.commit_num + Self::NUM_CONCURRENT_PRE_PREPARE
+                && self.op_num() <= self.commit_num + Self::NUM_CONCURRENT_PRE_PREPARE
             {
                 self.close_batch()?
             }
-        } else if let Some(timer_id) = self.do_view_change_timer.take() {
-            timer.unset(timer_id)?
         }
         Ok(())
     }
@@ -991,6 +1000,42 @@ impl<M: ReplicaCommon> OnEvent<Verified<ViewChange>>
     }
 }
 
+fn pre_prepares_for_view_changes(
+    view_num: u32,
+    view_changes: &Quorum<ViewChange>,
+) -> anyhow::Result<Vec<PrePrepare>> {
+    let mut redo_pre_prepares = BTreeMap::new();
+    for view_change in view_changes.values() {
+        for (prepared, _) in &view_change.log {
+            let pre_prepare =
+                redo_pre_prepares
+                    .entry(prepared.op_num)
+                    .or_insert_with(|| PrePrepare {
+                        view_num,
+                        op_num: prepared.op_num,
+                        digest: prepared.digest,
+                    });
+            anyhow::ensure!(
+                pre_prepare.digest == prepared.digest,
+                "prepared invariant violated"
+            )
+        }
+    }
+    let mut redo_pre_prepares = redo_pre_prepares.into_values();
+    let mut pre_prepares = redo_pre_prepares.next().into_iter().collect::<Vec<_>>();
+    for pre_prepare in redo_pre_prepares {
+        let last_op = pre_prepares.last().as_ref().unwrap().op_num;
+        assert!(last_op <= pre_prepare.op_num, "BTreeMap should be ordered");
+        pre_prepares.extend((last_op..pre_prepare.op_num).map(|op_num| PrePrepare {
+            view_num,
+            op_num,
+            digest: NO_OP_DIGEST,
+        }));
+        pre_prepares.push(pre_prepare)
+    }
+    Ok(pre_prepares)
+}
+
 impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     fn insert_view_change(
         &mut self,
@@ -999,7 +1044,9 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     ) -> anyhow::Result<()> {
         let quorum = self.view_changes.entry(view_change.view_num).or_default();
         quorum.insert(view_change.replica_id, view_change.clone());
-        if quorum.len() >= self.num_replica - self.num_faulty {
+        // poor man's job deduplication, make sure only "join" each view number at most once
+        // probably no liveness concern
+        if quorum.len() == self.num_replica - self.num_faulty {
             assert!(self.view_num < view_change.view_num);
             self.view_num = view_change.view_num;
             if let Some(timer_id) = self.do_view_change_timer.take() {
@@ -1007,13 +1054,16 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
             }
             let view_changes = quorum.clone();
             if self.is_primary() {
-                let new_view = NewView {
-                    view_num: self.view_num,
-                    view_changes,
-                    pre_prepares: Default::default(),
-                };
+                let view_num = self.view_num;
                 self.crypto_worker.submit(Box::new(move |crypto, sender| {
-                    // TODO add PrePrepares
+                    let new_view = NewView {
+                        view_num,
+                        pre_prepares: pre_prepares_for_view_changes(view_num, &view_changes)?
+                            .into_iter()
+                            .map(|pre_prepare| crypto.sign(pre_prepare))
+                            .collect(),
+                        view_changes,
+                    };
                     sender.send(Signed(crypto.sign(new_view)))
                 }))?
             } else {
@@ -1033,8 +1083,44 @@ impl<M: ReplicaCommon> OnEvent<Signed<NewView>> for Replica<M::N, M::CN, M::CW, 
     where
         Self: Sized,
     {
-        self.net.send(All, new_view)
-        // TODO do enter view
+        self.net.send(All, new_view.clone())?;
+        self.enter_view(new_view)
+    }
+}
+
+impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+    fn enter_view(&mut self, new_view: Verifiable<NewView>) -> anyhow::Result<()> {
+        assert!(self.view_change());
+        assert_eq!(new_view.view_num, self.view_num);
+        for pre_prepare in &new_view.pre_prepares {
+            // somehow duplicating `impl OnEvent<(Verified<PrePrepare>, Vec<Request<M::A>>)>`
+            // less concurrency management, but may require additional state transfer
+            if self.log.get(pre_prepare.op_num as usize).is_none() {
+                self.log
+                    .resize_with(pre_prepare.op_num as usize + 1, Default::default)
+            }
+            let log_entry = &mut self.log[pre_prepare.op_num as usize];
+            if let Some(prev_pre_prepare) = &mut log_entry.pre_prepare {
+                if prev_pre_prepare.digest != pre_prepare.digest {
+                    log_entry.pre_prepare = Some(pre_prepare.clone());
+                    log_entry.requests.clear()
+                }
+            }
+            if pre_prepare.digest != NO_OP_DIGEST && log_entry.requests.is_empty() {
+                anyhow::bail!("TODO state transfer")
+            }
+            let prepare = Prepare {
+                view_num: self.view_num,
+                op_num: pre_prepare.op_num,
+                digest: pre_prepare.digest,
+                replica_id: self.id,
+            };
+            self.crypto_worker.submit(Box::new(move |crypto, sender| {
+                sender.send(Signed(crypto.sign(prepare)))
+            }))?
+        }
+        self.new_view = Some(new_view);
+        Ok(())
     }
 }
 
@@ -1058,11 +1144,24 @@ impl<M: ReplicaCommon> OnEvent<Recv<Verifiable<NewView>>>
         let num_faulty = self.num_faulty;
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
             let do_verify = || {
+                let index = new_view.view_num as usize % num_replica;
+                crypto.verify(index, &new_view)?;
                 anyhow::ensure!(new_view.view_changes.len() >= num_replica - num_faulty);
                 for view_change in new_view.view_changes.values() {
                     verify_view_change(crypto, view_change, num_replica, num_faulty)?
                 }
-                // TODO PrePrepare semantic
+                for (pre_prepare, expected_pre_prepare) in
+                    new_view
+                        .pre_prepares
+                        .iter()
+                        .zip(pre_prepares_for_view_changes(
+                            new_view.view_num,
+                            &new_view.view_changes,
+                        )?)
+                {
+                    anyhow::ensure!(**pre_prepare == expected_pre_prepare);
+                    crypto.verify(index, pre_prepare)?;
+                }
                 anyhow::Result::<_>::Ok(())
             };
             if do_verify().is_ok() {
@@ -1088,11 +1187,7 @@ impl<M: ReplicaCommon> OnEvent<Verified<NewView>> for Replica<M::N, M::CN, M::CW
         {
             return Ok(());
         }
-        let new_view = new_view.into_inner();
-        self.view_changes
-            .insert(new_view.view_num, new_view.view_changes);
-        // TODO enter new view
-        Ok(())
+        self.enter_view(new_view)
     }
 }
 
