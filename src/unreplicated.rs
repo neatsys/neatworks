@@ -430,7 +430,6 @@ pub mod check {
             while replace(&mut rerun, false) {
                 self.message_events.extend(self.replica.net.drain(..));
                 for client in &mut self.clients {
-                    self.message_events.extend(client.state.net.drain(..));
                     for invoke in client.close_loop.sender.drain(..) {
                         rerun = true;
                         client.state.on_event(invoke, &mut client.timer)?
@@ -439,8 +438,13 @@ pub mod check {
                         rerun = true;
                         client.close_loop.on_event(upcall, &mut UnreachableTimer)?
                     }
+                    self.message_events.extend(client.state.net.drain(..));
                 }
             }
+            assert!(self.replica.net.is_empty());
+            assert!(self.clients.iter().all(|client| client.state.net.is_empty()
+                && client.state.upcall.is_empty()
+                && client.close_loop.sender.is_empty()));
             Ok(())
         }
     }

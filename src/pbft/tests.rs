@@ -22,11 +22,10 @@ use crate::{
         events::{Signed, Verified},
         Crypto,
         CryptoFlavor::Plain,
-        Verifiable,
     },
     event::{
         downcast::{self, DowncastEvent},
-        erased::{events::Init, OnEvent as _, OnEventRichTimer as _},
+        erased::{events::Init, OnEvent as _, OnEventRichTimer, RichTimer},
         linear, SendEvent, TimerId, Transient, UnreachableTimer,
     },
     net::{events::Recv, IndexNet, IterAddr, SendMessage},
@@ -38,7 +37,7 @@ use crate::{
 
 use super::{
     Commit, CryptoWorker, DoViewChange, NewView, PrePrepare, Prepare, Progress, Reply, Request,
-    Resend, ViewChange,
+    Resend, ToReplica, ViewChange,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -49,13 +48,10 @@ enum Addr {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, derive_more::From)]
 enum Message {
-    Request(Request<Addr>),
-    PrePrepare(Verifiable<PrePrepare>, Vec<Request<Addr>>),
-    Prepare(Verifiable<Prepare>),
-    Commit(Verifiable<Commit>),
-    Reply(Reply),
-    ViewChange(Verifiable<ViewChange>),
-    NewView(Verifiable<NewView>),
+    #[from(forward)]
+    ToReplica(ToReplica<Addr>),
+    #[from]
+    ToClient(Reply),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -320,24 +316,20 @@ impl<W: Workload, F: Filter + Clone, const CHECK: bool> crate::search::State
                     .get_mut(&event.dest)
                     .ok_or(anyhow::anyhow!("missing timer for {:?}", event.dest))?;
                 match (event.dest, event.message) {
-                    (Addr::Client(index), Message::Reply(message)) => self.clients[index as usize]
+                    (Addr::Client(index), Message::ToClient(message)) => self.clients
+                        [index as usize]
                         .state
                         .on_event(Recv(message), timer)?,
-                    (Addr::Replica(index), message) => {
-                        let replica = &mut self.replicas[index as usize];
-                        match message {
-                            Message::Request(message) => replica.on_event(Recv(message), timer)?,
-                            Message::PrePrepare(pre_prepare, requests) => {
-                                replica.on_event(Recv((pre_prepare, requests)), timer)?
+                    (Addr::Replica(index), Message::ToReplica(message)) => {
+                        struct Inline<'a, S, T>(&'a mut S, &'a mut T);
+                        impl<S: OnEventRichTimer<M>, M, T: RichTimer<S>> SendEvent<M> for Inline<'_, S, T> {
+                            fn send(&mut self, event: M) -> anyhow::Result<()> {
+                                self.0.on_event(event, self.1)
                             }
-                            Message::Prepare(message) => replica.on_event(Recv(message), timer)?,
-                            Message::Commit(message) => replica.on_event(Recv(message), timer)?,
-                            Message::ViewChange(message) => {
-                                replica.on_event(Recv(message), timer)?
-                            }
-                            Message::NewView(message) => replica.on_event(Recv(message), timer)?,
-                            _ => anyhow::bail!("unimplemented"),
                         }
+
+                        let replica = &mut self.replicas[index as usize];
+                        message.send(&mut Inline(replica, timer))?
                     }
                     _ => anyhow::bail!("unimplemented"),
                 }
@@ -389,13 +381,6 @@ impl<W: Workload, F: Filter, const CHECK: bool> State<W, F, CHECK> {
         while replace(&mut rerun, false) {
             for (index, replica) in self.replicas.iter_mut().enumerate() {
                 let addr = Addr::Replica(index as _);
-                self.message_events.extend(
-                    replica
-                        .net
-                        .drain(..)
-                        .filter(|event| self.filter.deliver_message(addr, event)),
-                );
-                self.message_events.extend(replica.client_net.drain(..));
                 let Worker::Inline(_, events) = &mut replica.crypto_worker.0 else {
                     unreachable!()
                 };
@@ -432,16 +417,16 @@ impl<W: Workload, F: Filter, const CHECK: bool> State<W, F, CHECK> {
                         }
                     }
                 }
-            }
-            for (index, client) in self.clients.iter_mut().enumerate() {
-                let addr = Addr::Client(index as _);
                 self.message_events.extend(
-                    client
-                        .state
+                    replica
                         .net
                         .drain(..)
                         .filter(|event| self.filter.deliver_message(addr, event)),
                 );
+                self.message_events.extend(replica.client_net.drain(..))
+            }
+            for (index, client) in self.clients.iter_mut().enumerate() {
+                let addr = Addr::Client(index as _);
                 let timer = self
                     .timers
                     .get_mut(&addr)
@@ -454,8 +439,23 @@ impl<W: Workload, F: Filter, const CHECK: bool> State<W, F, CHECK> {
                     rerun = true;
                     client.close_loop.on_event(upcall, &mut UnreachableTimer)?
                 }
+                self.message_events.extend(
+                    client
+                        .state
+                        .net
+                        .drain(..)
+                        .filter(|event| self.filter.deliver_message(addr, event)),
+                )
             }
         }
+        // TODO assert crypto
+        assert!(self
+            .replicas
+            .iter()
+            .all(|replica| replica.net.is_empty() && replica.client_net.is_empty()));
+        assert!(self.clients.iter().all(|client| client.state.net.is_empty()
+            && client.state.upcall.is_empty()
+            && client.close_loop.sender.is_empty()));
         Ok(())
     }
 }

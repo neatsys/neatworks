@@ -73,6 +73,8 @@ pub mod workload;
 // `src/` that every single line of code lives in. (until it spends whole night
 // to finish compiling.)
 // T_{`cargo build` after no-op update e.g. editing this note} = 10.59s
+// (from some point (maybe even the very beginning) this trick does not trigger
+// any recompilation anymore, the time measured is purely linking time)
 //
 // the reason to have a separate `tools` is because those code are for distinct
 // purpose. the main part of this codebase is distributed code, that should be

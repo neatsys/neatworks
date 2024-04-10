@@ -1105,7 +1105,9 @@ pub fn to_client_on_buf(
     sender.send(Recv(deserialize(buf)?))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, derive_more::From)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, derive_more::From,
+)]
 pub enum ToReplica<A> {
     Request(Request<A>),
     PrePrepare(Verifiable<PrePrepare>, Vec<Request<A>>),
@@ -1138,18 +1140,24 @@ impl<
 {
 }
 
+impl<A> ToReplica<A> {
+    fn send(self, sender: &mut impl SendReplicaRecvEvent<A>) -> anyhow::Result<()> {
+        match self {
+            ToReplica::Request(message) => sender.send(Recv(message)),
+            ToReplica::PrePrepare(message, requests) => sender.send(Recv((message, requests))),
+            ToReplica::Prepare(message) => sender.send(Recv(message)),
+            ToReplica::Commit(message) => sender.send(Recv(message)),
+            ToReplica::ViewChange(message) => sender.send(Recv(message)),
+            ToReplica::NewView(message) => sender.send(Recv(message)),
+        }
+    }
+}
+
 pub fn to_replica_on_buf<A: Addr>(
     buf: &[u8],
     sender: &mut impl SendReplicaRecvEvent<A>,
 ) -> anyhow::Result<()> {
-    match deserialize(buf)? {
-        ToReplica::Request(message) => sender.send(Recv(message)),
-        ToReplica::PrePrepare(message, requests) => sender.send(Recv((message, requests))),
-        ToReplica::Prepare(message) => sender.send(Recv(message)),
-        ToReplica::Commit(message) => sender.send(Recv(message)),
-        ToReplica::ViewChange(message) => sender.send(Recv(message)),
-        ToReplica::NewView(message) => sender.send(Recv(message)),
-    }
+    deserialize::<ToReplica<A>>(buf)?.send(sender)
 }
 
 #[cfg(test)]
