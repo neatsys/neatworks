@@ -898,14 +898,19 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
             timer.unset(timer_id)?
         }
 
-        while let Some(entry) = self.log.get_mut(self.commit_num as usize + 1) {
-            if entry.commits.is_empty() {
+        while let Some(log_entry) = self.log.get_mut(self.commit_num as usize + 1) {
+            if log_entry.commits.is_empty() {
+                break;
+            }
+            if log_entry.pre_prepare.as_ref().unwrap().digest != NO_OP_DIGEST
+                && log_entry.requests.is_empty()
+            {
                 break;
             }
             self.commit_num += 1;
             // println!("[{}] Execute {}", self.id, self.commit_num);
 
-            for request in &entry.requests {
+            for request in &log_entry.requests {
                 let result = Payload(self.app.execute(&request.op)?);
                 if self
                     .results
@@ -919,7 +924,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
                 let reply = Reply {
                     seq: request.seq,
                     result,
-                    view_num: entry.pre_prepare.as_ref().unwrap().view_num,
+                    view_num: log_entry.pre_prepare.as_ref().unwrap().view_num,
                     replica_id: self.id,
                 };
                 self.client_net.send(request.client_addr.clone(), reply)?
@@ -932,6 +937,8 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
             {
                 self.close_batch()?
             }
+        } else if commit.op_num - Self::NUM_CONCURRENT_PRE_PREPARE > self.commit_num {
+            anyhow::bail!("state transfer")
         }
         Ok(())
     }
@@ -1234,9 +1241,6 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
             log_entry.pre_prepare = Some(pre_prepare.clone());
             log_entry.prepares.clear();
             log_entry.commits.clear();
-            if pre_prepare.digest != NO_OP_DIGEST && log_entry.requests.is_empty() {
-                anyhow::bail!("TODO state transfer")
-            }
             // i don't know whether this is possible on primary, maybe the view change happens to
             // rotate back to the original primary? = =
             // just get ready for anything weird that may (i.e. will) happen during model
@@ -1244,7 +1248,6 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
             if let Some(timer_id) = log_entry.progress_timer.take() {
                 timer.unset(timer_id)?
             }
-
             if is_primary {
                 log_entry.progress_timer = Some(timer.set(
                     CLIENT_RESEND_INTERVAL / 5,
