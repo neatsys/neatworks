@@ -75,9 +75,20 @@ impl<N: Into<M>, M> SendEvent<N> for Transient<M> {
 
 // pub type TimerId = u32;
 // intentionally switch to a non-Copy newtype to mitigate use after free, that
-// is, calling `unset` consume the TimerId so the timer cannot be referred
-// anymore
-// this does not solve leak though so Clone is permitted
+// is, calling `unset` will consume the TimerId so one timer cannot be unset
+// multiple times (although runtime check will still catch it)
+// `Clone` remains here because it has to: during model checking the network
+// state, which probably contains a lot of `TimerId`s on application side, must
+// be cloned (a lot). we surely can invent our own cloning mechanism that
+// dedicated for model checking, but that would incur too much boilerplate and
+// does not seem to pay off
+// in conclusion the runtime check mentioned above is still necessary because of
+// the existence of this `Clone` "backdoor", and the ownership is only for
+// preventing silly mistakes
+// besides `#[derive(Clone)]` scenario, it's always recommended to unpack the
+// `TimerId` (as long as you have the access), clone (actually copy) the inner
+// integer, then pack it back. the more involved procedure more clearly shows
+// you know what you are doing
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TimerId(u32);
 

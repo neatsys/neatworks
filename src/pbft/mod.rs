@@ -66,6 +66,12 @@ pub struct NewView {
     // new primary should always send nonempty `pre_prepares`, pad a no-op if necessary
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct QueryNewView {
+    view_num: u32,
+    replica_id: u8,
+}
+
 pub trait ToReplicaNet<A>:
     SendMessage<u8, Request<A>>
     + SendMessage<All, Request<A>>
@@ -74,6 +80,8 @@ pub trait ToReplicaNet<A>:
     + SendMessage<All, Verifiable<Commit>>
     + SendMessage<All, Verifiable<ViewChange>>
     + SendMessage<All, Verifiable<NewView>>
+    + SendMessage<u8, QueryNewView>
+    + SendMessage<u8, Verifiable<NewView>>
 {
 }
 impl<
@@ -83,7 +91,9 @@ impl<
             + SendMessage<All, Verifiable<Prepare>>
             + SendMessage<All, Verifiable<Commit>>
             + SendMessage<All, Verifiable<ViewChange>>
-            + SendMessage<All, Verifiable<NewView>>,
+            + SendMessage<All, Verifiable<NewView>>
+            + SendMessage<u8, QueryNewView>
+            + SendMessage<u8, Verifiable<NewView>>,
         A,
     > ToReplicaNet<A> for T
 {
@@ -526,8 +536,15 @@ impl<M: ReplicaCommon> OnEvent<Recv<(Verifiable<PrePrepare>, Vec<Request<M::A>>)
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if pre_prepare.view_num != self.view_num || self.view_change() {
-            if pre_prepare.view_num > self.view_num {
-                todo!("state transfer to enter view")
+            if pre_prepare.view_num >= self.view_num {
+                let query_new_view = QueryNewView {
+                    view_num: pre_prepare.view_num,
+                    replica_id: self.id,
+                };
+                self.net.send(
+                    (pre_prepare.view_num as usize % self.num_replica) as u8,
+                    query_new_view,
+                )?
             }
             return Ok(());
         }
@@ -645,8 +662,12 @@ impl<M: ReplicaCommon> OnEvent<Recv<Verifiable<Prepare>>>
 impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     fn submit_prepare(&mut self, prepare: Verifiable<Prepare>) -> anyhow::Result<bool> {
         if prepare.view_num != self.view_num || self.view_change() {
-            if prepare.view_num > self.view_num {
-                todo!("state transfer to enter view")
+            if prepare.view_num >= self.view_num {
+                let query_new_view = QueryNewView {
+                    view_num: prepare.view_num,
+                    replica_id: self.id,
+                };
+                self.net.send(prepare.replica_id, query_new_view)?
             }
             return Ok(false);
         }
@@ -773,8 +794,12 @@ impl<M: ReplicaCommon> OnEvent<Recv<Verifiable<Commit>>>
 impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     fn submit_commit(&mut self, commit: Verifiable<Commit>) -> anyhow::Result<bool> {
         if commit.view_num != self.view_num || self.view_change() {
-            if commit.view_num > self.view_num {
-                todo!("state transfer to enter view")
+            if commit.view_num >= self.view_num {
+                let query_new_view = QueryNewView {
+                    view_num: commit.view_num,
+                    replica_id: self.id,
+                };
+                self.net.send(commit.replica_id, query_new_view)?
             }
             return Ok(false);
         }
@@ -902,6 +927,22 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
             {
                 self.close_batch()?
             }
+        }
+        Ok(())
+    }
+}
+
+impl<M: ReplicaCommon> OnEvent<Recv<QueryNewView>> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+    fn on_event(
+        &mut self,
+        Recv(query_new_view): Recv<QueryNewView>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()>
+    where
+        Self: Sized,
+    {
+        if let Some(new_view) = self.new_views.get(&query_new_view.view_num) {
+            self.net.send(query_new_view.replica_id, new_view.clone())?
         }
         Ok(())
     }
@@ -1304,10 +1345,12 @@ impl<M: ReplicaCommon> OnEvent<Verified<NewView>> for Replica<M::N, M::CN, M::CW
     where
         Self: Sized,
     {
-        if self.view_num == new_view.view_num && self.view_change() {
-            self.enter_view(new_view, timer)?
+        if self.view_num > new_view.view_num
+            || self.view_num == new_view.view_num && !self.view_change()
+        {
+            return Ok(());
         }
-        Ok(())
+        self.enter_view(new_view, timer)
     }
 }
 
@@ -1330,6 +1373,7 @@ pub enum ToReplica<A> {
     Commit(Verifiable<Commit>),
     ViewChange(Verifiable<ViewChange>),
     NewView(Verifiable<NewView>),
+    QueryNewView(QueryNewView),
 }
 
 pub type ToReplicaMessageNet<T, A> = MessageNet<T, ToReplica<A>>;
@@ -1341,6 +1385,7 @@ pub trait SendReplicaRecvEvent<A>:
     + SendEvent<Recv<Verifiable<Commit>>>
     + SendEvent<Recv<Verifiable<ViewChange>>>
     + SendEvent<Recv<Verifiable<NewView>>>
+    + SendEvent<Recv<QueryNewView>>
 {
 }
 impl<
@@ -1349,7 +1394,8 @@ impl<
             + SendEvent<Recv<Verifiable<Prepare>>>
             + SendEvent<Recv<Verifiable<Commit>>>
             + SendEvent<Recv<Verifiable<ViewChange>>>
-            + SendEvent<Recv<Verifiable<NewView>>>,
+            + SendEvent<Recv<Verifiable<NewView>>>
+            + SendEvent<Recv<QueryNewView>>,
         A,
     > SendReplicaRecvEvent<A> for T
 {
@@ -1364,6 +1410,7 @@ impl<A> ToReplica<A> {
             ToReplica::Commit(message) => sender.send(Recv(message)),
             ToReplica::ViewChange(message) => sender.send(Recv(message)),
             ToReplica::NewView(message) => sender.send(Recv(message)),
+            ToReplica::QueryNewView(message) => sender.send(Recv(message)),
         }
     }
 }
