@@ -66,6 +66,10 @@ pub struct NewView {
     // new primary should always send nonempty `pre_prepares`, pad a no-op if necessary
 }
 
+// TODO currently every NewView covers the "whole history", so a single NewView can bring a replica
+// into the view no matter where it previously was at
+// after checkpoint is implemented, QueryNewView should be with the latest checkpoint this replica
+// knows, and all the necessary sub-map of the `new_views` should be replied
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct QueryNewView {
     view_num: u32,
@@ -559,10 +563,11 @@ impl<M: ReplicaCommon> OnEvent<Recv<(Verifiable<PrePrepare>, Vec<Request<M::A>>)
 
         // a decent implementation probably should throttle here (as well as for prepares and
         // commits) in order to mitigate faulty proposals
-        // omitted since (again) that only on slow path
+        // omitted since (again) that's only on slow path
         let replica_id = pre_prepare.view_num as usize % self.num_replica;
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
-            if requests.sha256() == pre_prepare.digest
+            if (requests.sha256() == pre_prepare.digest
+                || requests.is_empty() && pre_prepare.digest == NO_OP_DIGEST)
                 && crypto.verify(replica_id, &pre_prepare).is_ok()
             {
                 sender.send((Verified(pre_prepare), requests))
@@ -1208,10 +1213,9 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
         new_view: Verifiable<NewView>,
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
+        assert!(new_view.view_num >= self.view_num);
+        self.view_num = new_view.view_num;
         assert!(self.view_change());
-        assert_eq!(new_view.view_num, self.view_num);
-        self.prepare_quorums.clear();
-        self.commit_quorums.clear();
         for pre_prepare in &new_view.pre_prepares {
             // somehow duplicating `impl OnEvent<(Verified<PrePrepare>, Vec<Request<M::A>>)>`
             // less concurrency management, but may require additional state transfer
@@ -1261,8 +1265,9 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
         }
         if let Some(log_entries) = self
             .log
-            .get_mut(new_view.pre_prepares.last().as_ref().unwrap().op_num as usize..)
+            .get_mut(new_view.pre_prepares.last().as_ref().unwrap().op_num as usize + 1..)
         {
+            // feel lazy to index it again with `drain`
             for log_entry in log_entries {
                 if let Some(timer_id) = log_entry.progress_timer.take() {
                     timer.unset(timer_id)?
@@ -1270,7 +1275,10 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
                 *log_entry = Default::default()
             }
         }
-        self.new_views.insert(self.view_num, new_view);
+
+        self.requests.clear();
+        self.prepare_quorums.clear();
+        self.commit_quorums.clear();
         if let Some(timer_id) = self.do_view_change_timer.take() {
             timer.unset(timer_id)?
         }
@@ -1283,6 +1291,8 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
             }
             self.view_changes.pop_first();
         }
+
+        self.new_views.insert(self.view_num, new_view);
         Ok(())
     }
 }
