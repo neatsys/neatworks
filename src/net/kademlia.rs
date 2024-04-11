@@ -20,34 +20,36 @@ pub struct PeerNet<E>(pub E);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Multicast<A = Target>(pub A, pub NonZeroUsize);
 
-// SendMessage<A, M>: unicast M to A
-// SendMessage<Multicast<A>, M>: multicast M to A
-// wrap unicast with some Unicast<A> as well?
+// SendMessage<PeerId, M>: unicast M to PeerId
+// SendMessage<Multicast<Target>, M>: multicast M to Target
+// it is confusing to actually enforce PeerId and Target must be the same type,
+// while keep calling them with difference names everywhere
+// wrap unicast with some Unicast<PeerId> as well?
+// is it useful to have a variant that exclude sender from receivers i.e.
+// similar to `All`?
 impl<E: SendEvent<(A, M)>, A, M> SendMessage<A, M> for PeerNet<E> {
     fn send(&mut self, dest: A, message: M) -> anyhow::Result<()> {
         self.0.send((dest, message))
     }
 }
 
-// is it useful to have a variant that exclude sender from receivers i.e.
-// similar to `All`?
-
 pub trait Net<A, M>: SendMessage<A, M> + for<'a> SendMessageToEach<A, M> {}
 impl<T: SendMessage<A, M> + for<'a> SendMessageToEach<A, M>, A, M> Net<A, M> for T {}
 
-#[derive_where(Debug; M, A, B, B: Eq + Hash)] // awesome!
-pub struct Control<M, A, B = [u8; 32]> {
-    #[derive_where(skip)]
-    inner_net: Box<dyn Net<A, M> + Send + Sync>,
-    #[derive_where(skip)]
-    peer: Box<dyn SendEvent<Query> + Send + Sync>, // sender handle of a kademlia Peer
+#[derive_where(Debug; N, P, M, A, B, B: Eq + Hash)] // awesome!
+pub struct Control<N, P, M, A, B = [u8; 32], _M = (N, P, M, A)> {
+    inner_net: N,
+    peer: P, // a kademlia `Peer`
+
     querying_unicasts: HashMap<B, QueryingUnicast<M>>,
-    querying_multicasts: HashMap<B, QueryMulticast<M>>,
+    querying_multicasts: HashMap<B, QueryingMulticast<M>>,
     pending_multicasts: HashMap<B, Vec<(NonZeroUsize, M)>>,
     // addresses that recently send messages to
     // assuming temporal locality of addresses: those sent addresses are more likely to be sent to
     // (again) later
     addrs: LruCache<B, A>,
+
+    _m: std::marker::PhantomData<_M>,
 }
 
 #[derive(Debug)]
@@ -57,21 +59,18 @@ struct QueryingUnicast<M> {
 }
 
 #[derive(Debug)]
-struct QueryMulticast<M> {
+struct QueryingMulticast<M> {
     count: NonZeroUsize,
     messages: Vec<(NonZeroUsize, M)>,
     timer: TimerId,
 }
 
-impl<M, A, B: Eq + Hash> Control<M, A, B> {
+impl<N, P, M, A, B: Eq + Hash> Control<N, P, M, A, B> {
     // peer must have finished bootstrap
-    pub fn new(
-        inner_net: impl Net<A, M> + Send + Sync + 'static,
-        peer: impl SendEvent<Query> + Send + Sync + 'static,
-    ) -> Self {
+    pub fn new(inner_net: N, peer: P) -> Self {
         Self {
-            inner_net: Box::new(inner_net),
-            peer: Box::new(peer),
+            inner_net,
+            peer,
             querying_unicasts: Default::default(),
             querying_multicasts: Default::default(),
             pending_multicasts: Default::default(),
@@ -79,8 +78,29 @@ impl<M, A, B: Eq + Hash> Control<M, A, B> {
             // in entropy an address may be unicast after it has been multicast, and the multicast
             // has at most 120 receivers
             addrs: LruCache::new(160.try_into().unwrap()),
+            _m: Default::default(),
         }
     }
+}
+
+pub trait ControlCommon {
+    type N: Net<Self::A, Self::M>;
+    type P: SendEvent<Query>;
+    type M: Clone;
+    type A: Addr;
+}
+
+impl<N, P, M, A> ControlCommon for (N, P, M, A)
+where
+    N: Net<A, M>,
+    P: SendEvent<Query>,
+    M: Clone,
+    A: Addr,
+{
+    type N = N;
+    type P = P;
+    type M = M;
+    type A = A;
 }
 
 #[derive(Debug, Clone)]
@@ -88,10 +108,10 @@ pub struct QueryTimeout(pub Query);
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 
-impl<M, A: Addr> OnEvent<(PeerId, M)> for Control<M, A, PeerId> {
+impl<M: ControlCommon> OnEvent<(PeerId, M::M)> for Control<M::N, M::P, M::M, M::A, PeerId, M> {
     fn on_event(
         &mut self,
-        (peer_id, message): (PeerId, M),
+        (peer_id, message): (PeerId, M::M),
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         if let Some(addr) = self.addrs.get(&peer_id) {
@@ -120,10 +140,12 @@ impl<M, A: Addr> OnEvent<(PeerId, M)> for Control<M, A, PeerId> {
     }
 }
 
-impl<M, A> OnEvent<(Multicast<Target>, M)> for Control<M, A, Target> {
+impl<M: ControlCommon> OnEvent<(Multicast<Target>, M::M)>
+    for Control<M::N, M::P, M::M, M::A, Target, M>
+{
     fn on_event(
         &mut self,
-        (Multicast(target, count), message): (Multicast<Target>, M),
+        (Multicast(target, count), message): (Multicast<Target>, M::M),
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         // eprintln!("Multicast({}, {count})", H256(target));
@@ -149,7 +171,7 @@ impl<M, A> OnEvent<(Multicast<Target>, M)> for Control<M, A, Target> {
         self.peer.send(query)?;
         self.querying_multicasts.insert(
             target,
-            QueryMulticast {
+            QueryingMulticast {
                 count,
                 messages: vec![(count, message)],
                 timer: timer.set(QUERY_TIMEOUT, QueryTimeout(query))?,
@@ -159,7 +181,7 @@ impl<M, A> OnEvent<(Multicast<Target>, M)> for Control<M, A, Target> {
     }
 }
 
-impl<M, A, B> OnEvent<QueryTimeout> for Control<M, A, B> {
+impl<M: ControlCommon, B> OnEvent<QueryTimeout> for Control<M::N, M::P, M::M, M::A, B, M> {
     fn on_event(
         &mut self,
         QueryTimeout(Query(target, count)): QueryTimeout,
@@ -173,10 +195,10 @@ impl<M, A, B> OnEvent<QueryTimeout> for Control<M, A, B> {
     }
 }
 
-impl<M: Clone, A: Addr> OnEvent<QueryResult<A>> for Control<M, A, PeerId> {
+impl<M: ControlCommon> OnEvent<QueryResult<M::A>> for Control<M::N, M::P, M::M, M::A, PeerId, M> {
     fn on_event(
         &mut self,
-        upcall: QueryResult<A>,
+        upcall: QueryResult<M::A>,
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         // eprintln!("{upcall:?}");
@@ -226,7 +248,7 @@ impl<M: Clone, A: Addr> OnEvent<QueryResult<A>> for Control<M, A, PeerId> {
             self.peer.send(query)?;
             self.querying_multicasts.insert(
                 upcall.target,
-                QueryMulticast {
+                QueryingMulticast {
                     count,
                     messages: multicasts,
                     timer: timer.set(QUERY_TIMEOUT, QueryTimeout(query))?,

@@ -7,10 +7,11 @@ use augustus::{
             session::{Buffered, Sender},
             Blanket, Session,
         },
-        SendEvent as _,
+        SendEvent,
     },
     kademlia::{
-        Buckets, CryptoWorker, FindPeer, FindPeerOk, Peer, PeerId, PeerRecord, SendCryptoEvent,
+        Buckets, CryptoWorker, FindPeer, FindPeerOk, Peer, PeerId, PeerRecord, Query,
+        SendCryptoEvent,
     },
     net::{
         events::Recv,
@@ -138,8 +139,8 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let mut control = Blanket(Buffered::from(Control::new(
-        augustus::net::MessageNet::<_, Message>::new(socket_net.clone()),
-        Sender::from(peer_session.sender()),
+        MessageNet::new(socket_net.clone()),
+        Box::new(Sender::from(peer_session.sender())) as Box<dyn SendEvent<Query> + Send + Sync>,
     )));
     let mut peer = Blanket(Buffered::from(peer));
     let peer_session = peer_session.run(&mut peer);
