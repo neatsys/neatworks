@@ -16,7 +16,7 @@ use derive_where::derive_where;
 use crate::{
     event::{
         erased::{events::Init, OnEvent},
-        OnTimer, SendEvent, SendEventOnce, Timer, Void,
+        OnTimer, SendEvent, SendEventOnce, Timer, BlackHole,
     },
     util::Payload,
 };
@@ -222,7 +222,7 @@ pub struct Stop;
 
 #[derive(Debug, Clone)]
 #[derive_where(PartialEq, Eq, Hash; W::Attach, E, SE)]
-pub struct CloseLoop<W: Workload, E, SE = Void> {
+pub struct CloseLoop<W: Workload, E, SE = BlackHole> {
     pub sender: E,
     // don't consider `workload` state for comparing, this is aligned with how DSLabs also ignores
     // workload in its `ClientWorker`
@@ -241,7 +241,7 @@ impl<W: Workload, E> CloseLoop<W, E> {
             sender,
             workload,
             workload_attach: None,
-            stop_sender: Some(Void),
+            stop_sender: Some(BlackHole),
             done: false,
         }
     }

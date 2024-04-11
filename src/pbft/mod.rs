@@ -191,6 +191,8 @@ impl<N, U: SendEvent<InvokeOk>, A> OnEvent<Recv<Reply>> for Client<N, U, A> {
             .count()
             == self.num_faulty + 1
         {
+            // paper is not saying what does it mean by "what it believes is the current primary"
+            // taking min or max or the view numbers both seems wrong, so i choose to design nothing
             self.view_num = reply.view_num;
             let invoke = self.invoke.take().unwrap();
             timer.unset(invoke.resend_timer)?;
@@ -212,7 +214,6 @@ impl<N, U, A: Addr> Client<N, U, A> {
             seq: self.seq,
             op: self.invoke.as_ref().unwrap().op.clone(),
         };
-        // either this or add `Send + Sync` in trait bound above. i choose this
         self.net.send(dest, request)
     }
 }
@@ -277,7 +278,7 @@ pub struct Replica<N, CN, CW, S, A, M = (N, CN, CW, S, A)> {
     num_replica: usize,
     num_faulty: usize,
 
-    results: BTreeMap<u32, (u32, Option<Payload>)>, // client id -> (seq, result)
+    results: BTreeMap<u32, (u32, Option<Reply>)>, // client id -> (seq, result)
     requests: Vec<Request<A>>,
     view_num: u32,
     new_views: BTreeMap<u32, Verifiable<NewView>>,
@@ -417,15 +418,9 @@ impl<M: ReplicaCommon> OnEvent<Recv<Request<M::A>>> for Replica<M::N, M::CN, M::
         }
         match self.results.get(&request.client_id) {
             Some((seq, _)) if *seq > request.seq => return Ok(()),
-            Some((seq, result)) if *seq == request.seq => {
-                if let Some(result) = result {
-                    let reply = Reply {
-                        seq: request.seq,
-                        result: result.clone(),
-                        view_num: self.view_num,
-                        replica_id: self.id,
-                    };
-                    self.client_net.send(request.client_addr, reply)?
+            Some((seq, reply)) if *seq == request.seq => {
+                if let Some(reply) = reply {
+                    self.client_net.send(request.client_addr, reply.clone())?
                 }
                 return Ok(());
             }
@@ -911,22 +906,18 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
             // println!("[{}] Execute {}", self.id, self.commit_num);
 
             for request in &log_entry.requests {
-                let result = Payload(self.app.execute(&request.op)?);
-                if self
-                    .results
-                    .get(&request.client_id)
-                    .map(|(seq, _)| *seq <= request.seq)
-                    .unwrap_or(true)
-                {
-                    self.results
-                        .insert(request.client_id, (request.seq, Some(result.clone())));
-                }
                 let reply = Reply {
                     seq: request.seq,
-                    result,
+                    result: Payload(self.app.execute(&request.op)?),
                     view_num: log_entry.pre_prepare.as_ref().unwrap().view_num,
                     replica_id: self.id,
                 };
+                let replaced = self
+                    .results
+                    .insert(request.client_id, (request.seq, Some(reply.clone())));
+                if let Some((seq, reply)) = replaced {
+                    assert!(seq < request.seq || seq == request.seq && reply.is_none());
+                }
                 self.client_net.send(request.client_addr.clone(), reply)?
             }
         }

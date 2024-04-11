@@ -783,7 +783,7 @@ mod tests {
     use proptest::prelude::*;
     use rand::thread_rng;
 
-    use crate::{event::Void, net::IterAddr, worker::Worker};
+    use crate::{event::BlackHole, worker::Worker};
 
     use super::*;
 
@@ -851,24 +851,6 @@ mod tests {
         }
     }
 
-    struct NullNet;
-    impl SendMessage<IterAddr<'_, ()>, Verifiable<FindPeer<()>>> for NullNet {
-        fn send(&mut self, _: IterAddr<'_, ()>, _: Verifiable<FindPeer<()>>) -> anyhow::Result<()> {
-            Ok(())
-        }
-    }
-    impl SendMessage<(), Verifiable<FindPeerOk<()>>> for NullNet {
-        fn send(&mut self, (): (), _: Verifiable<FindPeerOk<()>>) -> anyhow::Result<()> {
-            Ok(())
-        }
-    }
-    struct NullUpcall;
-    impl SendEvent<QueryResult<()>> for NullUpcall {
-        fn send(&mut self, _: QueryResult<()>) -> anyhow::Result<()> {
-            Ok(())
-        }
-    }
-
     // there's `thread_rng()` inside `refresh_buckets` implementation so it cannot be easily convert
     // into property test
     #[test]
@@ -877,9 +859,9 @@ mod tests {
         let buckets = Buckets::new(origin.clone());
         let mut peer = Peer::new(
             buckets,
-            NullNet,
-            NullUpcall,
-            CryptoWorker::<_, Void>::from(Worker::Null),
+            BlackHole,
+            BlackHole,
+            CryptoWorker::<_, BlackHole>::from(Worker::Null),
         );
         peer.refresh_buckets()
     }

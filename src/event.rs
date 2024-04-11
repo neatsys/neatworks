@@ -29,9 +29,9 @@ impl<T: ?Sized + SendEvent<M>, M> SendEvent<M> for Box<T> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Void; // for testing
+pub struct BlackHole; // for testing
 
-impl<M> SendEvent<M> for Void {
+impl<M> SendEvent<M> for BlackHole {
     fn send(&mut self, _: M) -> anyhow::Result<()> {
         Ok(())
     }

@@ -23,7 +23,7 @@ use bytes::Bytes;
 use derive_where::derive_where;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use crate::event::SendEvent;
+use crate::event::{BlackHole, SendEvent};
 
 pub trait Addr:
     Send + Sync + Clone + Eq + Hash + Debug + Serialize + DeserializeOwned + 'static
@@ -77,6 +77,12 @@ pub trait SendMessage<A, M> {
     // message before serialization to do the trick, to e.g. enjoy type safety. certain
     // transformation e.g. `Into` is easy to use and requires owned messages, so the trait follows
     fn send(&mut self, dest: A, message: M) -> anyhow::Result<()>;
+}
+
+impl<A, M> SendMessage<A, M> for BlackHole {
+    fn send(&mut self, _: A, _: M) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 impl<T: ?Sized + SendMessage<A, M>, A, M> SendMessage<A, M> for Box<T> {
@@ -211,3 +217,5 @@ impl<N: for<'a> SendMessageToEach<A, M>, A: Addr, M> SendMessage<All, M> for Ind
         self.inner_net.send_to_each(addrs, message)
     }
 }
+
+// cSpell:words oneshot kademlia bincode
