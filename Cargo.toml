@@ -51,7 +51,6 @@ tracing = "0.1.40"
 tracing-subscriber = "0.3.18"
 # search
 crossbeam-queue = "0.3.11"
-dashmap = "5.5.3"
 rustc-hash = "1.1.0"
 tikv-jemallocator = "0.5.4"
 # kademlia net
@@ -78,6 +77,7 @@ rcgen = { git = "https://github.com/rustls/rcgen", version = "0.13.0", features 
 ] }
 
 replication-control-messages = { version = "0.1.0", path = "tools/replication-control-messages" }
+scc = "2.0.19"
 
 [dev-dependencies]
 proptest = "1.4.0"

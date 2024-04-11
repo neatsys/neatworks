@@ -86,6 +86,7 @@ impl<M: Into<Message> + Clone> SendMessage<IterAddr<'_, Addr>, M> for Transient<
 struct TimerEvent {
     addr: Addr,
     timer_id: TimerId,
+    at: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -160,7 +161,7 @@ struct ClientState<W: Workload> {
 
 trait Filter {
     fn deliver_message(&self, source: Addr, event: &MessageEvent) -> bool;
-    fn deliver_timer(&self, timer: &linear::Timer) -> bool;
+    fn deliver_timer(&self, source: Addr, event: &linear::TimerEvent) -> bool;
 }
 
 #[derive(Debug, Clone)]
@@ -171,7 +172,7 @@ impl Filter for AllowAll {
         true
     }
 
-    fn deliver_timer(&self, _: &linear::Timer) -> bool {
+    fn deliver_timer(&self, _: Addr, _: &linear::TimerEvent) -> bool {
         true
     }
 }
@@ -186,21 +187,21 @@ impl<F: Filter> Filter for WithPartition<F> {
             && self.0.deliver_message(source, event)
     }
 
-    fn deliver_timer(&self, timer: &linear::Timer) -> bool {
-        self.0.deliver_timer(timer)
+    fn deliver_timer(&self, source: Addr, event: &linear::TimerEvent) -> bool {
+        self.0.deliver_timer(source, event)
     }
 }
 
 #[derive(Debug, Clone)]
-struct SoftDeadline<F>(F, Duration);
+struct Deadline<F>(F, Duration);
 
-impl<F: Filter> Filter for SoftDeadline<F> {
+impl<F: Filter> Filter for Deadline<F> {
     fn deliver_message(&self, source: Addr, event: &MessageEvent) -> bool {
         self.0.deliver_message(source, event)
     }
 
-    fn deliver_timer(&self, timer: &linear::Timer) -> bool {
-        timer.elapsed <= self.1 && self.0.deliver_timer(timer)
+    fn deliver_timer(&self, source: Addr, event: &linear::TimerEvent) -> bool {
+        event.at() < self.1 && self.0.deliver_timer(source, event)
     }
 }
 
@@ -276,48 +277,41 @@ enum Event {
     Timer(TimerEvent),
 }
 
+impl<W: Workload, F: Filter, const CHECK: bool> State<W, F, CHECK> {
+    fn timer_events(&self) -> impl Iterator<Item = TimerEvent> + '_ {
+        self.timers.iter().flat_map(|(addr, timer)| {
+            timer
+                .events()
+                .filter(|event| self.filter.deliver_timer(*addr, event))
+                .map(|event| TimerEvent {
+                    addr: *addr,
+                    timer_id: event.id(),
+                    at: if CHECK { Duration::ZERO } else { event.at() },
+                })
+        })
+    }
+}
+
 impl<W: Workload, F: Filter + Clone, const CHECK: bool> crate::search::State
     for State<W, F, CHECK>
 {
     type Event = Event;
 
     fn events(&self) -> Vec<Self::Event> {
-        let events = self
-            .message_events
-            .iter()
-            .cloned()
-            .map(Event::Message)
-            .chain({
-                let min_elapsed = self
-                    .timers
-                    .values()
-                    .filter_map(|timer| {
-                        if timer.events().count() != 0 {
-                            Some(timer.elapsed)
-                        } else {
-                            None
-                        }
-                    })
-                    .min();
-                self.timers.iter().flat_map(move |(addr, timer)| {
-                    let deliver_timer =
-                        Some(timer.elapsed) == min_elapsed && self.filter.deliver_timer(timer);
-                    timer
-                        .events()
-                        // very lazy to deal with matching types, also hate for introducing nonsense dyn
-                        .filter(move |_| deliver_timer)
-                        .map(move |timer_id| {
-                            Event::Timer(TimerEvent {
-                                timer_id,
-                                addr: *addr,
-                            })
-                        })
-                })
-            });
+        let message_events = self.message_events.iter().cloned().map(Event::Message);
         if CHECK {
-            events.collect()
+            message_events
+                .chain(self.timer_events().map(Event::Timer))
+                .collect()
         } else {
-            events.take(1).collect()
+            message_events
+                .chain(
+                    self.timer_events()
+                        .min_by_key(|event| event.at)
+                        .map(Event::Timer),
+                )
+                .take(1)
+                .collect()
         }
     }
 
@@ -348,13 +342,22 @@ impl<W: Workload, F: Filter + Clone, const CHECK: bool> crate::search::State
                     _ => anyhow::bail!("unimplemented"),
                 }
             }
-            Event::Timer(TimerEvent { addr, timer_id }) => {
+            Event::Timer(TimerEvent {
+                addr,
+                timer_id,
+                at: now,
+            }) => {
+                if !CHECK {
+                    for timer in self.timers.values_mut() {
+                        timer.advance_to(now)?
+                    }
+                }
                 let timer = self
                     .timers
                     .get_mut(&addr)
                     .ok_or(anyhow::anyhow!("missing timer for {addr:?}"))?;
                 let timer_data = timer.get_timer_data(&timer_id)?.clone();
-                timer.step_timer(&timer_id, !CHECK)?;
+                timer.step_timer(&timer_id)?;
                 match (addr, timer_data) {
                     (Addr::Client(index), TimerData::Resend) => {
                         self.clients[index as usize].state.on_event(Resend, timer)?
@@ -604,7 +607,7 @@ fn t05_no_progress_in_minority() -> anyhow::Result<()> {
                 ],
             )
         })
-        .map_filter(|filter| SoftDeadline(filter, CLIENT_RESEND_INTERVAL * 20));
+        .map_filter(|filter| Deadline(filter, CLIENT_RESEND_INTERVAL * 20));
     let workload = static_workload([(Put("hello".into(), "world".into()), PutOk)].into_iter())?;
     state.push_client(workload, num_replica, num_faulty);
     state.launch()?;
@@ -639,7 +642,7 @@ fn t06_progress_after_heal() -> anyhow::Result<()> {
                 ],
             )
         })
-        .map_filter(|filter| SoftDeadline(filter, CLIENT_RESEND_INTERVAL * 20));
+        .map_filter(|filter| Deadline(filter, CLIENT_RESEND_INTERVAL * 20));
     let workload = static_workload([(Put("hello".into(), "world".into()), PutOk)].into_iter())?;
     let index = state.push_client(workload, num_replica, num_faulty);
     state.launch_client(index)?;

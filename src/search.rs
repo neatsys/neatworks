@@ -14,9 +14,11 @@ use std::{
 };
 
 use crossbeam_queue::SegQueue;
-use dashmap::DashMap;
+use derive_where::derive_where;
 use rand::{seq::SliceRandom, thread_rng};
 use rustc_hash::FxHasher;
+use scc::HashMap;
+// use scc::HashIndex as HashMap;
 
 pub trait State {
     type Event;
@@ -114,7 +116,7 @@ where
     G: Fn(&S) -> bool + Clone + Send + 'static,
     P: Fn(&S) -> bool + Clone + Send + 'static,
 {
-    let discovered = Arc::new(DashMap::with_hasher(
+    let discovered = Arc::new(HashMap::with_hasher(
         BuildHasherDefault::<FxHasher>::default(),
     ));
     let queue = Arc::new(SegQueue::new());
@@ -125,13 +127,16 @@ where
 
     let initial_dry_state = Arc::new(initial_state.clone().into());
     queue.push((initial_state, initial_dry_state.clone()));
-    discovered.insert(
-        initial_dry_state,
-        StateInfo {
-            prev: None,
-            depth: 0,
-        },
-    );
+    discovered
+        .insert(
+            initial_dry_state,
+            StateInfo {
+                prev: None,
+                depth: 0,
+            },
+        )
+        .map_err(|_| "empty discovered map at initial")
+        .unwrap();
 
     let result = search_internal(
         max_duration,
@@ -312,17 +317,18 @@ fn status_worker<R>(status: impl Fn(Duration) -> String, search_finished: Search
     println!("{}", status(start.elapsed()))
 }
 
+#[derive_where(Clone; E)]
 struct StateInfo<T, E> {
     prev: Option<(E, Arc<T>)>,
     #[allow(unused)]
     depth: usize, // to assert trace correctness?
 }
 
-type Discovered<T, E> = DashMap<Arc<T>, StateInfo<T, E>, BuildHasherDefault<FxHasher>>;
+type Discovered<T, E> = HashMap<Arc<T>, StateInfo<T, E>, BuildHasherDefault<FxHasher>>;
 
 fn trace<T: Eq + Hash + Clone, E: Clone>(discovered: &Discovered<T, E>, target: T) -> Vec<(E, T)> {
     let info = discovered.get(&target).unwrap();
-    let Some((prev_event, prev_state)) = &info.prev else {
+    let Some((prev_event, prev_state)) = &info.get().prev else {
         return Vec::new();
     };
     let mut trace = trace(discovered, T::clone(prev_state));
