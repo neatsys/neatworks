@@ -25,7 +25,7 @@ use augustus::{
         },
         SendEvent,
     },
-    kademlia::{self, Buckets, PeerRecord, SendCryptoEvent},
+    kademlia::{self, Buckets, PeerRecord, Query, SendCryptoEvent},
     net::{
         kademlia::{Control, PeerNet},
         session::{Dispatch, DispatchNet},
@@ -303,9 +303,11 @@ async fn start_peer(
         ))) as Box<dyn Submit<Crypto, dyn SendCryptoEvent<SocketAddr>> + Send + Sync>,
     )));
     let mut kademlia_control = Blanket(Buffered::from(Control::new(
-        DispatchNet(Sender::from(tcp_control_session.sender())),
+        Box::new(DispatchNet(Sender::from(tcp_control_session.sender())))
+            as Box<dyn augustus::net::kademlia::Net<SocketAddr, bytes::Bytes> + Send + Sync>,
         // DispatchNet(Sender::from(quic_control_session.sender())),
-        Sender::from(kademlia_session.sender()),
+        Box::new(Sender::from(kademlia_session.sender()))
+            as Box<dyn SendEvent<Query> + Send + Sync>,
     )));
     let mut peer = Blanket(Buffered::from(Peer::new(
         peer_id,
