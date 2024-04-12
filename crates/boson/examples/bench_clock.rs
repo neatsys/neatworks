@@ -5,10 +5,8 @@ use tracing::info;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
-    let config = CircuitConfig {
-        // zero_knowledge: true,
-        ..CircuitConfig::standard_ecc_config()
-    };
+    let mut config = CircuitConfig::standard_ecc_config();
+    config.zero_knowledge = true;
 
     // info!(
     //     "Using {} compute threads on {} cores",
@@ -16,7 +14,7 @@ fn main() -> anyhow::Result<()> {
     //     16
     // );
 
-    const S: usize = 4;
+    const S: usize = 64;
     let (clock, circuit) = Clock::<S>::genesis(
         [(); S].map({
             let mut i = 0;
