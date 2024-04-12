@@ -10,7 +10,7 @@ pub struct Payload(pub Vec<u8>);
 impl Debug for Payload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Ok(s) = std::str::from_utf8(&self.0) {
-            write!(f, "b##\"{s}\"##")
+            write!(f, "Payload(\"{s}\")")
         } else {
             write!(
                 f,
@@ -21,7 +21,11 @@ impl Debug for Payload {
                     .take(32)
                     .collect::<Vec<_>>()
                     .concat(),
-                if self.0.len() > 32 { ".." } else { "" }
+                if self.0.len() > 32 {
+                    format!(".. <len {}>", self.0.len())
+                } else {
+                    String::new()
+                }
             )
         }
     }

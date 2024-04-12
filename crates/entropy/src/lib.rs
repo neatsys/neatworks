@@ -18,6 +18,7 @@ use augustus::{
     },
     kademlia::{self, FindPeer, FindPeerOk, PeerId, Target},
     net::{deserialize, events::Recv, kademlia::Multicast, Addr, SendMessage},
+    util::Payload,
     worker::Submit,
 };
 
@@ -88,7 +89,7 @@ pub struct Get<K>(pub K);
 #[derive(Debug, Clone)]
 pub struct PutOk<K>(pub K);
 #[derive(Debug, Clone)]
-pub struct GetOk<K>(pub K, pub Vec<u8>);
+pub struct GetOk<K>(pub K, pub Payload);
 
 pub trait Upcall<K>: SendEvent<PutOk<K>> + SendEvent<GetOk<K>> {}
 impl<T: SendEvent<PutOk<K>> + SendEvent<GetOk<K>>, K> Upcall<K> for T {}
@@ -96,13 +97,13 @@ impl<T: SendEvent<PutOk<K>> + SendEvent<GetOk<K>>, K> Upcall<K> for T {}
 #[derive(Debug)]
 pub struct NewEncoder(Chunk, Encoder);
 #[derive(Debug, Clone)]
-pub struct Encode(Chunk, u32, Vec<u8>);
+pub struct Encode(Chunk, u32, Payload);
 #[derive(Debug)]
 pub struct Decode(Chunk, Decoder);
 #[derive(Debug, Clone)]
-pub struct Recover(Chunk, Vec<u8>);
+pub struct Recover(Chunk, Payload);
 #[derive(Debug, Clone)]
-pub struct RecoverEncode(Chunk, Vec<u8>);
+pub struct RecoverEncode(Chunk, Payload);
 
 pub trait SendCodecEvent:
     SendEvent<NewEncoder>
@@ -144,7 +145,8 @@ impl<W: Submit<(), E>, E: SendCodecEvent + 'static> Submit<(), dyn SendCodecEven
 pub trait SendFsEvent: SendEvent<fs::Store> + SendEvent<fs::Load> {}
 impl<T: SendEvent<fs::Store> + SendEvent<fs::Load>> SendFsEvent for T {}
 
-pub struct DownloadOk(pub Chunk, pub u32, pub Vec<u8>);
+#[derive(Debug)]
+pub struct DownloadOk(pub Chunk, pub u32, pub Payload);
 
 pub trait BulkService: bulk::Service<PeerId, SendFragment, DownloadOk> {}
 impl<T: bulk::Service<PeerId, SendFragment, DownloadOk>> BulkService for T {}
@@ -169,7 +171,7 @@ pub struct Peer<N, BS, U, CW, F, K, M = (N, BS, U, CW, F, K)> {
     pending_pulls: HashMap<Chunk, Vec<PeerId>>,
 
     net: N,
-    blob: BS,
+    bulk: BS,
     upcall: U,
     codec_worker: CW,
     fs: F,
@@ -201,7 +203,7 @@ struct DownloadState<K> {
 #[derive(Debug)]
 struct RecoverState {
     decoder: Option<Decoder>,
-    pending: HashMap<u32, Vec<u8>>,
+    pending: HashMap<u32, Payload>,
     received: HashSet<u32>,
     cancel: CancellationToken,
 }
@@ -263,7 +265,7 @@ impl<N, BS, U, CW, F, K> Peer<N, BS, U, CW, F, K> {
             chunk_n,
             chunk_m,
             net,
-            blob: bulk,
+            bulk,
             upcall,
             codec_worker,
             fs,
@@ -281,7 +283,7 @@ pub trait Preimage {
     fn target(&self) -> Target;
 }
 
-impl Preimage for [u8; 32] {
+impl Preimage for H256 {
     fn target(&self) -> Target {
         *self
     }
@@ -336,11 +338,7 @@ impl<M: PeerCommon> OnEvent<Put<M::K>> for Peer<M::N, M::BS, M::U, M::CW, M::F, 
                 cancel: CancellationToken::new(),
             },
         );
-        anyhow::ensure!(
-            replaced.is_none(),
-            "duplicated upload chunk {}",
-            H256(chunk)
-        );
+        anyhow::ensure!(replaced.is_none(), "duplicated upload chunk {chunk}");
         let fragment_len = self.fragment_len;
         self.codec_worker.submit(Box::new(move |(), sender| {
             let encoder = Encoder::new(buf.into(), fragment_len)?;
@@ -413,7 +411,7 @@ impl<M: PeerCommon> OnEvent<Recv<InviteOk>> for Peer<M::N, M::BS, M::U, M::CW, M
             let encoder = state.encoder.clone().unwrap();
             return self.codec_worker.submit(Box::new(move |(), sender| {
                 let fragment = encoder.encode(invite_ok.index)?;
-                sender.send(Encode(invite_ok.chunk, invite_ok.index, fragment))
+                sender.send(Encode(invite_ok.chunk, invite_ok.index, Payload(fragment)))
             }));
         }
         if let Some(state) = self.persists.get_mut(&invite_ok.chunk) {
@@ -431,7 +429,7 @@ impl<M: PeerCommon> OnEvent<Recv<InviteOk>> for Peer<M::N, M::BS, M::U, M::CW, M
 impl<M: PeerCommon> OnEvent<Encode> for Peer<M::N, M::BS, M::U, M::CW, M::F, M::K, M> {
     fn on_event(
         &mut self,
-        Encode(chunk, index, fragment): Encode,
+        Encode(chunk, index, Payload(fragment)): Encode,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let Some(state) = self.uploads.get(&chunk) else {
@@ -447,7 +445,7 @@ impl<M: PeerCommon> OnEvent<Encode> for Peer<M::N, M::BS, M::U, M::CW, M::F, M::
             index,
             peer_id: Some(self.id),
         };
-        self.blob
+        self.bulk
             .offer(*peer_id, send_fragment, fragment, state.cancel.clone())
     }
 }
@@ -464,10 +462,10 @@ impl<M: PeerCommon> OnEvent<RecvOffer<SendFragment>>
             // println!("recv blob {}", H256(send_fragment.chunk));
             let chunk = send_fragment.chunk;
             let index = send_fragment.index;
-            return self.blob.accept(
+            return self.bulk.accept(
                 &mut send_fragment,
                 self.fragment_len as usize,
-                move |buf| DownloadOk(chunk, index, buf),
+                move |buf| DownloadOk(chunk, index, Payload(buf)),
                 state.recover.cancel.clone(),
             );
         }
@@ -494,10 +492,10 @@ impl<M: PeerCommon> OnEvent<RecvOffer<SendFragment>>
             }
             let chunk = send_fragment.chunk;
             let index = send_fragment.index;
-            return self.blob.accept(
+            return self.bulk.accept(
                 &mut send_fragment,
                 self.fragment_len as usize,
-                move |buf| DownloadOk(chunk, index, buf),
+                move |buf| DownloadOk(chunk, index, Payload(buf)),
                 recover.cancel.clone(),
             );
         }
@@ -548,7 +546,7 @@ impl RecoverState {
         &mut self,
         chunk: Chunk,
         index: u32,
-        fragment: Vec<u8>,
+        fragment: Payload,
         encode_index: Option<u32>,
         worker: &mut impl Submit<(), dyn SendCodecEvent>,
     ) -> anyhow::Result<()> {
@@ -559,10 +557,10 @@ impl RecoverState {
                     sender.send(Decode(chunk, decoder))
                 } else if let Some(index) = encode_index {
                     let fragment = Encoder::try_from(decoder)?.encode(index)?;
-                    sender.send(RecoverEncode(chunk, fragment))
+                    sender.send(RecoverEncode(chunk, Payload(fragment)))
                 } else {
                     // recover does not return error when there's no sufficient block decoded??
-                    sender.send(Recover(chunk, decoder.recover()?))
+                    sender.send(Recover(chunk, Payload(decoder.recover()?)))
                 }
             }))
         } else {
@@ -608,7 +606,7 @@ impl<M: PeerCommon> OnEvent<Recv<Verifiable<FragmentAvailable>>>
         let Some(state) = self.uploads.get_mut(&fragment_available.chunk) else {
             return Ok(());
         };
-        if H256(fragment_available.peer_id) == fragment_available.peer_key.sha256()
+        if fragment_available.peer_id == fragment_available.peer_key.sha256()
             && self
                 .crypto
                 .verify(&fragment_available.peer_key, &fragment_available)
@@ -641,11 +639,7 @@ impl<M: PeerCommon> OnEvent<Get<M::K>> for Peer<M::N, M::BS, M::U, M::CW, M::F, 
                 recover: RecoverState::new(self.fragment_len, self.chunk_k)?,
             },
         );
-        anyhow::ensure!(
-            replaced.is_none(),
-            "duplicated download chunk {}",
-            H256(chunk)
-        );
+        anyhow::ensure!(replaced.is_none(), "duplicated download chunk {chunk}");
         let pull = Pull {
             chunk,
             peer_id: self.id,
@@ -677,7 +671,7 @@ impl<M: PeerCommon> OnEvent<Recv<Pull>> for Peer<M::N, M::BS, M::U, M::CW, M::F,
 impl<M: PeerCommon> OnEvent<fs::LoadOk> for Peer<M::N, M::BS, M::U, M::CW, M::F, M::K, M> {
     fn on_event(
         &mut self,
-        fs::LoadOk(chunk, index, fragment): fs::LoadOk,
+        fs::LoadOk(chunk, index, Payload(fragment)): fs::LoadOk,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let Some(pending) = self.pending_pulls.remove(&chunk) else {
@@ -692,7 +686,7 @@ impl<M: PeerCommon> OnEvent<fs::LoadOk> for Peer<M::N, M::BS, M::U, M::CW, M::F,
         for peer_id in pending {
             let fragment = fragment.clone();
             // println!("blob transfer {}", H256(chunk));
-            self.blob
+            self.bulk
                 .offer(peer_id, send_fragment.clone(), fragment, None)?
         }
         Ok(())
@@ -828,7 +822,7 @@ pub fn on_buf<A: Addr>(
 pub mod fs {
     use std::{fmt::Debug, path::Path};
 
-    use augustus::{crypto::H256, event::SendEvent};
+    use augustus::{event::SendEvent, util::Payload};
     use tokio::{
         fs::{create_dir, read, remove_dir_all, write},
         sync::mpsc::UnboundedReceiver,
@@ -837,18 +831,8 @@ pub mod fs {
 
     use crate::Chunk;
 
-    #[derive(Clone)]
-    pub struct Store(pub Chunk, pub u32, pub Vec<u8>);
-
-    impl Debug for Store {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("Store")
-                .field("chunk", &H256(self.0))
-                .field("index", &self.1)
-                .field("data", &format!("<{} bytes>", self.2.len()))
-                .finish()
-        }
-    }
+    #[derive(Debug, Clone)]
+    pub struct Store(pub Chunk, pub u32, pub Payload);
 
     // Load(chunk, index, true) will delete fragment file while loading
     // not particular useful in practice, but good for evaluation with bounded storage usage
@@ -858,18 +842,8 @@ pub mod fs {
     #[derive(Debug, Clone)]
     pub struct StoreOk(pub Chunk);
 
-    #[derive(Clone)]
-    pub struct LoadOk(pub Chunk, pub u32, pub Vec<u8>);
-
-    impl Debug for LoadOk {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("LoadOk")
-                .field("chunk", &H256(self.0))
-                .field("index", &self.1)
-                .field("data", &format!("<{} bytes>", self.2.len()))
-                .finish()
-        }
-    }
+    #[derive(Debug, Clone)]
+    pub struct LoadOk(pub Chunk, pub u32, pub Payload);
 
     #[derive(Debug, derive_more::From)]
     pub enum Event {
@@ -891,7 +865,7 @@ pub mod fs {
             enum Select {
                 Recv(Event),
                 JoinNextStore(Chunk),
-                JoinNextLoad((Chunk, u32, Vec<u8>)),
+                JoinNextLoad((Chunk, u32, Payload)),
             }
             match tokio::select! {
                 event = events.recv() => Select::Recv(event.ok_or(anyhow::anyhow!("channel closed"))?),
@@ -899,21 +873,21 @@ pub mod fs {
                 Some(result) = load_tasks.join_next() => Select::JoinNextLoad(result??),
             } {
                 Select::Recv(Event::Store(Store(chunk, index, fragment))) => {
-                    let chunk_path = path.as_ref().join(format!("{:x}", H256(chunk)));
+                    let chunk_path = path.as_ref().join(format!("{chunk:x}"));
                     store_tasks.spawn(async move {
                         create_dir(&chunk_path).await?;
-                        write(chunk_path.join(index.to_string()), fragment).await?;
+                        write(chunk_path.join(index.to_string()), &*fragment).await?;
                         Ok(chunk)
                     });
                 }
                 Select::Recv(Event::Load(Load(chunk, index, take))) => {
-                    let chunk_path = path.as_ref().join(format!("{:x}", H256(chunk)));
+                    let chunk_path = path.as_ref().join(format!("{chunk:x}"));
                     load_tasks.spawn(async move {
                         let fragment = read(chunk_path.join(index.to_string())).await?;
                         if take {
                             remove_dir_all(chunk_path).await?
                         }
-                        Ok((chunk, index, fragment))
+                        Ok((chunk, index, Payload(fragment)))
                     });
                 }
                 Select::JoinNextStore(chunk) => upcall.send(StoreOk(chunk))?,

@@ -23,13 +23,14 @@ use augustus::{
             session::{Buffered, Sender},
             Blanket, Session, Unify,
         },
-        SendEvent,
+        BlackHole, SendEvent,
     },
     kademlia::{self, Buckets, PeerRecord, Query, SendCryptoEvent},
     net::{
         kademlia::{Control, PeerNet},
         session::{Dispatch, DispatchNet},
     },
+    util::Payload,
     worker::{Submit, Worker},
 };
 use axum::{
@@ -65,8 +66,8 @@ use wirehair::{Decoder, Encoder};
 
 #[derive(Debug, Clone, derive_more::From)]
 enum Upcall {
-    PutOk(PutOk<[u8; 32]>),
-    GetOk(GetOk<[u8; 32]>),
+    PutOk(PutOk<H256>),
+    GetOk(GetOk<H256>),
 }
 
 #[tokio::main]
@@ -130,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
                 Upcall::PutOk(PutOk(chunk)) => pending_puts
                     .lock()
                     .await
-                    .remove(&H256(chunk))
+                    .remove(&chunk)
                     // if the sender is not present a premature stop-peers is probably executed
                     // which is unexpected
                     .unwrap()
@@ -139,7 +140,7 @@ async fn main() -> anyhow::Result<()> {
                 Upcall::GetOk(GetOk(chunk, buf)) => pending_gets
                     .lock()
                     .await
-                    .remove(&H256(chunk))
+                    .remove(&chunk)
                     .unwrap()
                     .send(buf)
                     .unwrap(),
@@ -170,7 +171,7 @@ struct AppState {
     upcall_sender: UnboundedSender<Upcall>,
     pending_puts: Arc<Mutex<HashMap<H256, oneshot::Sender<()>>>>,
     #[allow(clippy::type_complexity)]
-    pending_gets: Arc<Mutex<HashMap<H256, oneshot::Sender<Vec<u8>>>>>,
+    pending_gets: Arc<Mutex<HashMap<H256, oneshot::Sender<Payload>>>>,
     op_client: reqwest::Client,
     benchmark_op_id: Arc<AtomicU32>,
     benchmark_puts: Arc<Mutex<HashMap<u32, JoinHandle<anyhow::Result<PutResult>>>>>,
@@ -189,10 +190,10 @@ type P = Blanket<
         Peer<
             Box<dyn Net + Send + Sync>,
             Box<dyn BulkService + Send + Sync>,
-            Box<dyn entropy::Upcall<[u8; 32]> + Send + Sync>,
+            Box<dyn entropy::Upcall<H256> + Send + Sync>,
             Box<dyn Submit<(), dyn SendCodecEvent> + Send + Sync>,
             Box<dyn SendFsEvent + Send + Sync>,
-            [u8; 32],
+            H256,
         >,
     >,
 >;
@@ -264,7 +265,7 @@ async fn start_peer(
     config: StartPeersConfig,
 ) -> anyhow::Result<()> {
     let peer_id = record.id;
-    let path = format!("/tmp/entropy-{:x}", H256(peer_id));
+    let path = format!("/tmp/entropy-{peer_id:x}");
     let path = std::path::Path::new(&path);
     let _ = remove_dir_all(path).await;
     create_dir(path).await?;
@@ -290,18 +291,23 @@ async fn start_peer(
     let mut tcp_control_session = Session::new();
     // let mut quic_control_session = Session::new();
 
-    let mut kademlia_peer = Blanket(Buffered::from(kademlia::Peer::new(
-        buckets,
-        Box::new(MessageNet::new(DispatchNet(Sender::from(
-            tcp_control_session.sender(),
-        )))) as Box<dyn kademlia::Net<SocketAddr> + Send + Sync>,
-        // MessageNet::new(DispatchNet(Sender::from(quic_control_session.sender()))),
-        Sender::from(kademlia_control_session.sender()),
-        Box::new(kademlia::CryptoWorker::from(Worker::Inline(
-            crypto.clone(),
-            Sender::from(kademlia_session.sender()),
-        ))) as Box<dyn Submit<Crypto, dyn SendCryptoEvent<SocketAddr>> + Send + Sync>,
-    )));
+    let mut kademlia_peer = Blanket(Buffered::from(
+        // TODO when there's dynamical joining peer that actually need to do bootstrap (and wait for
+        // it done)
+        kademlia::Peer::<_, _, _, BlackHole, _>::new(
+            buckets,
+            Box::new(MessageNet::new(DispatchNet(Sender::from(
+                tcp_control_session.sender(),
+            )))) as Box<dyn kademlia::Net<SocketAddr> + Send + Sync>,
+            // MessageNet::new(DispatchNet(Sender::from(quic_control_session.sender()))),
+            Sender::from(kademlia_control_session.sender()),
+            Box::new(kademlia::CryptoWorker::from(Worker::Inline(
+                crypto.clone(),
+                Sender::from(kademlia_session.sender()),
+            )))
+                as Box<dyn Submit<Crypto, dyn SendCryptoEvent<SocketAddr>> + Send + Sync>,
+        ),
+    ));
     let mut kademlia_control = Blanket(Buffered::from(Control::new(
         Box::new(DispatchNet(Sender::from(tcp_control_session.sender())))
             as Box<dyn augustus::net::kademlia::Net<SocketAddr, bytes::Bytes> + Send + Sync>,
@@ -403,7 +409,7 @@ async fn put_chunk(
         let (sender, receiver) = oneshot::channel();
         let replaced = state.pending_puts.lock().await.insert(chunk, sender);
         assert!(replaced.is_none());
-        state.peers.lock().await.senders[peer_index].send(Put(chunk.into(), buf))?;
+        state.peers.lock().await.senders[peer_index].send(Put(chunk, buf))?;
         // detach receiving, so that even if http connection closed receiver keeps alive
         tokio::spawn(receiver).await??;
         anyhow::Result::<_>::Ok(format!("{chunk:x}"))
@@ -426,11 +432,11 @@ async fn get_chunk(
         let (sender, receiver) = oneshot::channel();
         let replaced = state.pending_gets.lock().await.insert(chunk, sender);
         assert!(replaced.is_none());
-        state.peers.lock().await.senders[peer_index].send(Get(chunk.into()))?;
+        state.peers.lock().await.senders[peer_index].send(Get(chunk))?;
         anyhow::Result::<_>::Ok(tokio::spawn(receiver).await??)
     };
     match task.await {
-        Ok(result) => (StatusCode::OK, result),
+        Ok(Payload(result)) => (StatusCode::OK, result),
         Err(err) => {
             warn!("{err}");
             (StatusCode::INTERNAL_SERVER_ERROR, b"err".to_vec())
