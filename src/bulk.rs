@@ -13,12 +13,12 @@
 // cancelled too late may still be treated as finished on the other side. so
 // it is a purely optimization shortcut
 //
-// secondly this service guarantees reliable transfer (in the absent of
+// secondly this service guarantees reliable transfer (when in the absent of
 // cancellation and sender/receiver crashing). `impl SendMessage` does not
 // guarantee the message will be delivered under any condition. this service,
 // instead, ensures the transfer will always finish as long as both participants
 // do not cancel the transfer, the underlying connection does not broken, and
-// the `Serve` message is delivered. application may take this assertion to
+// the `Serve` message is delivered. application may rely on this assertion to
 // simplify logic
 //
 // without further consideration, this service can also be used to avoid head of
@@ -26,7 +26,7 @@
 // to keep latency low and stable. it's kind of like poor man's QUIC
 // TODO generalize so it can reuse the underlying `net` to send bulk data if
 // `net` happens to base on QUIC
-// will not be significant improvement anyway
+// not a significant improvement though
 
 use std::{
     collections::HashMap,
@@ -35,6 +35,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use derive_where::derive_where;
 use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -51,6 +52,7 @@ use crate::{
     net::{events::Recv, SendMessage},
 };
 
+#[derive(Debug)]
 pub struct Offer<A, M> {
     pub dest: A,
     pub message: M,
@@ -58,14 +60,16 @@ pub struct Offer<A, M> {
     pub cancel: Option<CancellationToken>,
 }
 
+#[derive_where(Debug)]
 pub struct Accept<N> {
     pub serve_internal: (SocketAddr, u32),
     pub expect_len: Option<usize>,
+    #[derive_where(skip)]
     pub into_recv_event: Box<dyn FnOnce(Vec<u8>) -> N + Send + Sync>,
     pub cancel: Option<CancellationToken>,
 }
 
-#[derive(derive_more::From)]
+#[derive(Debug, derive_more::From)]
 pub enum Event<A, M, N> {
     Offer(Offer<A, M>),
     Accept(Accept<N>),
@@ -78,7 +82,7 @@ impl<A, M, N> From<Recv<Serve<M>>> for Event<A, M, N> {
     }
 }
 
-#[derive(derive_more::Deref)]
+#[derive(Debug, derive_more::Deref)]
 pub struct RecvOffer<M> {
     #[deref]
     pub inner: M,
@@ -167,7 +171,7 @@ pub async fn session<A, M, N: Send + 'static>(
     mut net: impl SendMessage<A, Serve<M>>,
     mut upcall: impl SendEvent<RecvOffer<M>> + SendEvent<N>,
 ) -> anyhow::Result<()> {
-    let listener = TcpListener::bind((ip.into().unwrap_or(IpAddr::from([0, 0, 0, 0])), 0)).await?;
+    let listener = TcpListener::bind((ip.into().unwrap_or(IpAddr::from([0; 4])), 0)).await?;
     let addr = listener.local_addr()?;
     let mut id = 0;
     let mut pending_accept = HashMap::new();
@@ -198,6 +202,8 @@ pub async fn session<A, M, N: Send + 'static>(
                         cancel.cancelled().await
                     } else {
                         // default timeout to avoid `pending_accept` entry leaks
+                        // should we timeout as well in above branch or fully rely on the active
+                        // cancel?
                         sleep(Duration::from_millis(2500)).await
                     }
                     id
@@ -261,7 +267,7 @@ pub async fn session<A, M, N: Send + 'static>(
                     continue; // drop stream to close connection
                 };
                 // technically this does not need to be joined
-                // just as a good habbit and in case needed later
+                // just as a good habit and in case needed later
                 send_tasks.spawn(async move {
                     let task = stream.write_all(&buf);
                     let result = if let Some(cancel) = cancel {
@@ -281,3 +287,5 @@ pub async fn session<A, M, N: Send + 'static>(
         }
     }
 }
+
+// cSpell:words upcall quic

@@ -70,7 +70,7 @@ impl<B: Buf> SendMessage<IterAddr<'_, SocketAddr>, B> for Udp {
     }
 }
 
-const MAX_BUF_LEN: usize = 1 << 20;
+const MAX_BUF_LEN: usize = 1 << 20; // hard limit of single serialized message
 
 // a construction that enables connection reusing
 // the client side of a connection informs its server address to the connected
@@ -82,7 +82,7 @@ const MAX_BUF_LEN: usize = 1 << 20;
 // there's no aggressive throttling/eviction strategy built into this connection
 // management. if the net is asked for concurrently sending to 10K addresses,
 // then 10K connections will be established and kept inside connection table.
-// this level is not the most, or even is the worst proper place to do resource
+// this level is not the most proper (or even is the worst) place to do resource
 // management. current `SendMessage<_, _>` interface is too simple for passing
 // down any user intent (e.g. whether the sending address will be sent again in
 // near future), while it is not "low-level" enough to assume exclusive access
@@ -511,7 +511,7 @@ fn quic_config() -> anyhow::Result<(quinn::ServerConfig, quinn::ClientConfig)> {
     let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
     // transport_config.max_concurrent_uni_streams(0_u8.into());
     transport_config.max_concurrent_uni_streams(4096u32.into());
-    transport_config.max_idle_timeout(Some(Duration::from_millis(2500).try_into()?));
+    // transport_config.max_idle_timeout(Some(Duration::from_millis(2500).try_into()?));
 
     let mut roots = RootCertStore::empty();
     roots.add_parsable_certificates(&[issuer.der()]);
@@ -657,3 +657,7 @@ pub async fn quic_accept_session(
     }
     Ok(())
 }
+
+// cSpell:words quic bincode rustls libp2p kademlia oneshot rcgen unreplicated
+// cSpell:words neatworks
+// cSpell:ignore nodelay reuseaddr
