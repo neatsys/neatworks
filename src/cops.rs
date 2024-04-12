@@ -92,10 +92,36 @@ pub struct Server<N, CN, VS, V, A, _M = (N, CN, VS, V, A)> {
     _m: std::marker::PhantomData<_M>,
 }
 
+#[derive(Clone)]
 struct KeyState<V, A> {
     value: Payload,
     version_deps: V,
     pending_puts: VecDeque<Put<V, A>>,
+}
+
+impl<N, CN, VS, V: Clone, A: Clone> Server<N, CN, VS, V, A> {
+    pub fn new(
+        num_key: usize,
+        version_zero: V,
+        net: N,
+        client_net: CN,
+        version_service: VS,
+    ) -> Self {
+        Self {
+            store: vec![
+                KeyState {
+                    value: Default::default(),
+                    version_deps: version_zero,
+                    pending_puts: Default::default()
+                };
+                num_key
+            ],
+            net,
+            client_net,
+            version_service,
+            _m: Default::default(),
+        }
+    }
 }
 
 pub trait ServerCommon {
@@ -168,11 +194,7 @@ impl<M: ServerCommon> OnEvent<Recv<Put<M::V, M::A>>> for Server<M::N, M::CN, M::
 }
 
 impl<M: ServerCommon> OnEvent<Recv<SyncKey<M::V>>> for Server<M::N, M::CN, M::VS, M::V, M::A, M> {
-    fn on_event(
-        &mut self,
-        Recv(_): Recv<SyncKey<M::V>>,
-        _: &mut impl Timer,
-    ) -> anyhow::Result<()> {
+    fn on_event(&mut self, Recv(_): Recv<SyncKey<M::V>>, _: &mut impl Timer) -> anyhow::Result<()> {
         // TODO
         Ok(())
     }
@@ -215,3 +237,5 @@ impl<M: ServerCommon> OnEvent<CompleteMerged<M::V>> for Server<M::N, M::CN, M::V
         Ok(())
     }
 }
+
+// cSpell:words deque

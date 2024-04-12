@@ -236,6 +236,8 @@ pub use session::Session;
 pub mod erased {
     use std::{collections::HashMap, fmt::Debug, time::Duration};
 
+    use derive_where::derive_where;
+
     use super::{OnEventUniversal, OnTimer, OnTimerUniversal, SendEvent, Timer, TimerId};
 
     // the universal event type: every `M` that state `impl OnEvent<M>` (and also `Send`) can be
@@ -428,7 +430,74 @@ pub mod erased {
         }
     }
 
-    use derive_where::derive_where;
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct TimerState<M>(Option<(M, TimerId)>, Duration);
+
+    impl<M> TimerState<M> {
+        pub fn new(period: Duration) -> Self {
+            Self(Default::default(), period)
+        }
+
+        pub fn set<S: OnEventRichTimer<M>>(
+            &mut self,
+            event: M,
+            timer: &mut impl RichTimer<S>,
+        ) -> anyhow::Result<()>
+        where
+            M: Clone + Send + Sync + 'static,
+        {
+            anyhow::ensure!(
+                self.ensure_unset(timer)?.is_none(),
+                "timer has already been set"
+            );
+            self.ensure_set(event, timer)
+        }
+
+        pub fn unset<S>(&mut self, timer: &mut impl RichTimer<S>) -> anyhow::Result<M> {
+            let Some(event) = self.ensure_unset(timer)? else {
+                anyhow::bail!("timer has not been set")
+            };
+            Ok(event)
+        }
+
+        pub fn reset<S: OnEventRichTimer<M>>(
+            &mut self,
+            timer: &mut impl RichTimer<S>,
+        ) -> anyhow::Result<()>
+        where
+            M: Clone + Send + Sync + 'static,
+        {
+            let event = self.unset(timer)?;
+            self.set(event, timer)
+        }
+
+        pub fn ensure_set<S: OnEventRichTimer<M>>(
+            &mut self,
+            event: M,
+            timer: &mut impl RichTimer<S>,
+        ) -> anyhow::Result<()>
+        where
+            M: Clone + Send + Sync + 'static,
+        {
+            if self.0.is_none() {
+                self.0 = Some((event.clone(), timer.set(self.1, event)?))
+            }
+            Ok(())
+        }
+
+        pub fn ensure_unset<S>(
+            &mut self,
+            timer: &mut impl RichTimer<S>,
+        ) -> anyhow::Result<Option<M>> {
+            if let Some((event, timer_id)) = self.0.take() {
+                timer.unset(timer_id)?;
+                Ok(Some(event))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
     pub use session::Session;
 
     pub mod events {
