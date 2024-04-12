@@ -2,7 +2,6 @@ use std::{collections::HashMap, fmt::Debug, hash::Hash, num::NonZeroUsize, time:
 
 use derive_where::derive_where;
 use lru::LruCache;
-use primitive_types::H256;
 
 use crate::{
     event::{
@@ -37,7 +36,7 @@ pub trait Net<A, M>: SendMessage<A, M> + for<'a> SendMessageToEach<A, M> {}
 impl<T: SendMessage<A, M> + for<'a> SendMessageToEach<A, M>, A, M> Net<A, M> for T {}
 
 #[derive_where(Debug; N, P, M, A, B, B: Eq + Hash)] // awesome!
-pub struct Control<N, P, M, A, B = [u8; 32], _M = (N, P, M, A)> {
+pub struct Control<N, P, M, A, B = Target, _M = (N, P, M, A)> {
     inner_net: N,
     peer: P, // a kademlia `Peer`
 
@@ -188,10 +187,7 @@ impl<M: ControlCommon, B> OnEvent<QueryTimeout> for Control<M::N, M::P, M::M, M:
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         // TODO gracefully handle if necessary
-        Err(anyhow::anyhow!(
-            "query timeout for ({}, {count})",
-            H256(target)
-        ))
+        Err(anyhow::anyhow!("query timeout for ({target}, {count})"))
     }
 }
 

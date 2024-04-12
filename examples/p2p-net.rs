@@ -7,7 +7,7 @@ use augustus::{
             session::{Buffered, Sender},
             Blanket, Session,
         },
-        SendEvent,
+        SendEvent, SendEventOnce,
     },
     kademlia::{
         Buckets, CryptoWorker, FindPeer, FindPeerOk, Peer, PeerId, PeerRecord, Query,
@@ -22,11 +22,9 @@ use augustus::{
     worker::{Submit, Worker},
 };
 use bincode::Options;
-use primitive_types::H256;
 use rand::{rngs::StdRng, thread_rng, SeedableRng};
 use serde::{Deserialize, Serialize};
-use tokio::{net::UdpSocket, spawn};
-use tokio_util::sync::CancellationToken;
+use tokio::{net::UdpSocket, spawn, sync::oneshot};
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, derive_more::From)]
@@ -53,15 +51,15 @@ async fn main() -> anyhow::Result<()> {
     let mut control_session = Session::new();
     let peer_id;
     let mut peer;
-    let bootstrap_finished = CancellationToken::new();
     let mut send_hello = None;
 
     let seed_crypto = Crypto::new_random(&mut StdRng::seed_from_u64(117418));
+    let (bootstrapped_sender, bootstrapped_receiver) = oneshot::channel::<()>();
     if let Some(seed_addr) = args().nth(1) {
         let crypto = Crypto::new_random(&mut thread_rng());
         let peer_record = PeerRecord::new(crypto.public_key(), addr);
         peer_id = peer_record.id;
-        println!("PeerId {}", H256(peer_id));
+        println!("PeerId {peer_id}");
 
         let mut buckets = Buckets::new(peer_record);
         let seed_peer = PeerRecord::new(seed_crypto.public_key(), seed_addr.parse()?);
@@ -77,15 +75,11 @@ async fn main() -> anyhow::Result<()> {
             )))
                 as Box<dyn Submit<Crypto, dyn SendCryptoEvent<SocketAddr>> + Send + Sync>,
         );
-        let cancel = bootstrap_finished.clone();
-        peer.bootstrap(Box::new(move || {
-            cancel.cancel();
-            Ok(())
-        }))?;
+        peer.bootstrap(bootstrapped_sender)?
     } else {
         let peer_record = PeerRecord::new(seed_crypto.public_key(), addr);
         peer_id = peer_record.id;
-        println!("SEED PeerId {}", H256(peer_id));
+        println!("SEED PeerId {peer_id}");
 
         let buckets = Buckets::new(peer_record);
         peer = Peer::new(
@@ -97,14 +91,14 @@ async fn main() -> anyhow::Result<()> {
                 Sender::from(peer_session.sender()),
             ))),
         );
-        bootstrap_finished.cancel(); // skip bootstrap on seed peer
+        bootstrapped_sender.send_once(())? // skip bootstrap on seed peer
     }
 
     let mut peer_net = PeerNet(Sender::from(control_session.sender()));
     let hello_session = spawn({
         let mut peer_net = peer_net.clone();
         async move {
-            bootstrap_finished.cancelled().await;
+            bootstrapped_receiver.await.unwrap();
             println!("Bootstrap finished");
             if let Some(seed_id) = send_hello {
                 peer_net.send(seed_id, Message::Hello(peer_id)).unwrap()
@@ -121,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
             Message::FindPeer(message) => peer_sender.send(Recv(message))?,
             Message::FindPeerOk(message) => peer_sender.send(Recv(message))?,
             Message::Hello(peer_id) => {
-                println!("Replying Hello from {}", H256(peer_id));
+                println!("Replying Hello from {peer_id}");
                 peer_net.send(peer_id, Message::HelloOk)?;
                 peer_net.send(
                     Multicast(peer_id, 3.try_into().unwrap()),
@@ -132,7 +126,7 @@ async fn main() -> anyhow::Result<()> {
                 println!("Received HelloOk")
             }
             Message::Join(peer_id) => {
-                println!("Joining peer {}", H256(peer_id))
+                println!("Joining peer {peer_id}")
             }
         }
         Ok(())

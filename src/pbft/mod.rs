@@ -271,9 +271,9 @@ impl<W: Submit<S, E>, S: 'static, E: SendCryptoEvent<A> + 'static, A: Addr>
 type Quorum<M> = BTreeMap<u8, Verifiable<M>>;
 type Quorums<K, M> = BTreeMap<K, Quorum<M>>;
 
-#[derive(Clone)]
-#[derive_where(Debug, PartialEq, Eq, Hash; S, A)]
-pub struct Replica<N, CN, CW, S, A, M = (N, CN, CW, S, A)> {
+#[derive(Debug, Clone)]
+#[derive_where(PartialEq, Eq, Hash; S, A)]
+pub struct Replica<N, CN, CW, S, A, _M = (N, CN, CW, S, A)> {
     id: u8,
     num_replica: usize,
     num_faulty: usize,
@@ -306,14 +306,14 @@ pub struct Replica<N, CN, CW, S, A, M = (N, CN, CW, S, A)> {
     pending_prepares: BTreeMap<u32, Vec<Verifiable<Prepare>>>,
     pending_commits: BTreeMap<u32, Vec<Verifiable<Commit>>>,
 
-    #[derive_where(skip)]
+    #[derive_where(skip(EqHashOrd))]
     net: N,
-    #[derive_where(skip)]
+    #[derive_where(skip(EqHashOrd))]
     client_net: CN, // C for client
-    #[derive_where(skip)]
+    #[derive_where(skip(EqHashOrd))]
     crypto_worker: CW, // C for crypto
 
-    _m: std::marker::PhantomData<M>,
+    _m: std::marker::PhantomData<_M>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

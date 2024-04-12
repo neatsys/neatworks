@@ -21,33 +21,37 @@ use crate::{
     },
     event::{
         erased::{OnEventRichTimer as OnEvent, RichTimer as Timer},
-        SendEvent, TimerId,
+        SendEvent, SendEventOnce, TimerId,
     },
     net::{events::Recv, Addr, SendMessage, SendMessageToEach, SendMessageToEachExt as _},
     worker::Submit,
 };
 
 // 32 bytes array refers to sha256 digest by default in this codebase
-// consider new types if necessary
-// (hopefully no demand on digest-based routing...)
-pub type PeerId = [u8; 32]; // TODO
-pub type Target = [u8; 32];
+// since PeerId appears as-is as the address type in network implementation,
+// consider newtype if necessary
+// (hopefully no other means to address with 32 bytes...)
+pub type PeerId = H256; // TODO
+pub type Target = H256;
 
-const U256_BITS: usize = 256;
+const U256_BITS: usize = 256; // the type somehow lacks this constant
 
 fn distance(peer_id: &PeerId, target: &Target) -> U256 {
-    U256::from_little_endian(peer_id) ^ U256::from_little_endian(target)
+    U256::from_little_endian(peer_id.as_bytes()) ^ U256::from_little_endian(target.as_bytes())
 }
 
 fn distance_from(peer_id: &PeerId, distance: U256) -> Target {
     let mut target = [0; 32];
-    (U256::from_little_endian(peer_id) ^ distance).to_little_endian(&mut target);
-    target
+    (U256::from_little_endian(peer_id.as_bytes()) ^ distance).to_little_endian(&mut target);
+    target.into()
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PeerRecord<K, A> {
     pub id: PeerId,
+    // the public key of `id`, not examined by buckets in any sense, just get carried around to make
+    // the record useful
+    // generic over it so we can set it to dummy type when testing buckets itself
     pub key: K,
     pub addr: A,
 }
@@ -55,7 +59,7 @@ pub struct PeerRecord<K, A> {
 impl<K: Debug, A: Debug> Debug for PeerRecord<K, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PeerRecord")
-            .field("id", &format!("{}", H256(self.id)))
+            .field("id", &self.id)
             .field("key", &"..")
             .field("addr", &self.addr)
             .finish()
@@ -65,7 +69,7 @@ impl<K: Debug, A: Debug> Debug for PeerRecord<K, A> {
 impl<K: DigestHash, A> PeerRecord<K, A> {
     pub fn new(key: K, addr: A) -> Self {
         Self {
-            id: key.sha256().into(),
+            id: key.sha256(),
             key,
             addr,
         }
@@ -74,7 +78,7 @@ impl<K: DigestHash, A> PeerRecord<K, A> {
 
 // this is NOT a proper generalization over `BITS` because the underlying
 // `PeerRecord` always contains a fixed 256-bit `PeerId`, which cannot match
-// `BITS` easily since it permits incomplete byte
+// `BITS` easily since it permits arbitrary number of bytes, even partial byte
 // currently this is just a monkey patch for model checking on a reduced scale,
 // intended for internal use only
 #[derive(Debug)]
@@ -91,6 +95,12 @@ struct Bucket<K, A> {
 }
 
 const BUCKET_SIZE: usize = 20;
+// the canonical value should be 3, but we often query for a lot of peers (up to
+// hundreds) around some `Target` at a time in Entropy, so have to speed up 10x
+// to get a decent performance
+// considering we also deploy up to 100 instances of peer on the same physical
+// machine in Entropy, that's a lot of stress on the underlying network stack
+// consider make this configurable
 const NUM_CONCURRENCY: usize = 30;
 
 impl<K, A, const BITS: usize> Buckets<K, A, BITS> {
@@ -106,6 +116,7 @@ impl<K, A, const BITS: usize> Buckets<K, A, BITS> {
     // assert t.bit(j) == 0, for all j > i
     fn index(&self, target: &Target) -> usize {
         let zeros = distance(&self.origin.id, target).leading_zeros() as usize;
+        // violated when `target == self.origin.id`, which caller should be responsible to check
         assert!(zeros < U256_BITS);
         U256_BITS - 1 - zeros
     }
@@ -131,7 +142,7 @@ impl<K, A, const BITS: usize> Buckets<K, A, BITS> {
         }
 
         // repeat on cached entries, only shifting on a full cache
-        // this is surprisingly duplicated code to the above
+        // this part is more duplicated to above to my expect
         if let Some(bucket_index) = bucket
             .cached_records
             .iter()
@@ -156,9 +167,13 @@ impl<K: Clone, A: Addr, const BITS: usize> Buckets<K, A, BITS> {
         if let Some(cache_record) = bucket.cached_records.pop() {
             bucket.records.push(cache_record)
         } else {
-            // "mark" the record as stalled by prepending it back to the list
+            // put it back to the list, but "mark" as stalled with prepending
             // should stalled record appear in find result? paper not mentioned
             bucket.records.insert(0, record.clone())
+            // also, this `remove` is not used anywhere in this protocol
+            // what should be its intent? if user wants it to be absent from query result for sure,
+            // we probably should not reinsert it anyway
+            // (no user to this method for now though)
         }
         Some(record)
     }
@@ -180,6 +195,13 @@ impl<K: Clone, A: Addr, const BITS: usize> Buckets<K, A, BITS> {
         {
             let mut index_records = self.distances[index].records.clone();
             // ensure origin peer is included if it is indeed close enough
+            // this behavior may diverge from libp2p::kad, which never return the origin peer if i
+            // get it correctly
+            // the soundness of the protocol is probably not affected since you probably already
+            // know what a peer if you are querying it, so it's ok for it to exclude itself from the
+            // result
+            // and speaking of the soundness of the buckets, i don't know whether that is defined
+
             // can it/does it need to be more elegant?
             if index == 0 {
                 index_records.push(self.origin.clone())
@@ -226,6 +248,7 @@ impl<
 #[derive(Debug, Clone, Copy)]
 pub struct Query(pub Target, pub NonZeroUsize);
 
+#[derive(Debug)]
 pub struct QueryResult<A> {
     pub status: QueryStatus,
     pub target: Target,
@@ -244,16 +267,6 @@ pub enum QueryStatus {
     // this can because of the total number of discovered peers is less than `count`, otherwise i'm
     // not sure
     Halted,
-}
-
-impl<A: Debug> Debug for QueryResult<A> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("QueryResult")
-            .field("status", &self.status)
-            .field("target", &format!("{}", H256(self.target)))
-            .field("closest", &self.closest)
-            .finish()
-    }
 }
 
 pub trait Upcall<A>: SendEvent<QueryResult<A>> {}
@@ -296,27 +309,20 @@ impl<W: Submit<Crypto, E>, E: SendCryptoEvent<A> + 'static, A: 'static>
     }
 }
 
-pub struct Peer<N, U, CW, A, M = (N, U, CW, A)> {
+#[derive(Debug)]
+pub struct Peer<N, U, CW, E, A, _M = (N, U, CW, E, A)> {
     record: PeerRecord<PublicKey, A>,
 
     buckets: Buckets<PublicKey, A>,
     query_states: HashMap<Target, QueryState<A>>,
     refresh_targets: HashSet<Target>,
-    on_bootstrap: Option<OnBootstrap>, // TODO change to impl SendEventOnce
 
     net: N,
     upcall: U,
     crypto_worker: CW,
+    on_bootstrap: Option<E>,
 
-    _m: std::marker::PhantomData<M>,
-}
-
-type OnBootstrap = Box<dyn FnOnce() -> anyhow::Result<()> + Send + Sync>;
-
-impl<N, U, CW, A> Debug for Peer<N, U, CW, A> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Peer").finish_non_exhaustive()
-    }
+    _m: std::marker::PhantomData<_M>,
 }
 
 #[derive(Debug)]
@@ -327,7 +333,7 @@ struct QueryState<A> {
     contacted: HashSet<PeerId>,
 }
 
-impl<N, U, CW, A: Addr> Peer<N, U, CW, A> {
+impl<N, U, CW, E, A: Addr> Peer<N, U, CW, E, A> {
     pub fn new(
         buckets: Buckets<PublicKey, A>, // seed peers inserted
         net: N,
@@ -352,23 +358,26 @@ pub trait PeerCommon {
     type N: Net<Self::A>;
     type U: Upcall<Self::A>;
     type CW: Submit<Crypto, dyn SendCryptoEvent<Self::A>>;
+    type E: SendEventOnce<()>;
     type A: Addr;
 }
-impl<N, U, CW, A> PeerCommon for (N, U, CW, A)
+impl<N, U, CW, E, A> PeerCommon for (N, U, CW, E, A)
 where
     N: Net<A>,
     U: Upcall<A>,
     CW: Submit<Crypto, dyn SendCryptoEvent<A>>,
+    E: SendEventOnce<()>,
     A: Addr,
 {
     type N = N;
     type U = U;
     type CW = CW;
+    type E = E;
     type A = A;
 }
 
-impl<M: PeerCommon> Peer<M::N, M::U, M::CW, M::A, M> {
-    pub fn bootstrap(&mut self, on_bootstrap: OnBootstrap) -> anyhow::Result<()> {
+impl<M: PeerCommon> Peer<M::N, M::U, M::CW, M::E, M::A, M> {
+    pub fn bootstrap(&mut self, on_bootstrap: M::E) -> anyhow::Result<()> {
         // TODO assert only bootstrap once?
         // seems no harm to bootstrap multiple times anyway, so just assert a clear state for now
         anyhow::ensure!(
@@ -389,7 +398,9 @@ impl<M: PeerCommon> Peer<M::N, M::U, M::CW, M::A, M> {
     }
 }
 
-impl<M: PeerCommon> OnEvent<Query> for Peer<M::N, M::U, M::CW, M::A, M> {
+// TODO periodically refresh buckets
+
+impl<M: PeerCommon> OnEvent<Query> for Peer<M::N, M::U, M::CW, M::E, M::A, M> {
     fn on_event(
         &mut self,
         Query(target, count): Query,
@@ -406,7 +417,7 @@ impl<M: PeerCommon> OnEvent<Query> for Peer<M::N, M::U, M::CW, M::A, M> {
     }
 }
 
-impl<M: PeerCommon> Peer<M::N, M::U, M::CW, M::A, M> {
+impl<M: PeerCommon> Peer<M::N, M::U, M::CW, M::E, M::A, M> {
     fn start_query(&mut self, target: &Target, count: NonZeroUsize) -> anyhow::Result<()> {
         // println!("start query {} {count}", primitive_types::H256(*target));
         let find_peer = FindPeer {
@@ -425,7 +436,7 @@ impl<M: PeerCommon> Peer<M::N, M::U, M::CW, M::A, M> {
 struct ResendFindPeer<A>(Target, PeerRecord<PublicKey, A>);
 const RESEND_FIND_PEER_DURATION: Duration = Duration::from_millis(2500);
 
-impl<M: PeerCommon> OnEvent<Signed<FindPeer<M::A>>> for Peer<M::N, M::U, M::CW, M::A, M> {
+impl<M: PeerCommon> OnEvent<Signed<FindPeer<M::A>>> for Peer<M::N, M::U, M::CW, M::E, M::A, M> {
     fn on_event(
         &mut self,
         Signed(find_peer): Signed<FindPeer<M::A>>,
@@ -436,11 +447,7 @@ impl<M: PeerCommon> OnEvent<Signed<FindPeer<M::A>>> for Peer<M::N, M::U, M::CW, 
             &target,
             find_peer.count.max(NUM_CONCURRENCY.try_into().unwrap()),
         );
-        anyhow::ensure!(
-            !records.is_empty(),
-            "empty buckets when finding {}",
-            H256(target)
-        );
+        anyhow::ensure!(!records.is_empty(), "empty buckets when finding {target}",);
         let mut contacting = HashMap::new();
         let mut addrs = Vec::new();
         for record in records
@@ -464,12 +471,12 @@ impl<M: PeerCommon> OnEvent<Signed<FindPeer<M::A>>> for Peer<M::N, M::U, M::CW, 
             records,
         };
         let replaced = self.query_states.insert(target, state);
-        anyhow::ensure!(replaced.is_none(), "concurrent query to {}", H256(target));
+        anyhow::ensure!(replaced.is_none(), "concurrent query to {target}");
         self.net.send_to_each(addrs.into_iter(), find_peer)
     }
 }
 
-impl<M: PeerCommon> OnEvent<ResendFindPeer<M::A>> for Peer<M::N, M::U, M::CW, M::A, M> {
+impl<M: PeerCommon> OnEvent<ResendFindPeer<M::A>> for Peer<M::N, M::U, M::CW, M::E, M::A, M> {
     fn on_event(
         &mut self,
         ResendFindPeer(target, record): ResendFindPeer<M::A>,
@@ -483,15 +490,16 @@ impl<M: PeerCommon> OnEvent<ResendFindPeer<M::A>> for Peer<M::N, M::U, M::CW, M:
         // );
         // self.net
         //     .send_to_each([record.addr.clone()].into_iter(), state.find_peer.clone())
-        Err(anyhow::anyhow!(
-            "FindPeer({}, {}) timeout {record:?}",
-            H256(target),
+        anyhow::bail!(
+            "FindPeer({target}, {}) timeout {record:?}",
             state.find_peer.count
-        ))
+        )
     }
 }
 
-impl<M: PeerCommon> OnEvent<Recv<Verifiable<FindPeer<M::A>>>> for Peer<M::N, M::U, M::CW, M::A, M> {
+impl<M: PeerCommon> OnEvent<Recv<Verifiable<FindPeer<M::A>>>>
+    for Peer<M::N, M::U, M::CW, M::E, M::A, M>
+{
     fn on_event(
         &mut self,
         Recv(find_peer): Recv<Verifiable<FindPeer<M::A>>>,
@@ -503,7 +511,7 @@ impl<M: PeerCommon> OnEvent<Recv<Verifiable<FindPeer<M::A>>>> for Peer<M::N, M::
         //     H256(find_peer.target)
         // );
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
-            if find_peer.record.key.sha256() == H256(find_peer.record.id)
+            if find_peer.record.key.sha256() == find_peer.record.id
                 && crypto.verify(&find_peer.record.key, &find_peer).is_ok()
             {
                 sender.send(Verified(find_peer))
@@ -515,7 +523,7 @@ impl<M: PeerCommon> OnEvent<Recv<Verifiable<FindPeer<M::A>>>> for Peer<M::N, M::
     }
 }
 
-impl<M: PeerCommon> OnEvent<Verified<FindPeer<M::A>>> for Peer<M::N, M::U, M::CW, M::A, M> {
+impl<M: PeerCommon> OnEvent<Verified<FindPeer<M::A>>> for Peer<M::N, M::U, M::CW, M::E, M::A, M> {
     fn on_event(
         &mut self,
         Verified(find_peer): Verified<FindPeer<M::A>>,
@@ -531,13 +539,16 @@ impl<M: PeerCommon> OnEvent<Verified<FindPeer<M::A>>> for Peer<M::N, M::U, M::CW
                 .find_closest(&find_peer.target, find_peer.count),
             record: self.record.clone(),
         };
+        // consider directly send FindPeerOk out in worker
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
             sender.send((dest, Signed(crypto.sign(find_peer_ok))))
         }))
     }
 }
 
-impl<M: PeerCommon> OnEvent<(M::A, Signed<FindPeerOk<M::A>>)> for Peer<M::N, M::U, M::CW, M::A, M> {
+impl<M: PeerCommon> OnEvent<(M::A, Signed<FindPeerOk<M::A>>)>
+    for Peer<M::N, M::U, M::CW, M::E, M::A, M>
+{
     fn on_event(
         &mut self,
         (dest, Signed(find_peer_ok)): (M::A, Signed<FindPeerOk<M::A>>),
@@ -548,7 +559,7 @@ impl<M: PeerCommon> OnEvent<(M::A, Signed<FindPeerOk<M::A>>)> for Peer<M::N, M::
 }
 
 impl<M: PeerCommon> OnEvent<Recv<Verifiable<FindPeerOk<M::A>>>>
-    for Peer<M::N, M::U, M::CW, M::A, M>
+    for Peer<M::N, M::U, M::CW, M::E, M::A, M>
 {
     fn on_event(
         &mut self,
@@ -556,7 +567,7 @@ impl<M: PeerCommon> OnEvent<Recv<Verifiable<FindPeerOk<M::A>>>>
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
-            if find_peer_ok.record.key.sha256() == H256(find_peer_ok.record.id)
+            if find_peer_ok.record.key.sha256() == find_peer_ok.record.id
                 && crypto
                     .verify(&find_peer_ok.record.key, &find_peer_ok)
                     .is_ok()
@@ -570,7 +581,7 @@ impl<M: PeerCommon> OnEvent<Recv<Verifiable<FindPeerOk<M::A>>>>
     }
 }
 
-impl<M: PeerCommon> OnEvent<Verified<FindPeerOk<M::A>>> for Peer<M::N, M::U, M::CW, M::A, M> {
+impl<M: PeerCommon> OnEvent<Verified<FindPeerOk<M::A>>> for Peer<M::N, M::U, M::CW, M::E, M::A, M> {
     fn on_event(
         &mut self,
         Verified(find_peer_ok): Verified<FindPeerOk<M::A>>,
@@ -686,9 +697,12 @@ impl<M: PeerCommon> OnEvent<Verified<FindPeerOk<M::A>>> for Peer<M::N, M::U, M::
             QueryStatus::Halted => {} // log warn/return error?
         }
         if self.refresh_targets.is_empty() {
+            assert_eq!(target, self.record.id);
             self.refresh_buckets()?;
             if self.refresh_targets.is_empty() {
-                self.on_bootstrap.take().unwrap()()?
+                // immediately done; no bucket can be further refreshed after the initial population
+                // around self id
+                self.on_bootstrap.take().unwrap().send_once(())?
             }
             Ok(())
         } else {
@@ -697,13 +711,13 @@ impl<M: PeerCommon> OnEvent<Verified<FindPeerOk<M::A>>> for Peer<M::N, M::U, M::
             if let Some(&target) = self.refresh_targets.iter().next() {
                 self.start_query(&target, BUCKET_SIZE.try_into().unwrap())
             } else {
-                self.on_bootstrap.take().unwrap()()
+                self.on_bootstrap.take().unwrap().send_once(())
             }
         }
     }
 }
 
-impl<M: PeerCommon> Peer<M::N, M::U, M::CW, M::A, M> {
+impl<M: PeerCommon> Peer<M::N, M::U, M::CW, M::E, M::A, M> {
     fn refresh_buckets(&mut self) -> anyhow::Result<()> {
         let mut start_index = 0;
         if self.on_bootstrap.is_some() {
@@ -817,13 +831,16 @@ mod tests {
 
     proptest! {
         #[test]
-        fn distance_inversion(id: PeerId, d: [u8; 32]) {
+        fn distance_inversion(id: [u8; 32], d: [u8; 32]) {
+            let id = PeerId::from(id);
             let d = U256::from_little_endian(&d);
             assert_eq!(distance(&id, &distance_from(&id, d)), d)
         }
 
         #[test]
-        fn bucket_index(id: PeerId, target: Target) {
+        fn bucket_index(id: [u8; 32], target: [u8; 32]) {
+            let id = PeerId::from(id);
+            let target = Target::from(target);
             let origin = PeerRecord {
                 id,
                 key: (),
@@ -841,12 +858,18 @@ mod tests {
         }
 
         #[test]
-        fn ordered_closest_sufficient(id: PeerId, insert_ids: [PeerId; 1000], targets: [Target; 100]) {
+        fn ordered_closest_sufficient(id: [u8; 32], insert_ids: [[u8; 32]; 1000], targets: [[u8; 32]; 100]) {
+            let id = PeerId::from(id);
+            let insert_ids = insert_ids.map(PeerId::from);
+            let targets = targets.map(Target::from);
             ordered_closest(id, insert_ids, targets)
         }
 
         #[test]
-        fn ordered_closest_insufficient(id: PeerId, insert_ids: [PeerId; 10], targets: [Target; 100]) {
+        fn ordered_closest_insufficient(id: [u8; 32], insert_ids: [[u8; 32]; 10], targets: [[u8; 32]; 100]) {
+            let id = PeerId::from(id);
+            let insert_ids = insert_ids.map(PeerId::from);
+            let targets = targets.map(Target::from);
             ordered_closest(id, insert_ids, targets)
         }
     }
@@ -857,7 +880,7 @@ mod tests {
     fn refresh_buckets() -> anyhow::Result<()> {
         let origin = PeerRecord::new(Crypto::new_random(&mut thread_rng()).public_key(), ());
         let buckets = Buckets::new(origin.clone());
-        let mut peer = Peer::new(
+        let mut peer = Peer::<_, _, _, BlackHole, _>::new(
             buckets,
             BlackHole,
             BlackHole,

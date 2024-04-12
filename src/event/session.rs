@@ -1,14 +1,32 @@
 use std::{collections::HashMap, fmt::Debug, time::Duration};
 
 use tokio::{
-    sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    sync::{
+        mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+        oneshot,
+    },
     task::{AbortHandle, JoinError, JoinSet},
     time::{interval, sleep},
 };
 
 use crate::event::{SendEvent, Timer, TimerId};
 
-use super::{OnEventUniversal, OnTimerUniversal};
+use super::{OnEventUniversal, OnTimerUniversal, SendEventOnce};
+
+// useful impl on foreign types that has been also leveraged elsewhere
+// consider move to more proper place
+impl<N: Into<M>, M> SendEvent<N> for UnboundedSender<M> {
+    fn send(&mut self, event: N) -> anyhow::Result<()> {
+        UnboundedSender::send(self, event.into()).map_err(|err| anyhow::anyhow!(err.to_string()))
+    }
+}
+
+impl<N: Into<M>, M> SendEventOnce<N> for oneshot::Sender<M> {
+    fn send_once(self, event: N) -> anyhow::Result<()> {
+        self.send(event.into())
+            .map_err(|_| anyhow::anyhow!("send once failed"))
+    }
+}
 
 #[derive(Debug)]
 enum Event<M> {
@@ -22,12 +40,6 @@ pub struct Sender<M>(UnboundedSender<Event<M>>);
 impl<M> Clone for Sender<M> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
-    }
-}
-
-impl<N: Into<M>, M> SendEvent<N> for UnboundedSender<M> {
-    fn send(&mut self, event: N) -> anyhow::Result<()> {
-        UnboundedSender::send(self, event.into()).map_err(|err| anyhow::anyhow!(err.to_string()))
     }
 }
 

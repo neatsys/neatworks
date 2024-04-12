@@ -41,9 +41,9 @@ pub trait SendEventOnce<M> {
     fn send_once(self, event: M) -> anyhow::Result<()>;
 }
 
-impl<T: SendEvent<M>, M> SendEventOnce<M> for T {
-    fn send_once(mut self, event: M) -> anyhow::Result<()> {
-        SendEvent::send(&mut self, event)
+impl<M> SendEventOnce<M> for BlackHole {
+    fn send_once(self, _: M) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 
