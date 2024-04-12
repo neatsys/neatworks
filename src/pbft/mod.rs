@@ -191,17 +191,15 @@ impl<N, U: SendEvent<InvokeOk>, A> OnEvent<Recv<Reply>> for Client<N, U, A> {
             .values()
             .filter(|inserted_reply| inserted_reply.result == reply.result)
             .count()
-            == self.num_faulty + 1
+            != self.num_faulty + 1
         {
-            // paper is not saying what does it mean by "what it believes is the current primary"
-            // taking min or max or the view numbers both seems wrong, so i choose to design nothing
-            self.view_num = reply.view_num;
-            let mut invoke = self.invoke.take().unwrap();
-            invoke.resend.unset(timer)?;
-            self.upcall.send((self.id, reply.result))
-        } else {
-            Ok(())
+            return Ok(());
         }
+        // paper is not saying what does it mean by "what it believes is the current primary"
+        // either taking min or max of the view numbers seems wrong, so i choose to design nothing
+        self.view_num = reply.view_num;
+        self.invoke.take().unwrap().resend.unset(timer)?;
+        self.upcall.send((self.id, reply.result))
     }
 }
 
@@ -284,25 +282,27 @@ pub struct Replica<N, CN, CW, S, A, M = (N, CN, CW, S, A)> {
     requests: Vec<Request<A>>,
     view_num: u32,
     new_views: BTreeMap<u32, Verifiable<NewView>>,
-    // convention: log[0] is unused offset and always LogEntry::default()
+    // convention: log[0] is unused offset and always with None `pre_prepare`
     // log[op_num as usize].pre_prepare.op_num == op_num
     // for no-op slot during view change, requests == Default::default() (i.e. empty vector)
     // pre_prepare = Some(pre_prepare) where pre_prepare.digest = DIGEST_NO_OP
     // DIGEST_NO_OP is probably not empty `requests`'s digest, but it's more convenient in this way
-    // better consistency design may be log[0] also has some `pre_prepare`, but i don't bother
+    // a more consistent design may be log[0] also has some `pre_prepare` and becomes a regular
+    // no-op slot, but i don't bother
     log: Vec<LogEntry<A>>,
-    prepare_quorums: Quorums<u32, Prepare>, // `K` = op number
+    prepare_quorums: Quorums<u32, Prepare>, // u32 = op number
     commit_quorums: Quorums<u32, Commit>,
     commit_num: u32,
     app: S,
 
     do_view_change: TimerState<DoViewChange>,
     progress_view_change: TimerState<ProgressViewChange>,
-    view_changes: Quorums<u32, ViewChange>, // `K` = view number
+    view_changes: Quorums<u32, ViewChange>, // u32 = view number
 
     // any op num presents in this maps -> there's ongoing verification submitted
     // entry presents but empty list -> no pending but one is verifying
     // no entry present -> no pending and not verifying
+    // invent enum for this if wants to improve readability later
     pending_prepares: BTreeMap<u32, Vec<Verifiable<Prepare>>>,
     pending_commits: BTreeMap<u32, Vec<Verifiable<Commit>>>,
 
@@ -349,6 +349,20 @@ impl<N, CN, CW, S, A> Replica<N, CN, CW, S, A> {
         num_replica: usize,
         num_faulty: usize,
     ) -> Self {
+        let (
+            results,
+            requests,
+            view_num,
+            new_views,
+            log,
+            prepare_quorums,
+            commit_quorums,
+            commit_num,
+            view_changes,
+            pending_prepares,
+            pending_commits,
+            _m,
+        ) = Default::default();
         Self {
             id,
             app,
@@ -369,18 +383,18 @@ impl<N, CN, CW, S, A> Replica<N, CN, CW, S, A> {
             // `DoViewChange` timeout, which is longer than `ProgressPrepared`
             progress_view_change: TimerState::new(CLIENT_RESEND_INTERVAL / 10),
 
-            results: Default::default(),
-            requests: Default::default(),
-            view_num: 0,
-            new_views: Default::default(),
-            log: Default::default(),
-            prepare_quorums: Default::default(),
-            commit_quorums: Default::default(),
-            commit_num: 0,
-            view_changes: Default::default(),
-            pending_prepares: Default::default(),
-            pending_commits: Default::default(),
-            _m: Default::default(),
+            results,
+            requests,
+            view_num,
+            new_views,
+            log,
+            prepare_quorums,
+            commit_quorums,
+            commit_num,
+            view_changes,
+            pending_prepares,
+            pending_commits,
+            _m,
         }
     }
 }
@@ -518,6 +532,8 @@ impl<M: ReplicaCommon> OnEvent<(Signed<PrePrepare>, Vec<Request<M::A>>)>
 // it could be the case that when this is triggered primary has been moving on
 // to a higher view i.e. collected majority of ViewChange and pending NewView
 // should be safe since we are just resending old PrePrepare
+// (if the old PrePrepare is gone (probably because of a view change), the timer
+// should be gone along with it)
 impl<M: ReplicaCommon> OnEvent<ProgressPrepared> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     fn on_event(
         &mut self,
@@ -528,16 +544,11 @@ impl<M: ReplicaCommon> OnEvent<ProgressPrepared> for Replica<M::N, M::CN, M::CW,
         Self: Sized,
     {
         let entry = &self.log[op_num as usize];
-        self.net.send(
-            All,
-            (
-                entry
-                    .pre_prepare
-                    .clone()
-                    .ok_or(anyhow::anyhow!("missing PrePrepare"))?,
-                entry.requests.clone(),
-            ),
-        )
+        let pre_prepare = entry
+            .pre_prepare
+            .clone()
+            .ok_or(anyhow::anyhow!("missing PrePrepare"))?;
+        self.net.send(All, (pre_prepare, entry.requests.clone()))
     }
 }
 
@@ -571,8 +582,9 @@ impl<M: ReplicaCommon> OnEvent<Recv<(Verifiable<PrePrepare>, Vec<Request<M::A>>)
         //     }
         // }
 
-        // a decent implementation probably should throttle here (as well as for prepares and
-        // commits) in order to mitigate faulty proposals
+        // a decent implementation probably should throttle here (as what we have been done to
+        // prepares and commits) in order to mitigate performance degradation caused by faulty
+        // proposals
         // omitted since (again) that's only on slow path
         let replica_id = pre_prepare.view_num as usize % self.num_replica;
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
@@ -605,7 +617,7 @@ impl<M: ReplicaCommon> OnEvent<(Verified<PrePrepare>, Vec<Request<M::A>>)>
         }
         if let Some(prepared) = &self.log[pre_prepare.op_num as usize].pre_prepare {
             if **prepared != *pre_prepare {
-                println!("! PrePrepare not identical to the prepared one");
+                println!("! PrePrepare not match the prepared one");
                 return Ok(());
             }
         }
@@ -661,6 +673,11 @@ impl<M: ReplicaCommon> OnEvent<Recv<Verifiable<Prepare>>>
         Recv(prepare): Recv<Verifiable<Prepare>>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
+        // ingress throttle: verifying one Prepare (and Commit below) at a time for each op number
+        // different from PrePrepare: this is for fast path performance
+        // this throttling ensures we only verify 2f + 1 Prepare/Commit for each slot, get rid of
+        // unnecessary verification to maximize throughput (in case it has been bounded by crypto
+        // overhead)
         if let Some(pending_prepares) = self.pending_prepares.get_mut(&prepare.op_num) {
             pending_prepares.push(prepare);
             return Ok(());
@@ -688,6 +705,14 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
         }
         if let Some(entry) = self.log.get(prepare.op_num as usize) {
             if !entry.prepares.is_empty() {
+                // TODO resend Commit for the sender of the Prepare to ensure liveness
+                // not just liveness on the sender, but the liveness of this slot; there may not
+                // been enough Commit successfully collected by anyone yet
+                // in such case primary will keep resending PrePrepare which results in the
+                // resending of Prepare, and we need to turn that into Commit in case everyone
+                // already collected enough Prepare
+                // yet another solution is to do nothing and rely on view change, but let's avoid
+                // that as long as primary is still around
                 return Ok(false);
             }
             if let Some(pre_prepare) = &entry.pre_prepare {
@@ -749,8 +774,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
             return Ok(());
         }
         let Some(entry) = self.log.get_mut(prepare.op_num as usize) else {
-            // haven't matched digest for now, postpone entering "prepared" until receiving
-            // pre-prepare
+            // postpone prepared until receiving PrePrepare and matching digest against it
             return Ok(());
         };
         assert!(entry.prepares.is_empty());
@@ -892,7 +916,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
         };
         assert!(log_entry.commits.is_empty());
         if log_entry.prepares.is_empty() {
-            return Ok(());
+            return Ok(()); // shortcut: probably safe to commit as well
         }
 
         log_entry.commits = self.commit_quorums.remove(&commit.op_num).unwrap();
@@ -907,9 +931,8 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
             if log_entry.commits.is_empty() {
                 break;
             }
-            if log_entry.pre_prepare.as_ref().unwrap().digest != NO_OP_DIGEST
-                && log_entry.requests.is_empty()
-            {
+            let pre_prepare = log_entry.pre_prepare.as_ref().unwrap();
+            if pre_prepare.digest != NO_OP_DIGEST && log_entry.requests.is_empty() {
                 break;
             }
             self.commit_num += 1;
@@ -919,7 +942,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
                 let reply = Reply {
                     seq: request.seq,
                     result: Payload(self.app.execute(&request.op)?),
-                    view_num: log_entry.pre_prepare.as_ref().unwrap().view_num,
+                    view_num: pre_prepare.view_num,
                     replica_id: self.id,
                 };
                 let replaced = self
@@ -1220,13 +1243,12 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
         assert!(self.view_change());
         for pre_prepare in &new_view.pre_prepares {
             // somehow duplicating `impl OnEvent<(Verified<PrePrepare>, Vec<Request<M::A>>)>`
-            // less concurrency management, but may require additional state transfer
+            // maybe just perform necessary clean up then redirect to there
             if self.log.get(pre_prepare.op_num as usize).is_none() {
                 self.log
                     .resize_with(pre_prepare.op_num as usize + 1, Default::default)
             }
             let is_primary = self.is_primary();
-
             let log_entry = &mut self.log[pre_prepare.op_num as usize];
             if let Some(prev_pre_prepare) = &mut log_entry.pre_prepare {
                 if prev_pre_prepare.digest != pre_prepare.digest {
@@ -1238,8 +1260,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
             log_entry.commits.clear();
             // i don't know whether this is possible on primary, maybe the view change happens to
             // rotate back to the original primary? = =
-            // just get ready for anything weird that may (i.e. will) happen during model
-            // checking
+            // just get ready for anything weird that may (i.e. will) happen during model checking
             log_entry.progress.ensure_unset(timer)?;
             if is_primary {
                 log_entry
