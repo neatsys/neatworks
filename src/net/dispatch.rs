@@ -33,7 +33,10 @@ use derive_where::derive_where;
 
 use tracing::{debug, warn};
 
-use crate::event::{erased, OnEvent, OnTimer, SendEvent, SendEventOnce, Timer};
+use crate::event::{
+    erased, OnEventRichTimer as OnEvent, RichTimer as Timer, SendEvent, SendEventOnce,
+    UnreachableTimer,
+};
 
 use super::{Addr, Buf, IterAddr, SendMessage};
 
@@ -65,8 +68,8 @@ impl<E, P: Protocol<A, B>, A, B, F> Dispatch<E, P, A, B, F> {
     }
 }
 
-// go with typed event for this state machine because it takes a sender that
-// sends to itself and must be `Clone` at the same time
+// go with typed event for this state machine because it (1) owns a sender that
+// (2) sends to itself and (3) must be `Clone` at the same time
 // i.e. "the horror" of type erasure
 #[derive(derive_more::From)]
 pub enum Event<P: Protocol<A, B>, A, B> {
@@ -146,9 +149,9 @@ impl<
 
     fn on_event(&mut self, event: Self::Event, timer: &mut impl Timer) -> anyhow::Result<()> {
         match event {
-            Event::Outgoing(event) => erased::OnEvent::on_event(self, event, timer),
-            Event::Incoming(event) => erased::OnEvent::on_event(self, event, timer),
-            Event::Closed(event) => erased::OnEvent::on_event(self, event, timer),
+            Event::Outgoing(event) => self.handle_outgoing(event, timer),
+            Event::Incoming(event) => erased::OnEvent::on_event(self, event, &mut UnreachableTimer),
+            Event::Closed(event) => self.handle_closed(event, timer),
         }
     }
 }
@@ -159,9 +162,9 @@ impl<
         A: Addr,
         B: Buf,
         F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
-    > erased::OnEvent<Outgoing<A, B>> for Dispatch<E, P, A, B, F>
+    > Dispatch<E, P, A, B, F>
 {
-    fn on_event(
+    fn handle_outgoing(
         &mut self,
         Outgoing(remote, buf): Outgoing<A, B>,
         _: &mut impl Timer,
@@ -217,7 +220,7 @@ impl<
     fn on_event(
         &mut self,
         Incoming(event): Incoming<P::Incoming>,
-        _: &mut impl Timer,
+        _: &mut impl crate::event::Timer,
     ) -> anyhow::Result<()> {
         self.seq += 1;
         let close_guard = CloseGuard(self.close_sender.clone(), None, self.seq);
@@ -239,8 +242,12 @@ impl<
     }
 }
 
-impl<E, P: Protocol<A, B>, A: Addr, B, F> erased::OnEvent<Closed<A>> for Dispatch<E, P, A, B, F> {
-    fn on_event(&mut self, Closed(addr, seq): Closed<A>, _: &mut impl Timer) -> anyhow::Result<()> {
+impl<E, P: Protocol<A, B>, A: Addr, B, F> Dispatch<E, P, A, B, F> {
+    fn handle_closed(
+        &mut self,
+        Closed(addr, seq): Closed<A>,
+        _: &mut impl Timer,
+    ) -> anyhow::Result<()> {
         if let Some(connection) = self.connections.get(&addr) {
             if connection.seq == seq {
                 debug!(">>> {addr:?} outgoing connection closed");
@@ -248,11 +255,5 @@ impl<E, P: Protocol<A, B>, A: Addr, B, F> erased::OnEvent<Closed<A>> for Dispatc
             }
         }
         Ok(())
-    }
-}
-
-impl<E, P: Protocol<A, B>, A, B, F> OnTimer for Dispatch<E, P, A, B, F> {
-    fn on_timer(&mut self, _: crate::event::TimerId, _: &mut impl Timer) -> anyhow::Result<()> {
-        unreachable!()
     }
 }

@@ -61,11 +61,7 @@ impl Quic {
             let mut stream = match connection.accept_uni().await {
                 Ok(stream) => stream,
                 // TODO
-                Err(
-                    quinn::ConnectionError::ConnectionClosed(_)
-                    | quinn::ConnectionError::LocallyClosed
-                    | quinn::ConnectionError::TimedOut,
-                ) => break,
+                // Err(quinn::ConnectionError::ConnectionClosed(_)) => break,
                 Err(err) => {
                     warn!("<<< {remote_addr} {err}");
                     break;
@@ -148,11 +144,8 @@ impl<B: Buf> Protocol<SocketAddr, B> for Quic {
                     endpoint.connect(remote, "neatworks.quic")
                 }?;
                 drop(span.exit());
-                anyhow::Ok(
-                    connecting
-                        .instrument(tracing::debug_span!("connect", local = ?endpoint.local_addr(), remote = ?remote))
-                        .await?,
-                )
+                let span = tracing::debug_span!("connect", local = ?endpoint.local_addr(), remote = ?remote);
+                anyhow::Ok(connecting.instrument(span).await?)
             };
             let connection = match task.await {
                 Ok(connection) => connection,

@@ -18,6 +18,7 @@ use augustus::{
         DigestHash as _, H256,
     },
     event::{
+        self,
         erased::{
             session::{Buffered, Sender},
             Blanket, Session,
@@ -39,7 +40,6 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-
 use entropy::{
     BulkService, CodecWorker, Get, GetOk, MessageNet, Net, Peer, Put, PutOk, SendCodecEvent,
     SendFsEvent,
@@ -296,8 +296,9 @@ async fn start_peer(
         // it done)
         kademlia::Peer::<_, _, _, BlackHole, _>::new(
             buckets,
-            Box::new(MessageNet::new(dispatch::Net::from(tcp_control_session.sender())))
-                as Box<dyn kademlia::Net<SocketAddr> + Send + Sync>,
+            Box::new(MessageNet::new(dispatch::Net::from(
+                tcp_control_session.sender(),
+            ))) as Box<dyn kademlia::Net<SocketAddr> + Send + Sync>,
             // MessageNet::new(DispatchNet(Sender::from(quic_control_session.sender()))),
             Sender::from(kademlia_control_session.sender()),
             Box::new(kademlia::CryptoWorker::from(Worker::Inline(
@@ -333,7 +334,7 @@ async fn start_peer(
         ))) as _,
         Box::new(fs_sender) as _,
     )));
-    let mut tcp_control = Unify(Dispatch::new(
+    let mut tcp_control = Unify(event::Buffered::from(Dispatch::new(
         augustus::net::session::Tcp::new(addr)?,
         {
             // let mut quic_control = Blanket(Unify(Dispatch::new(quic.clone(), {
@@ -349,7 +350,7 @@ async fn start_peer(
             }
         },
         Once(tcp_control_session.sender()),
-    )?);
+    )?));
 
     let socket_session =
         augustus::net::session::tcp::accept_session(listener, tcp_control_session.sender());

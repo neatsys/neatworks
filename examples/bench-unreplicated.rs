@@ -28,7 +28,8 @@ use augustus::{
         blocking,
         erased::{self, events::Init, Blanket},
         ordered::Timer,
-        BlackHole, Inline, OnTimer, Once, SendEvent as _, Session, Unify, UnreachableTimer,
+        BlackHole, Buffered, Inline, OnTimer, Once, SendEvent as _, Session, Unify,
+        UnreachableTimer,
     },
     net::{
         dispatch::Net,
@@ -153,11 +154,11 @@ async fn main() -> anyhow::Result<()> {
                             erased::session::Sender::from(close_loop_session.sender()),
                         ));
                         let mut state_sender = state_session.sender();
-                        let mut tcp_control = Unify(Dispatch::new(
+                        let mut tcp_control = Unify(Buffered::from(Dispatch::new(
                             Tcp::new(listener.local_addr()?)?,
                             move |buf: &_| to_client_on_buf(buf, &mut state_sender),
                             Once(tcp_session.sender()),
-                        )?);
+                        )?));
 
                         let tcp_sender = tcp_session.sender();
                         sessions
@@ -186,11 +187,11 @@ async fn main() -> anyhow::Result<()> {
                         erased::session::Sender::from(close_loop_session.sender()),
                     ));
                     let mut state_sender = state_session.sender();
-                    let mut quic_control = Unify(Dispatch::new(
+                    let mut quic_control = Unify(Buffered::from(Dispatch::new(
                         quic.clone(),
                         move |buf: &_| to_client_on_buf(buf, &mut state_sender),
                         Once(quic_session.sender()),
-                    )?);
+                    )?));
 
                     let quic_sender = quic_session.sender();
                     sessions.spawn_on(quic::accept_session(quic, quic_sender), runtime.handle());
@@ -334,11 +335,11 @@ async fn main() -> anyhow::Result<()> {
         let mut state = Unify(Replica::new(Null, ToClientMessageNet::new(raw_net)));
         let mut state_session = Session::new();
         let mut state_sender = state_session.sender();
-        let mut tcp_control = Unify(Dispatch::new(
+        let mut tcp_control = Unify(Buffered::from(Dispatch::new(
             Tcp::new(listener.local_addr()?)?,
             move |buf: &_| to_replica_on_buf::<SocketAddr>(buf, &mut state_sender),
             Once(tcp_session.sender()),
-        )?);
+        )?));
 
         let accept_session = tcp::accept_session(listener, tcp_session.sender());
         let tcp_session = tcp_session.run(&mut tcp_control);
@@ -364,11 +365,11 @@ async fn main() -> anyhow::Result<()> {
         let mut state_session = Session::new();
         let mut state_sender = state_session.sender();
         let quic = Quic::new(replica_addr)?;
-        let mut quic_control = Unify(Dispatch::new(
+        let mut quic_control = Unify(Buffered::from(Dispatch::new(
             quic.clone(),
             move |buf: &_| to_replica_on_buf::<SocketAddr>(buf, &mut state_sender),
             Once(quic_session.sender()),
-        )?);
+        )?));
 
         let accept_session = quic::accept_session(quic, quic_session.sender());
         let quic_session = quic_session.run(&mut quic_control);

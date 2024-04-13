@@ -9,7 +9,7 @@ use std::{
 };
 
 use augustus::{
-    event::{Once, Session, Unify},
+    event::{Buffered, Once, Session, Unify},
     net::{dispatch::Net, Dispatch, SendMessage},
 };
 
@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
         let quic = augustus::net::session::Quic::new(SocketAddr::from(([0, 0, 0, 0], 3000 + i)))?;
 
         let mut control_session = Session::new();
-        let mut control = Unify(Dispatch::new(
+        let mut control = Unify(Buffered::from(Dispatch::new(
             // augustus::net::session::Tcp::new(None)?,
             quic.clone(),
             {
@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             },
             Once(control_session.sender()),
-        )?);
+        )?));
 
         // sessions.spawn(augustus::net::session::tcp_accept_session(
         //     listener,

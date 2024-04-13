@@ -131,9 +131,9 @@ pub trait OnTimer {
 
 pub struct Inline<'a, S, T>(pub &'a mut S, pub &'a mut T);
 
-impl<S: OnEventUniversal<T>, T: Timer> SendEvent<S::Event> for Inline<'_, S, T> {
-    fn send(&mut self, event: S::Event) -> anyhow::Result<()> {
-        self.0.on_event(event, self.1)
+impl<S: OnEventUniversal<T>, T: Timer, M: Into<S::Event>> SendEvent<M> for Inline<'_, S, T> {
+    fn send(&mut self, event: M) -> anyhow::Result<()> {
+        self.0.on_event(event.into(), self.1)
     }
 }
 
@@ -162,6 +162,15 @@ pub trait OnEventRichTimer {
 pub struct Buffered<S, M> {
     pub inner: S,
     attached: HashMap<TimerId, Box<dyn FnMut() -> M + Send + Sync>>,
+}
+
+impl<S, M> From<S> for Buffered<S, M> {
+    fn from(value: S) -> Self {
+        Self {
+            inner: value,
+            attached: Default::default(),
+        }
+    }
 }
 
 struct BufferedTimer<'a, T, M> {
@@ -268,6 +277,7 @@ pub mod erased {
 
     pub struct Inline<'a, S, T>(pub &'a mut S, pub &'a mut T);
 
+    // we probably cannot have `impl SendEvent<impl Into<M>>`
     impl<S: OnEvent<M>, M, T: Timer> SendEvent<M> for Inline<'_, S, T> {
         fn send(&mut self, event: M) -> anyhow::Result<()> {
             self.0.on_event(event, self.1)
