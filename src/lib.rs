@@ -133,7 +133,7 @@ pub mod workload;
 //   converted into panicking, or in another direction, encountering a panic
 //   already may imply failing to fulfill some contracts
 //
-//   use unstructured/ad-hoc error i.e. anyhow::anyhow!() when there's no upper
+//   use unstructured/ad-hoc error i.e. anyhow::format_err!() when there's no upper
 //   layer wants to handle that error, so it suppose to lead to crash. the
 //   opportunity of making such conclusion is usually rare, but in this codebase
 //   i happen to get a lot of chance, since myself is the only downstream user

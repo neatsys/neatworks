@@ -109,7 +109,7 @@ impl DowncastEvent for TimerData {
             }
         }
 
-        let downcast = |_| Err(anyhow::anyhow!("unknown timer data"));
+        let downcast = |_| Err(anyhow::format_err!("unknown timer data"));
         let downcast = downcast_or(|_: Resend| TimerData::Resend, downcast);
         let downcast = downcast_or(TimerData::DoViewChange, downcast);
         let downcast = downcast_or(TimerData::ProgressPrepared, downcast);
@@ -324,7 +324,7 @@ impl<W: Workload, F: Filter + Clone, const CHECK: bool> crate::search::State
                 let timer = self
                     .timers
                     .get_mut(&event.dest)
-                    .ok_or(anyhow::anyhow!("missing timer for {:?}", event.dest))?;
+                    .ok_or(anyhow::format_err!("missing timer for {:?}", event.dest))?;
                 match (event.dest, event.message) {
                     (Addr::Client(index), Message::ToClient(message)) => self.clients
                         [index as usize]
@@ -355,7 +355,7 @@ impl<W: Workload, F: Filter + Clone, const CHECK: bool> crate::search::State
                 let timer = self
                     .timers
                     .get_mut(&addr)
-                    .ok_or(anyhow::anyhow!("missing timer for {addr:?}"))?;
+                    .ok_or(anyhow::format_err!("missing timer for {addr:?}"))?;
                 let timer_data = timer.get_timer_data(&timer_id)?.clone();
                 timer.step_timer(&timer_id)?;
                 match (addr, timer_data) {
@@ -407,7 +407,7 @@ impl<W: Workload, F: Filter, const CHECK: bool> State<W, F, CHECK> {
                 let timer = self
                     .timers
                     .get_mut(&addr)
-                    .ok_or(anyhow::anyhow!("missing timer for replica {index}"))?;
+                    .ok_or(anyhow::format_err!("missing timer for replica {index}"))?;
                 for event in take(&mut **events) {
                     rerun = true;
                     match event {
@@ -450,7 +450,7 @@ impl<W: Workload, F: Filter, const CHECK: bool> State<W, F, CHECK> {
                 let timer = self
                     .timers
                     .get_mut(&addr)
-                    .ok_or(anyhow::anyhow!("missing timer for client {index}"))?;
+                    .ok_or(anyhow::format_err!("missing timer for client {index}"))?;
                 for invoke in client.close_loop.sender.drain(..) {
                     rerun = true;
                     client.state.on_event(invoke, timer)?

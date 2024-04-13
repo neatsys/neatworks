@@ -212,7 +212,7 @@ where
             () = tokio::time::sleep(Duration::from_secs(1)) => break 'select,
             // () = cancel.cancelled() => break 'select,
         }
-        return Err(anyhow::anyhow!("unexpected shutdown"));
+        return Err(anyhow::format_err!("unexpected shutdown"));
     }
     stop.cancel();
     barrier.wait().await;
@@ -431,7 +431,7 @@ async fn replica_session<
             result = &mut state_session => result??,
             () = cancel.cancelled() => break 'select,
         }
-        return Err(anyhow::anyhow!("unreachable"));
+        return Err(anyhow::format_err!("unreachable"));
     }
     recv_session.abort();
     crypto_session.abort();

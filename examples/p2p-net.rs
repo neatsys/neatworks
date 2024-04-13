@@ -145,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
         result = control_session => result?,
         Err(err) = hello_session => Err(err)?,
     }
-    Err(anyhow::anyhow!("unreachable"))
+    Err(anyhow::format_err!("unreachable"))
 }
 
 // cSpell:words kademlia bincode seedable

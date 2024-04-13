@@ -23,10 +23,10 @@ async fn main() -> anyhow::Result<()> {
     if command.as_deref() == Some("start-peers") {
         let public_ip = args()
             .nth(2)
-            .ok_or(anyhow::anyhow!("public ip is not specified"))?;
+            .ok_or(anyhow::format_err!("public ip is not specified"))?;
         let private_ip = args()
             .nth(3)
-            .ok_or(anyhow::anyhow!("private ip is not specified"))?;
+            .ok_or(anyhow::format_err!("private ip is not specified"))?;
         let mut seed_addr = args().nth(4);
         for i in 0..100 {
             let ipfs = Ipfs(i);
@@ -140,7 +140,7 @@ async fn main() -> anyhow::Result<()> {
                 let addr = addresses
                     .into_iter()
                     .next()
-                    .ok_or(anyhow::anyhow!("seed peer has no address"))?;
+                    .ok_or(anyhow::format_err!("seed peer has no address"))?;
                 print!("{addr}");
                 seed_addr = Some(addr);
                 // println!("Seed address {seed_addr:?}")
@@ -184,5 +184,5 @@ async fn main() -> anyhow::Result<()> {
         }
         return Ok(());
     }
-    Err(anyhow::anyhow!("unexpected command {command:?}"))
+    Err(anyhow::format_err!("unexpected command {command:?}"))
 }

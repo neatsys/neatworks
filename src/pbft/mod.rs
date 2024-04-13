@@ -547,7 +547,7 @@ impl<M: ReplicaCommon> OnEvent<ProgressPrepared> for Replica<M::N, M::CN, M::CW,
         let pre_prepare = entry
             .pre_prepare
             .clone()
-            .ok_or(anyhow::anyhow!("missing PrePrepare"))?;
+            .ok_or(anyhow::format_err!("missing PrePrepare"))?;
         self.net.send(All, (pre_prepare, entry.requests.clone()))
     }
 }
@@ -1337,7 +1337,7 @@ impl<M: ReplicaCommon> OnEvent<Recv<Verifiable<NewView>>>
                     anyhow::ensure!(**pre_prepare == expected_pre_prepare);
                     crypto.verify(index, pre_prepare)?;
                 }
-                anyhow::Result::<_>::Ok(())
+                anyhow::Ok(())
             };
             if do_verify().is_ok() {
                 sender.send(Verified(new_view))

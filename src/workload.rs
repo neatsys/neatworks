@@ -252,7 +252,7 @@ impl<W: Workload, E: SendEvent<Invoke>, SE> OnEvent<Init> for CloseLoop<W, E, SE
         let (op, attach) = self
             .workload
             .next_op()?
-            .ok_or(anyhow::anyhow!("not enough op"))?;
+            .ok_or(anyhow::format_err!("not enough op"))?;
         let replaced = self.workload_attach.replace(attach);
         anyhow::ensure!(replaced.is_none(), "duplicated launching");
         self.sender.send(Invoke(op))

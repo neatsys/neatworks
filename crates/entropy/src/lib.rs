@@ -487,7 +487,7 @@ impl<M: PeerCommon> OnEvent<RecvOffer<SendFragment>>
                 assert!(state.notify.is_none());
                 let peer_id = send_fragment
                     .peer_id
-                    .ok_or(anyhow::anyhow!("expected peer id in SendFragment"))?;
+                    .ok_or(anyhow::format_err!("expected peer id in SendFragment"))?;
                 state.notify = Some(peer_id);
             }
             let chunk = send_fragment.chunk;
@@ -868,7 +868,7 @@ pub mod fs {
                 JoinNextLoad((Chunk, u32, Payload)),
             }
             match tokio::select! {
-                event = events.recv() => Select::Recv(event.ok_or(anyhow::anyhow!("channel closed"))?),
+                event = events.recv() => Select::Recv(event.ok_or(anyhow::format_err!("channel closed"))?),
                 Some(result) = store_tasks.join_next() => Select::JoinNextStore(result??),
                 Some(result) = load_tasks.join_next() => Select::JoinNextLoad(result??),
             } {

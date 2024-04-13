@@ -53,14 +53,14 @@ pub struct SendError<M> {
 
 impl<N: Into<M>, M> SendEvent<N> for UnboundedSender<M> {
     fn send(&mut self, event: N) -> anyhow::Result<()> {
-        UnboundedSender::send(self, event.into()).map_err(|err| anyhow::anyhow!(err.to_string()))
+        UnboundedSender::send(self, event.into()).map_err(|err| anyhow::format_err!(err.to_string()))
     }
 }
 
 impl<N: Into<M>, M> SendEventOnce<N> for oneshot::Sender<M> {
     fn send_once(self, event: N) -> anyhow::Result<()> {
         self.send(event.into())
-            .map_err(|_| anyhow::anyhow!("send once failed"))
+            .map_err(|_| anyhow::format_err!("send once failed"))
     }
 }
 
@@ -171,7 +171,7 @@ impl<M> Session<M> {
                     result??;
                     continue;
                 }
-                Select::Recv(event) => event.ok_or(anyhow::anyhow!("channel closed"))?,
+                Select::Recv(event) => event.ok_or(anyhow::format_err!("channel closed"))?,
             };
             match event {
                 Event::Timer(timer_id) => {
@@ -225,7 +225,7 @@ impl Timer for SessionTimer {
     fn unset(&mut self, TimerId(timer_id): TimerId) -> anyhow::Result<()> {
         self.handles
             .remove(&timer_id)
-            .ok_or(anyhow::anyhow!("timer not exists"))?
+            .ok_or(anyhow::format_err!("timer not exists"))?
             .abort();
         Ok(())
     }

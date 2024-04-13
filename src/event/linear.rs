@@ -57,7 +57,7 @@ impl Timer {
             .events
             .iter()
             .position(|event| event.id == *id)
-            .ok_or(anyhow::anyhow!("timer not found"))?;
+            .ok_or(anyhow::format_err!("timer not found"))?;
         Ok(self.events.remove(i))
     }
 

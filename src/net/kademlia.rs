@@ -187,7 +187,7 @@ impl<M: ControlCommon, B> OnEvent<QueryTimeout> for Control<M::N, M::P, M::M, M:
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         // TODO gracefully handle if necessary
-        Err(anyhow::anyhow!("query timeout for ({target}, {count})"))
+        Err(anyhow::format_err!("query timeout for ({target}, {count})"))
     }
 }
 

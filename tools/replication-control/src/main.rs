@@ -140,7 +140,7 @@ async fn benchmark_session(
             result = result_session(control_client.clone(), client_url.into()) => break 'select result?,
             result = watchdog_sessions.join_next() => result.unwrap()??,
         }
-        return Err(anyhow::anyhow!("unexpected shutdown"));
+        return Err(anyhow::format_err!("unexpected shutdown"));
     };
     for replica_url in replica_urls {
         control_client

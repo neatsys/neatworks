@@ -34,7 +34,7 @@ use std::{
 
 use derive_where::derive_where;
 
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::event::{erased, OnEvent, OnTimer, SendEvent, SendEventOnce, Timer};
 
@@ -80,7 +80,7 @@ pub struct Closed(SocketAddr, u32);
 pub struct CloseGuard<E>(E, Option<SocketAddr>, u32);
 
 impl<E: SendEventOnce<Closed>> CloseGuard<E> {
-    fn close(self, addr: SocketAddr) -> anyhow::Result<()> {
+    pub fn close(self, addr: SocketAddr) -> anyhow::Result<()> {
         if let Some(also_addr) = self.1 {
             anyhow::ensure!(addr == also_addr)
         }
@@ -91,7 +91,7 @@ impl<E: SendEventOnce<Closed>> CloseGuard<E> {
 pub trait Protocol<B> {
     type Sender: SendEvent<B>;
 
-    fn connect<E: SendEventOnce<Closed>>(
+    fn connect<E: SendEventOnce<Closed> + Send + 'static>(
         &self,
         remote: SocketAddr,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
@@ -100,7 +100,7 @@ pub trait Protocol<B> {
 
     type Incoming;
 
-    fn accept<E: SendEventOnce<Closed>>(
+    fn accept<E: SendEventOnce<Closed> + Send + 'static>(
         connection: Self::Incoming,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
         close_guard: CloseGuard<E>,
@@ -128,7 +128,7 @@ impl<E: SendEvent<Outgoing<B>>, B: Buf> SendMessage<IterAddr<'_, SocketAddr>, B>
 }
 
 impl<
-        E: SendEventOnce<Closed> + Clone,
+        E: SendEventOnce<Closed> + Clone + Send + 'static,
         P: Protocol<B>,
         B: Buf,
         F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
@@ -146,7 +146,7 @@ impl<
 }
 
 impl<
-        E: SendEventOnce<Closed> + Clone,
+        E: SendEventOnce<Closed> + Clone + Send + 'static,
         P: Protocol<B>,
         B: Buf,
         F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
@@ -198,7 +198,7 @@ impl<
 pub struct Incoming<T>(pub T);
 
 impl<
-        E: SendEventOnce<Closed> + Clone,
+        E: SendEventOnce<Closed> + Clone + Send + 'static,
         P: Protocol<B>,
         B: Buf,
         F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
@@ -223,7 +223,7 @@ impl<
                 seq: self.seq,
             });
         } else {
-            info!("<<< {remote} skip inserting incoming connection")
+            warn!("<<< {remote} incoming connection from connected address")
         }
         Ok(())
     }
@@ -233,6 +233,7 @@ impl<E, P: Protocol<B>, B, F> erased::OnEvent<Closed> for Dispatch<E, P, B, F> {
     fn on_event(&mut self, Closed(addr, seq): Closed, _: &mut impl Timer) -> anyhow::Result<()> {
         if let Some(connection) = self.connections.get(&addr) {
             if connection.seq == seq {
+                debug!(">>> {addr:?} outgoing connection closed");
                 self.connections.remove(&addr);
             }
         }

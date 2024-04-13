@@ -1,5 +1,6 @@
 use std::{fmt::Debug, net::SocketAddr, sync::Arc};
 
+use quinn::ConnectionError;
 use rustls::RootCertStore;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tracing::{warn, Instrument};
@@ -75,7 +76,7 @@ impl Quic {
                 if let Err(err) = async {
                     // determine incomplete stream?
                     on_buf(&stream.read_to_end(MAX_BUF_LEN).await?)?;
-                    anyhow::Result::<_>::Ok(())
+                    anyhow::Ok(())
                 }
                 .await
                 {
@@ -85,28 +86,52 @@ impl Quic {
         }
     }
 
-    async fn write_task<B: Buf>(connection: quinn::Connection, mut receiver: UnboundedReceiver<B>) {
-        while let Some(buf) = receiver.recv().await {
-            let connection = connection.clone();
-            tokio::spawn(async move {
-                if let Err(err) = async {
-                    connection.open_uni().await?.write_all(buf.as_ref()).await?;
-                    anyhow::Result::<_>::Ok(())
+    async fn write_task<B: Buf, E: SendEventOnce<Closed>>(
+        connection: quinn::Connection,
+        mut receiver: UnboundedReceiver<B>,
+        close_guard: CloseGuard<E>,
+    ) {
+        loop {
+            enum Select<B> {
+                Recv(Option<B>),
+                Closed(ConnectionError),
+            }
+            match tokio::select! {
+                recv = receiver.recv() => Select::Recv(recv),
+                closed = connection.closed() => Select::Closed(closed),
+            } {
+                Select::Recv(None) => return, // skip close, we are outliving dispatcher
+                Select::Recv(Some(buf)) => {
+                    let connection = connection.clone();
+                    tokio::spawn(async move {
+                        if let Err(err) = async {
+                            connection.open_uni().await?.write_all(buf.as_ref()).await?;
+                            anyhow::Ok(())
+                        }
+                        .await
+                        {
+                            warn!(">>> {} {err}", connection.remote_address())
+                        }
+                    });
                 }
-                .await
-                {
-                    warn!(">>> {} {err}", connection.remote_address())
+                Select::Closed(err) => {
+                    if !matches!(err, ConnectionError::TimedOut) {
+                        warn!(">> {:?} {err}", connection.remote_address())
+                    }
+                    break;
                 }
-            });
+            }
         }
-        // connection.close(Default::default(), Default::default())
+        if let Err(err) = close_guard.close(connection.remote_address()) {
+            warn!("close {:?} {err}", connection.remote_address())
+        }
     }
 }
 
 impl<B: Buf> Protocol<B> for Quic {
     type Sender = UnboundedSender<B>;
 
-    fn connect<E: SendEventOnce<Closed>>(
+    fn connect<E: SendEventOnce<Closed> + Send + 'static>(
         &self,
         remote: SocketAddr,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
@@ -123,7 +148,7 @@ impl<B: Buf> Protocol<B> for Quic {
                     endpoint.connect(remote, "neatworks.quic")
                 }?;
                 drop(span.exit());
-                anyhow::Result::<_>::Ok(
+                anyhow::Ok(
                     connecting
                         .instrument(tracing::debug_span!("connect", local = ?endpoint.local_addr(), remote = ?remote))
                         .await?,
@@ -137,14 +162,14 @@ impl<B: Buf> Protocol<B> for Quic {
                 }
             };
             tokio::spawn(Self::read_task(connection.clone(), on_buf));
-            tokio::spawn(Self::write_task(connection, receiver));
+            tokio::spawn(Self::write_task(connection, receiver, close_guard));
         });
         sender
     }
 
     type Incoming = quinn::Connection;
 
-    fn accept<E: SendEventOnce<Closed>>(
+    fn accept<E: SendEventOnce<Closed> + Send + 'static>(
         connection: Self::Incoming,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
         close_guard: CloseGuard<E>,
@@ -160,7 +185,7 @@ impl<B: Buf> Protocol<B> for Quic {
             None
         } else {
             let (sender, receiver) = unbounded_channel();
-            tokio::spawn(Self::write_task(connection, receiver));
+            tokio::spawn(Self::write_task(connection, receiver, close_guard));
             Some((remote, sender))
         }
     }
@@ -180,7 +205,7 @@ pub async fn accept_session(
         tokio::spawn(async move {
             if let Err(err) = async {
                 sender.send(Incoming(conn.await?))?;
-                anyhow::Result::<_>::Ok(())
+                anyhow::Ok(())
             }
             .await
             {

@@ -38,7 +38,7 @@ impl App for Sqlite {
                 if let Some(values) = self
                     .connection
                     .lock()
-                    .map_err(|err| anyhow::anyhow!(err.to_string()))?
+                    .map_err(|err| anyhow::format_err!(err.to_string()))?
                     .prepare_cached("SELECT * FROM users WHERE ycsb_key = ?1")?
                     .query_row((key,), |row| {
                         (0..self.field_count)
@@ -56,7 +56,7 @@ impl App for Sqlite {
                 if self
                     .connection
                     .lock()
-                    .map_err(|err| anyhow::anyhow!(err.to_string()))?
+                    .map_err(|err| anyhow::format_err!(err.to_string()))?
                     .prepare_cached(&format!(
                         "UPDATE users SET field{field} = ?2 WHERE ycsb_key = ?1"
                     ))?
@@ -71,7 +71,7 @@ impl App for Sqlite {
             Op::Insert(key, values) => {
                 self.connection
                     .lock()
-                    .map_err(|err| anyhow::anyhow!(err.to_string()))?
+                    .map_err(|err| anyhow::format_err!(err.to_string()))?
                     .prepare_cached(&format!(
                         "INSERT INTO users (ycsb_key, {}) VALUES({})",
                         (0..self.field_count)
@@ -90,7 +90,7 @@ impl App for Sqlite {
                 let connection = self
                     .connection
                     .lock()
-                    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                    .map_err(|err| anyhow::format_err!(err.to_string()))?;
                 let mut statement = connection.prepare_cached(
                     "SELECT * FROM users WHERE ycsb_key >= ?1 ORDER BY ycsb_key LIMIT ?2",
                 )?;
@@ -118,7 +118,7 @@ impl App for Sqlite {
                 if self
                     .connection
                     .lock()
-                    .map_err(|err| anyhow::anyhow!(err.to_string()))?
+                    .map_err(|err| anyhow::format_err!(err.to_string()))?
                     .prepare_cached("DELETE FROM users WHERE ycsb_key = ?1")?
                     .execute((key,))?
                     == 0

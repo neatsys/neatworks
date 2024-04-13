@@ -38,12 +38,12 @@ impl crate::event::Timer for Timer {
         let state = self
             .states
             .remove(&id)
-            .ok_or(anyhow::anyhow!("missing timer state"))?;
+            .ok_or(anyhow::format_err!("missing timer state"))?;
         let removed = self.deadlines.remove(&(state.deadline, id));
         if removed {
             Ok(())
         } else {
-            Err(anyhow::anyhow!(
+            Err(anyhow::format_err!(
                 "inconsistency between states and deadlines"
             ))
         }
@@ -59,8 +59,8 @@ impl Timer {
         let (_, id) = self
             .deadlines
             .pop_first()
-            .ok_or(anyhow::anyhow!("empty deadlines"))?;
-        let state = self.states.get_mut(&id).ok_or(anyhow::anyhow!(
+            .ok_or(anyhow::format_err!("empty deadlines"))?;
+        let state = self.states.get_mut(&id).ok_or(anyhow::format_err!(
             "inconsistency between states and deadlines"
         ))?;
         state.deadline += state.period;

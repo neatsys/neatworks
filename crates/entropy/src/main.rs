@@ -159,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
         result = upcall_session => result?,
     }
     // Arc::try_unwrap(runtime)
-    //     .map_err(|_| anyhow::anyhow!("cannot shutdown runtime"))?
+    //     .map_err(|_| anyhow::format_err!("cannot shutdown runtime"))?
     //     .shutdown_background();
     Ok(())
 }
@@ -381,7 +381,7 @@ async fn start_peer(
         result = tcp_control_session => result?,
         // result = quic_control_session => result?,
     }
-    Err(anyhow::anyhow!("unexpected shutdown"))
+    Err(anyhow::format_err!("unexpected shutdown"))
 }
 
 async fn stop_peers(State(state): State<AppState>) {
@@ -399,7 +399,7 @@ async fn put_chunk(
         let buf = multipart
             .next_field()
             .await?
-            .ok_or(anyhow::anyhow!("missing filed"))?
+            .ok_or(anyhow::format_err!("missing filed"))?
             .bytes()
             .await?;
         let chunk = buf.sha256();
@@ -409,7 +409,7 @@ async fn put_chunk(
         state.peers.lock().await.senders[peer_index].send(Put(chunk, buf))?;
         // detach receiving, so that even if http connection closed receiver keeps alive
         tokio::spawn(receiver).await??;
-        anyhow::Result::<_>::Ok(format!("{chunk:x}"))
+        anyhow::Ok(format!("{chunk:x}"))
     };
     match task.await {
         Ok(result) => (StatusCode::OK, result),
@@ -430,7 +430,7 @@ async fn get_chunk(
         let replaced = state.pending_gets.lock().await.insert(chunk, sender);
         assert!(replaced.is_none());
         state.peers.lock().await.senders[peer_index].send(Get(chunk))?;
-        anyhow::Result::<_>::Ok(tokio::spawn(receiver).await??)
+        anyhow::Ok(tokio::spawn(receiver).await??)
     };
     match task.await {
         Ok(Payload(result)) => (StatusCode::OK, result),
@@ -545,7 +545,7 @@ async fn put_impl(
     let chunk = put_sessions
         .join_next()
         .await
-        .ok_or(anyhow::anyhow!("no peer url for the chunk"))???;
+        .ok_or(anyhow::format_err!("no peer url for the chunk"))???;
     while let Some(also_chunk) = put_sessions.join_next().await {
         anyhow::ensure!(also_chunk?? == chunk, "inconsistent chunk among peers");
     }
@@ -643,7 +643,7 @@ async fn benchmark_get(State(state): State<AppState>, Json(config): Json<GetConf
                 });
             }
         }
-        Err(anyhow::anyhow!("recover fail"))
+        Err(anyhow::format_err!("recover fail"))
     });
     let get_id = state.benchmark_op_id.fetch_add(1, SeqCst);
     state.benchmark_gets.lock().await.insert(get_id, session);

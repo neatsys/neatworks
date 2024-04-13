@@ -409,7 +409,7 @@ async fn operation_session(
 
     let put_url = instance_urls
         .choose(&mut thread_rng())
-        .ok_or(anyhow::anyhow!("no instance available"))?;
+        .ok_or(anyhow::format_err!("no instance available"))?;
     let put_peer_urls = peer_urls
         .choose_multiple(&mut thread_rng(), n.get() * replication_factor)
         .cloned()
@@ -465,7 +465,7 @@ async fn operation_session(
     sleep(Duration::from_secs(1)).await;
     let get_url = instance_urls
         .choose(&mut thread_rng())
-        .ok_or(anyhow::anyhow!("no instance available"))?;
+        .ok_or(anyhow::format_err!("no instance available"))?;
     let get_peer_urls = peer_urls
         .choose_multiple(&mut thread_rng(), n.into())
         .cloned()
@@ -516,6 +516,6 @@ async fn operation_session(
     if result.digest == digest {
         Ok(())
     } else {
-        Err(anyhow::anyhow!("digest mismatch"))
+        Err(anyhow::format_err!("digest mismatch"))
     }
 }

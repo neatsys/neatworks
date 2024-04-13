@@ -281,7 +281,7 @@ impl<const S: usize> Clock<S> {
         let counter = self
             .counters()
             .nth(index)
-            .ok_or(anyhow::anyhow!("out of bound index {index}"))?
+            .ok_or(anyhow::format_err!("out of bound index {index}"))?
             + 1;
 
         let mut pw = PartialWitness::new();

@@ -50,7 +50,7 @@ impl<S: Clone + Send + 'static, E: Clone + Send + 'static> SpawnExecutor<S, E> {
             }
             if let Select::Recv(work) = tokio::select! {
                 Some(result) = self.handles.join_next() => Select::JoinNext(result??),
-                work = self.receiver.recv() => Select::Recv(work.ok_or(anyhow::anyhow!("channel closed"))?),
+                work = self.receiver.recv() => Select::Recv(work.ok_or(anyhow::format_err!("channel closed"))?),
             } {
                 let state = state.clone();
                 let mut emit = emit.clone();

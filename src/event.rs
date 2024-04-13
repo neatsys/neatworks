@@ -52,7 +52,7 @@ impl<T: SendEventOnce<M>, M> SendEvent<M> for Option<T> {
         if let Some(emit) = self.take() {
             emit.send_once(event)
         } else {
-            Err(anyhow::anyhow!("can only send once"))
+            Err(anyhow::format_err!("can only send once"))
         }
     }
 }
@@ -207,7 +207,7 @@ impl<S: OnEventRichTimer> OnTimer for Buffered<S, S::Event> {
         let event = (self
             .attached
             .get_mut(&timer_id)
-            .ok_or(anyhow::anyhow!("missing timer attachment"))?)();
+            .ok_or(anyhow::format_err!("missing timer attachment"))?)();
         self.on_event(event, timer)
     }
 }
@@ -435,7 +435,7 @@ pub mod erased {
             (self
                 .attached
                 .get_mut(&timer_id)
-                .ok_or(anyhow::anyhow!("missing timer attachment"))?)()(self, timer)
+                .ok_or(anyhow::format_err!("missing timer attachment"))?)()(self, timer)
         }
     }
 

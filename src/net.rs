@@ -194,7 +194,7 @@ impl<N: SendMessage<A, M>, A: Addr, M, B: Into<usize>> SendMessage<B, M> for Ind
         let dest = self
             .addrs
             .get(dest.into())
-            .ok_or(anyhow::anyhow!("index out of bound"))?;
+            .ok_or(anyhow::format_err!("index out of bound"))?;
         self.inner_net.send(dest.clone(), message)
     }
 }

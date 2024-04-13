@@ -39,7 +39,7 @@ fn main() -> anyhow::Result<()> {
     let settings = Settings {
         invariant: move |&State(n): &State| {
             if n == challenging_n {
-                Err(anyhow::anyhow!("fail to defeat conjecture"))
+                Err(anyhow::format_err!("fail to defeat conjecture"))
             } else {
                 Ok(())
             }

@@ -9,7 +9,7 @@ pub type Sender<M> = std::sync::mpsc::Sender<M>;
 
 impl<N: Into<M>, M> SendEvent<N> for Sender<M> {
     fn send(&mut self, event: N) -> anyhow::Result<()> {
-        Sender::send(self, event.into()).map_err(|err| anyhow::anyhow!(err.to_string()))
+        Sender::send(self, event.into()).map_err(|err| anyhow::format_err!(err.to_string()))
     }
 }
 

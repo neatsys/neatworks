@@ -151,7 +151,7 @@ impl<T: Service<A, M, N> + ?Sized, A, M, N> ServiceExt<A, M, N> for T {
                 .serve_internal
                 .take()
                 // TODO compile time check instead
-                .ok_or(anyhow::anyhow!(
+                .ok_or(anyhow::format_err!(
                     "the offer has already been accepted/rejected"
                 ))?,
             expect_len: expect_len.into(),
@@ -188,7 +188,7 @@ pub async fn session<A, M, N: Send + 'static>(
             JoinNextCancel(u32),
         }
         match tokio::select! {
-            event = events.recv() => Select::Recv(event.ok_or(anyhow::anyhow!("channel closed"))?),
+            event = events.recv() => Select::Recv(event.ok_or(anyhow::format_err!("channel closed"))?),
             stream = listener.accept() => Select::Accept(stream?),
             Some(result) = send_tasks.join_next() => Select::JoinNextSend(result?),
             Some(result) = recv_tasks.join_next() => Select::JoinNextRecv(result?),
@@ -232,7 +232,7 @@ pub async fn session<A, M, N: Send + 'static>(
                         } else {
                             stream.read_to_end(&mut buf).await?;
                         }
-                        anyhow::Result::<_>::Ok(buf)
+                        anyhow::Ok(buf)
                     };
                     let buf = if let Some(cancel) = accept.cancel {
                         tokio::select! {

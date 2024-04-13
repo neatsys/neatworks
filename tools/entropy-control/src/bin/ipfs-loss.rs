@@ -10,7 +10,7 @@ use tokio::{process::Command, task::JoinSet, time::sleep};
 async fn main() -> anyhow::Result<()> {
     let replication_factor = args()
         .nth(1)
-        .ok_or(anyhow::anyhow!("not specify replication factor"))?
+        .ok_or(anyhow::format_err!("not specify replication factor"))?
         .parse()?;
     let op_client = reqwest::Client::new();
 
@@ -76,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
                 peer_url(
                     honest_peers
                         .choose(&mut thread_rng())
-                        .ok_or(anyhow::anyhow!("cannot choose peer"))?,
+                        .ok_or(anyhow::format_err!("cannot choose peer"))?,
                 ),
             ));
         }
@@ -114,7 +114,7 @@ async fn put_session(op_client: reqwest::Client, peer_urls: Vec<String>) -> anyh
         let mut count = 0;
         let hash = loop {
             match async {
-                anyhow::Result::<_>::Ok(
+                anyhow::Ok(
                     op_client
                         .post(format!("{peer_url}/api/v0/add"))
                         .multipart(Form::new().part("", Part::bytes(data.clone())))
@@ -144,7 +144,7 @@ async fn put_session(op_client: reqwest::Client, peer_urls: Vec<String>) -> anyh
             saved_hash = Some(hash)
         }
     }
-    saved_hash.ok_or(anyhow::anyhow!("cannot choose three peers"))
+    saved_hash.ok_or(anyhow::format_err!("cannot choose three peers"))
 }
 
 async fn shutdown_session(op_client: reqwest::Client, peer_url: String) -> anyhow::Result<()> {

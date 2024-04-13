@@ -103,7 +103,7 @@ impl<B: Buf> Protocol<B> for Tcp {
                 let mut stream = TcpStream::connect(remote).await?;
                 stream.set_nodelay(true)?;
                 stream.write_all(&preamble).await?;
-                anyhow::Result::<_>::Ok(stream)
+                anyhow::Ok(stream)
             };
             let stream = match task
                 .instrument(tracing::debug_span!("connect", ?remote))
@@ -152,7 +152,7 @@ pub async fn accept_session(
             stream.set_nodelay(true)?;
             let mut preamble = vec![0; TCP_PREAMBLE_LEN];
             stream.read_exact(&mut preamble).await?;
-            anyhow::Result::<_>::Ok(
+            anyhow::Ok(
                 bincode::options()
                     .allow_trailing_bytes()
                     .deserialize(&preamble)?,
@@ -209,7 +209,7 @@ pub mod simplex {
                     stream.write_u64(message.as_ref().len() as _).await?;
                     stream.write_all(message.as_ref()).await?;
                     stream.flush().await?;
-                    anyhow::Result::<_>::Ok(())
+                    anyhow::Ok(())
                 }
                 .await
                 {

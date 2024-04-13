@@ -51,6 +51,6 @@ impl<T, D> Timer<T, D> {
     pub fn get_timer_data(&self, TimerId(timer_id): &TimerId) -> anyhow::Result<&D> {
         self.attach
             .get(timer_id)
-            .ok_or(anyhow::anyhow!("missing timer attachment"))
+            .ok_or(anyhow::format_err!("missing timer attachment"))
     }
 }
