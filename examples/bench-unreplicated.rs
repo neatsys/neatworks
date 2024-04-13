@@ -117,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
                             erased::session::Sender::from(close_loop_session.sender()),
                         ));
                         let mut state_sender = state_session.sender();
-                        let mut tcp_control = Dispatch::<_, _, bytes::Bytes, _>::new(
+                        let mut tcp_control = Dispatch::<_, _, _, bytes::Bytes, _>::new(
                             Tcp::new(None)?,
                             move |buf: &_| to_client_on_buf(buf, &mut state_sender),
                             // effectively disable connection table clean up
@@ -141,7 +141,7 @@ async fn main() -> anyhow::Result<()> {
                         );
                     } else {
                         let mut tcp_session = Session::new();
-                        let raw_net = Net(tcp_session.sender());
+                        let raw_net = Net::from(tcp_session.sender());
                         let mut state = Unify(Client::new(
                             id,
                             listener.local_addr()?,
@@ -173,7 +173,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 } else if flag_quic {
                     let mut quic_session = Session::new();
-                    let raw_net = Net(quic_session.sender());
+                    let raw_net = Net::from(quic_session.sender());
                     let quic = Quic::new(client_addr)?;
                     let mut state = Unify(Client::new(
                         id,
@@ -317,7 +317,7 @@ async fn main() -> anyhow::Result<()> {
             let mut state = Unify(Replica::new(Null, ToClientMessageNet::new(simplex::Tcp)));
             let mut state_session = Session::new();
             let mut state_sender = state_session.sender();
-            let mut tcp_control = Dispatch::<_, _, bytes::Bytes, _>::new(
+            let mut tcp_control = Dispatch::<_, _, _, bytes::Bytes, _>::new(
                 Tcp::new(None)?,
                 move |buf: &_| to_replica_on_buf::<SocketAddr>(buf, &mut state_sender),
                 BlackHole,
@@ -330,7 +330,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         let mut tcp_session = Session::new();
-        let raw_net = Net(tcp_session.sender());
+        let raw_net = Net::from(tcp_session.sender());
         let mut state = Unify(Replica::new(Null, ToClientMessageNet::new(raw_net)));
         let mut state_session = Session::new();
         let mut state_sender = state_session.sender();
@@ -359,7 +359,7 @@ async fn main() -> anyhow::Result<()> {
 
     if flag_quic {
         let mut quic_session = Session::new();
-        let raw_net = Net(quic_session.sender());
+        let raw_net = Net::from(quic_session.sender());
         let mut state = Unify(Replica::new(Null, ToClientMessageNet::new(raw_net)));
         let mut state_session = Session::new();
         let mut state_sender = state_session.sender();

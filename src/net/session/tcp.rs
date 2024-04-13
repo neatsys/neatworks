@@ -87,14 +87,14 @@ impl Tcp {
     }
 }
 
-impl<B: Buf> Protocol<B> for Tcp {
+impl<B: Buf> Protocol<SocketAddr, B> for Tcp {
     type Sender = UnboundedSender<B>;
 
-    fn connect<E: SendEventOnce<Closed>>(
+    fn connect<E: SendEventOnce<Closed<SocketAddr>>>(
         &self,
         remote: SocketAddr,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Send + 'static,
-        close_guard: CloseGuard<E>,
+        close_guard: CloseGuard<E, SocketAddr>,
     ) -> Self::Sender {
         let preamble = self.0.clone();
         let (sender, receiver) = unbounded_channel();
@@ -124,10 +124,10 @@ impl<B: Buf> Protocol<B> for Tcp {
 
     type Incoming = (TcpPreamble, TcpStream);
 
-    fn accept<E: SendEventOnce<Closed>>(
+    fn accept<E: SendEventOnce<Closed<SocketAddr>>>(
         (preamble, stream): Self::Incoming,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Send + 'static,
-        close_guard: CloseGuard<E>,
+        close_guard: CloseGuard<E, SocketAddr>,
     ) -> Option<(SocketAddr, Self::Sender)> {
         let (read, write) = stream.into_split();
         tokio::spawn(Tcp::read_task(read, on_buf, preamble));

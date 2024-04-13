@@ -86,10 +86,10 @@ impl Quic {
         }
     }
 
-    async fn write_task<B: Buf, E: SendEventOnce<Closed>>(
+    async fn write_task<B: Buf, E: SendEventOnce<Closed<SocketAddr>>>(
         connection: quinn::Connection,
         mut receiver: UnboundedReceiver<B>,
-        close_guard: CloseGuard<E>,
+        close_guard: CloseGuard<E, SocketAddr>,
     ) {
         loop {
             enum Select<B> {
@@ -128,14 +128,14 @@ impl Quic {
     }
 }
 
-impl<B: Buf> Protocol<B> for Quic {
+impl<B: Buf> Protocol<SocketAddr, B> for Quic {
     type Sender = UnboundedSender<B>;
 
-    fn connect<E: SendEventOnce<Closed> + Send + 'static>(
+    fn connect<E: SendEventOnce<Closed<SocketAddr>> + Send + 'static>(
         &self,
         remote: SocketAddr,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
-        close_guard: CloseGuard<E>,
+        close_guard: CloseGuard<E, SocketAddr>,
     ) -> Self::Sender {
         let endpoint = self.0.clone();
         // tracing::debug!("{:?} connect {remote}", endpoint.local_addr());
@@ -169,10 +169,10 @@ impl<B: Buf> Protocol<B> for Quic {
 
     type Incoming = quinn::Connection;
 
-    fn accept<E: SendEventOnce<Closed> + Send + 'static>(
+    fn accept<E: SendEventOnce<Closed<SocketAddr>> + Send + 'static>(
         connection: Self::Incoming,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
-        close_guard: CloseGuard<E>,
+        close_guard: CloseGuard<E, SocketAddr>,
     ) -> Option<(SocketAddr, Self::Sender)> {
         let remote = connection.remote_address();
         tokio::spawn(Self::read_task(connection.clone(), on_buf));

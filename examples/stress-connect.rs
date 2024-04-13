@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
             quic,
             control_session.sender(),
         ));
-        let mut net = Net(control_session.sender());
+        let mut net = Net::from(control_session.sender());
         sessions.spawn(async move { control_session.run(&mut control).await });
         sessions.spawn(async move {
             for j in 0..multiplier {

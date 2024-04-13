@@ -296,7 +296,7 @@ async fn start_peer(
         // it done)
         kademlia::Peer::<_, _, _, BlackHole, _>::new(
             buckets,
-            Box::new(MessageNet::new(dispatch::Net(tcp_control_session.sender())))
+            Box::new(MessageNet::new(dispatch::Net::from(tcp_control_session.sender())))
                 as Box<dyn kademlia::Net<SocketAddr> + Send + Sync>,
             // MessageNet::new(DispatchNet(Sender::from(quic_control_session.sender()))),
             Sender::from(kademlia_control_session.sender()),
@@ -308,7 +308,7 @@ async fn start_peer(
         ),
     ));
     let mut kademlia_control = Blanket(Buffered::from(Control::new(
-        Box::new(dispatch::Net(tcp_control_session.sender()))
+        Box::new(dispatch::Net::from(tcp_control_session.sender()))
             as Box<dyn augustus::net::kademlia::Net<SocketAddr, bytes::Bytes> + Send + Sync>,
         // DispatchNet(Sender::from(quic_control_session.sender())),
         Box::new(Sender::from(kademlia_session.sender()))
