@@ -5,74 +5,48 @@
 // connection
 // a few design choice has been explored, and here i note the rationale for
 // current tradeoffs
-// there's no aggressive throttling/eviction strategy built into this connection
-// management. if the net is asked for concurrently sending to 10K addresses,
-// then 10K connections will be established and kept inside connection table.
-// this level is not the most proper (or even is the worst) place to do resource
-// management. current `SendMessage<_, _>` interface is too simple for passing
-// down any user intent (e.g. whether the sending address will be sent again in
-// near future), while it is not "low-level" enough to assume exclusive access
-// to system network resource. it's hard to do anything useful when there's e.g.
-// bulk service out there taking up unknown yet significant amount of network.
-// as the result, i just give up
-// nevertheless, under current design there's unlikely port leaking, and i
-// haven't seen warning from connection workers for a while. i guess the only
-// remaining concern is that there's too many TIME_WAIT connections out there
-// exceeding the amount kernel would like to keep i.e. 32768, so there may be
-// unexpected fast recycling which causes corruption. i don't expect that to
-// happen with noticeable probability, and switching to QUIC should workaround
-// the issue quiet nicely
-// if there's no active reclaiming, how should we decide when to reclaim a
-// connection? unlike us, libp2p actually expose a more complex connection based
-// interface to upper layer, and a connection is closed when application does
-// not refer to it anymore, so we cannot mirror its behavior into our stateless
-// interface. does application itself know when it should keep a connection open
-// and when it should release? in kademlia it might know, but in entropy the
-// message pattern may be more in a unidirectional oneshot style. not sure
-// whether that's inherent difference among protocols or it just libp2p's
-// implementation conforms its network interface
-// anyway, we have to define our own reclaiming policy. tentatively a connection
-// is reclaimed if it has no outgoing traffic for one whole second. the
-// rationale is that
-// * network communication is usually ping-pong style. if we haven't sent to
-//   some address for one whole second, then it probably is not sending to us
-//   for a while either
-// * even if it is an unidirectional traffic, in current implementation
-//   reclaiming the outgoing traffic worker does not affect the incoming
-//   processing
-// * one second is a seemingly short but actually reasonable timeout for session
-//   ending. a session is a period that each side of the connection response to
-//   each other's latest message almost immediately, and all exchanged messages
-//   are around the same topic/context. we guarantee to never interrupt a
-//   session, but we don't try to predict when the next session will come
-//
-// this solution comes with inherit overhead: each outgoing message must go
+// there were several attempts of proactively throttling/evicting connections
+// at this dispatching layer. those did not work well. on the one hand, we don't
+// have so much information that is useful for congestion control from our
+// inputs i.e. `SendMessage<...>` calls. on the other hand, we are not the only
+// consumer of underlying network resources, as others may be e.g. bulk service,
+// and we have no idea of how much resource should be preserved for them. in
+// conclusion, it's not a good idea to integrate resource management here
+// the only thing remains to matter is about resource leaking. there is probably
+// no more port leaking going on here. another thing is that if we close too
+// many TCP connections in a short interval, there could be more TIME_WAIT
+// connections than the amount kernel would like to track i.e. 32768, and the
+// unexpected faster recycling may cause data corruption. since this dispatcher
+// does not decide the timing of closing connections (the underlying
+// `impl Protocol` does), and (again) we don't know how frequent others are
+// closing connections, we are not doing anything specific to this
+// the dispatcher comes with inherit overhead: each outgoing message must go
 // through two channels, the first one from `DispatchNet` to `Dispatch` and the
 // second one from `Dispatch` to the corresponded `write_task`. the first
 // queuing is necessary for maintaining a global view of all connections in the
-// `Dispatch`. the performance is not comparable to bare metal udp net
+// `Dispatch`. consider the fact that kernel already always maintains a
+// connection table (and yet another queuing layer), i generally don't satisfy
+// with this solution
 use std::{
     collections::{hash_map::Entry, HashMap},
-    mem::replace,
     net::SocketAddr,
-    time::Duration,
 };
 
 use derive_where::derive_where;
 
 use tracing::{info, warn};
 
-use crate::event::{
-    erased::{events::Init, OnEvent},
-    OnTimer, SendEvent, Timer,
-};
+use crate::event::{erased::OnEvent, SendEvent, SendEventOnce, Timer};
 
 use super::{Buf, IterAddr, SendMessage};
 
 #[derive_where(Debug; P, P::Sender)]
-pub struct Dispatch<P: Protocol<B>, B, F> {
+pub struct Dispatch<E, P: Protocol<B>, B, F> {
     protocol: P,
     connections: HashMap<SocketAddr, Connection<P, B>>,
+    seq: u32,
+    #[derive_where(skip)]
+    close_sender: E,
     #[derive_where(skip)]
     on_buf: F,
 }
@@ -80,40 +54,50 @@ pub struct Dispatch<P: Protocol<B>, B, F> {
 #[derive_where(Debug; P::Sender)]
 struct Connection<P: Protocol<B>, B> {
     sender: P::Sender,
-    using: bool,
+    seq: u32,
 }
 
-impl<P: Protocol<B>, B, F> Dispatch<P, B, F> {
-    pub fn new(protocol: P, on_buf: F) -> anyhow::Result<Self> {
+impl<E, P: Protocol<B>, B, F> Dispatch<E, P, B, F> {
+    pub fn new(protocol: P, on_buf: F, close_sender: E) -> anyhow::Result<Self> {
         Ok(Self {
             protocol,
-            connections: HashMap::new(),
+            close_sender,
             on_buf,
+            connections: Default::default(),
+            seq: 0,
         })
     }
 }
 
-impl<P: Protocol<B>, B, F> OnEvent<Init> for Dispatch<P, B, F> {
-    fn on_event(&mut self, Init: Init, timer: &mut impl Timer) -> anyhow::Result<()> {
-        timer.set(Duration::from_secs(1))?;
-        Ok(())
+pub struct Closed(SocketAddr, u32);
+
+pub struct CloseGuard<E>(E, Option<SocketAddr>, u32);
+
+impl<E: SendEventOnce<Closed>> CloseGuard<E> {
+    fn close(self, addr: SocketAddr) -> anyhow::Result<()> {
+        if let Some(also_addr) = self.1 {
+            anyhow::ensure!(addr == also_addr)
+        }
+        self.0.send_once(Closed(addr, self.2))
     }
 }
 
 pub trait Protocol<B> {
     type Sender: SendEvent<B>;
 
-    fn connect(
+    fn connect<E: SendEventOnce<Closed>>(
         &self,
         remote: SocketAddr,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
+        close_guard: CloseGuard<E>,
     ) -> Self::Sender;
 
     type Incoming;
 
-    fn accept(
+    fn accept<E: SendEventOnce<Closed>>(
         connection: Self::Incoming,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
+        close_guard: CloseGuard<E>,
     ) -> Option<(SocketAddr, Self::Sender)>;
 }
 
@@ -137,8 +121,12 @@ impl<E: SendEvent<Outgoing<B>>, B: Buf> SendMessage<IterAddr<'_, SocketAddr>, B>
     }
 }
 
-impl<P: Protocol<B>, B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static>
-    OnEvent<Outgoing<B>> for Dispatch<P, B, F>
+impl<
+        E: SendEventOnce<Closed> + Clone,
+        P: Protocol<B>,
+        B: Buf,
+        F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
+    > OnEvent<Outgoing<B>> for Dispatch<E, P, B, F>
 {
     fn on_event(
         &mut self,
@@ -147,10 +135,7 @@ impl<P: Protocol<B>, B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Sen
     ) -> anyhow::Result<()> {
         if let Some(connection) = self.connections.get_mut(&remote) {
             match connection.sender.send(buf.clone()) {
-                Ok(()) => {
-                    connection.using = true;
-                    return Ok(());
-                }
+                Ok(()) => return Ok(()),
                 Err(err) => {
                     warn!(">=> {remote} connection discontinued: {err}");
                     self.connections.remove(&remote);
@@ -163,7 +148,11 @@ impl<P: Protocol<B>, B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Sen
                 }
             }
         }
-        let mut sender = self.protocol.connect(remote, self.on_buf.clone());
+        self.seq += 1;
+        let close_guard = CloseGuard(self.close_sender.clone(), Some(remote), self.seq);
+        let mut sender = self
+            .protocol
+            .connect(remote, self.on_buf.clone(), close_guard);
         if sender.send(buf).is_err() {
             warn!(">=> {remote} new connection immediately fail")
             // we don't try again in such case since the remote is probably never reachable anymore
@@ -174,7 +163,7 @@ impl<P: Protocol<B>, B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Sen
                 remote,
                 Connection {
                     sender,
-                    using: true,
+                    seq: self.seq,
                 },
             );
         }
@@ -184,15 +173,21 @@ impl<P: Protocol<B>, B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Sen
 
 pub struct Incoming<T>(pub T);
 
-impl<P: Protocol<B>, B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static>
-    OnEvent<Incoming<P::Incoming>> for Dispatch<P, B, F>
+impl<
+        E: SendEventOnce<Closed> + Clone,
+        P: Protocol<B>,
+        B: Buf,
+        F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
+    > OnEvent<Incoming<P::Incoming>> for Dispatch<E, P, B, F>
 {
     fn on_event(
         &mut self,
         Incoming(event): Incoming<P::Incoming>,
         _: &mut impl Timer,
     ) -> anyhow::Result<()> {
-        let Some((remote, sender)) = P::accept(event, self.on_buf.clone()) else {
+        self.seq += 1;
+        let close_guard = CloseGuard(self.close_sender.clone(), None, self.seq);
+        let Some((remote, sender)) = P::accept(event, self.on_buf.clone(), close_guard) else {
             return Ok(());
         };
         // always prefer to keep the connection created locally
@@ -201,7 +196,7 @@ impl<P: Protocol<B>, B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Sen
         if let Entry::Vacant(entry) = self.connections.entry(remote) {
             entry.insert(Connection {
                 sender,
-                using: true,
+                seq: self.seq,
             });
         } else {
             info!("<<< {remote} skip inserting incoming connection")
@@ -210,14 +205,17 @@ impl<P: Protocol<B>, B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Sen
     }
 }
 
-impl<P: Protocol<B>, B, F> OnTimer for Dispatch<P, B, F> {
-    fn on_timer(&mut self, _: crate::event::TimerId, _: &mut impl Timer) -> anyhow::Result<()> {
-        if self.connections.is_empty() {
-            return Ok(());
+impl<E, P: Protocol<B>, B, F> OnEvent<Closed> for Dispatch<E, P, B, F> {
+    fn on_event(
+        &mut self,
+        Closed(addr, seq): Closed,
+        timer: &mut impl Timer,
+    ) -> anyhow::Result<()> {
+        if let Some(connection) = self.connections.get(&addr) {
+            if connection.seq == seq {
+                self.connections.remove(&addr);
+            }
         }
-        self.connections
-            .retain(|_, connection| replace(&mut connection.using, false));
-        info!("retaining {} connections", self.connections.len());
         Ok(())
     }
 }

@@ -5,9 +5,9 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tracing::{warn, Instrument};
 
 use crate::{
-    event::SendEvent,
+    event::{SendEvent, SendEventOnce},
     net::{
-        dispatch::{Incoming, Protocol},
+        dispatch::{CloseGuard, Closed, Incoming, Protocol},
         Buf, MAX_BUF_LEN,
     },
 };
@@ -106,10 +106,11 @@ impl Quic {
 impl<B: Buf> Protocol<B> for Quic {
     type Sender = UnboundedSender<B>;
 
-    fn connect(
+    fn connect<E: SendEventOnce<Closed>>(
         &self,
         remote: SocketAddr,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
+        close_guard: CloseGuard<E>,
     ) -> Self::Sender {
         let endpoint = self.0.clone();
         // tracing::debug!("{:?} connect {remote}", endpoint.local_addr());
@@ -143,9 +144,10 @@ impl<B: Buf> Protocol<B> for Quic {
 
     type Incoming = quinn::Connection;
 
-    fn accept(
+    fn accept<E: SendEventOnce<Closed>>(
         connection: Self::Incoming,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
+        close_guard: CloseGuard<E>,
     ) -> Option<(SocketAddr, Self::Sender)> {
         let remote = connection.remote_address();
         tokio::spawn(Self::read_task(connection.clone(), on_buf));

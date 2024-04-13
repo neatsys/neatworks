@@ -12,9 +12,9 @@ use tokio::{
 use tracing::{warn, Instrument};
 
 use crate::{
-    event::SendEvent,
+    event::{SendEvent, SendEventOnce},
     net::{
-        dispatch::{Incoming, Protocol},
+        dispatch::{CloseGuard, Closed, Incoming, Protocol},
         Buf, MAX_BUF_LEN,
     },
 };
@@ -90,10 +90,11 @@ impl Tcp {
 impl<B: Buf> Protocol<B> for Tcp {
     type Sender = UnboundedSender<B>;
 
-    fn connect(
+    fn connect<E: SendEventOnce<Closed>>(
         &self,
         remote: SocketAddr,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Send + 'static,
+        close_guard: CloseGuard<E>,
     ) -> Self::Sender {
         let preamble = self.0.clone();
         let (sender, receiver) = unbounded_channel();
@@ -123,9 +124,10 @@ impl<B: Buf> Protocol<B> for Tcp {
 
     type Incoming = (TcpPreamble, TcpStream);
 
-    fn accept(
+    fn accept<E: SendEventOnce<Closed>>(
         (preamble, stream): Self::Incoming,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Send + 'static,
+        close_guard: CloseGuard<E>,
     ) -> Option<(SocketAddr, Self::Sender)> {
         let (read, write) = stream.into_split();
         tokio::spawn(Tcp::read_task(read, on_buf, preamble));

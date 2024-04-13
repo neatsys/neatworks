@@ -28,11 +28,15 @@ use augustus::{
         blocking,
         erased::{self, events::Init, Blanket},
         ordered::Timer,
-        Inline, OnTimer, SendEvent as _, Session, Unify, UnreachableTimer,
+        BlackHole, Inline, OnTimer, SendEvent as _, Session, Unify, UnreachableTimer,
     },
     net::{
         dispatch::Net,
-        session::{quic, tcp, tcp::simplex, Quic, Tcp, Udp},
+        session::{
+            quic,
+            tcp::{self, simplex},
+            Quic, Tcp, Udp,
+        },
         Dispatch, IndexNet,
     },
     unreplicated::{
@@ -113,9 +117,12 @@ async fn main() -> anyhow::Result<()> {
                             erased::session::Sender::from(close_loop_session.sender()),
                         ));
                         let mut state_sender = state_session.sender();
-                        let mut tcp_control = Dispatch::<_, bytes::Bytes, _>::new(
+                        let mut tcp_control = Dispatch::<_, _, bytes::Bytes, _>::new(
                             Tcp::new(None)?,
                             move |buf: &_| to_client_on_buf(buf, &mut state_sender),
+                            // effectively disable connection table clean up
+                            // probably not good, not nothing much can do without a event loop
+                            BlackHole,
                         )?;
                         let mut timer = UnreachableTimer;
                         sessions.spawn_on(
@@ -134,8 +141,7 @@ async fn main() -> anyhow::Result<()> {
                         );
                     } else {
                         let mut tcp_session = erased::Session::new();
-                        let raw_net =
-                            Net(erased::session::Sender::from(tcp_session.sender()));
+                        let raw_net = Net(erased::session::Sender::from(tcp_session.sender()));
                         let mut state = Unify(Client::new(
                             id,
                             listener.local_addr()?,
@@ -150,16 +156,14 @@ async fn main() -> anyhow::Result<()> {
                         let mut tcp_control = Blanket(erased::Unify(Dispatch::new(
                             Tcp::new(listener.local_addr()?)?,
                             move |buf: &_| to_client_on_buf(buf, &mut state_sender),
+                            Some(erased::session::Sender::from(tcp_session.sender())),
                         )?));
 
                         let tcp_sender = erased::session::Sender::from(tcp_session.sender());
                         sessions
                             .spawn_on(tcp::accept_session(listener, tcp_sender), runtime.handle());
                         sessions.spawn_on(
-                            async move {
-                                erased::session::Sender::from(tcp_session.sender()).send(Init)?;
-                                tcp_session.run(&mut tcp_control).await
-                            },
+                            async move { tcp_session.run(&mut tcp_control).await },
                             runtime.handle(),
                         );
                         sessions.spawn_on(
