@@ -31,9 +31,7 @@ use augustus::{
         Inline, OnTimer, SendEvent as _, Session, Unify, UnreachableTimer,
     },
     net::{
-        session::{
-            quic_accept_session, simplex, tcp_accept_session, Dispatch, DispatchNet, Quic, Tcp, Udp,
-        },
+        session::{quic, tcp, tcp::simplex, Dispatch, DispatchNet, Quic, Tcp, Udp},
         IndexNet,
     },
     unreplicated::{
@@ -121,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
                         let mut timer = UnreachableTimer;
                         sessions.spawn_on(
                             async move {
-                                tcp_accept_session(
+                                tcp::accept_session(
                                     listener,
                                     erased::Inline(&mut tcp_control, &mut timer),
                                 )
@@ -155,7 +153,7 @@ async fn main() -> anyhow::Result<()> {
 
                         let tcp_sender = erased::session::Sender::from(tcp_session.sender());
                         sessions
-                            .spawn_on(tcp_accept_session(listener, tcp_sender), runtime.handle());
+                            .spawn_on(tcp::accept_session(listener, tcp_sender), runtime.handle());
                         sessions.spawn_on(
                             async move {
                                 erased::session::Sender::from(tcp_session.sender()).send(Init)?;
@@ -189,7 +187,7 @@ async fn main() -> anyhow::Result<()> {
                     )?));
 
                     let quic_sender = erased::session::Sender::from(quic_session.sender());
-                    sessions.spawn_on(quic_accept_session(quic, quic_sender), runtime.handle());
+                    sessions.spawn_on(quic::accept_session(quic, quic_sender), runtime.handle());
                     sessions.spawn_on(
                         async move {
                             erased::session::Sender::from(quic_session.sender()).send(Init)?;
@@ -322,7 +320,7 @@ async fn main() -> anyhow::Result<()> {
                 })?;
             let mut timer = UnreachableTimer;
             let accept_session =
-                tcp_accept_session(listener, erased::Inline(&mut tcp_control, &mut timer));
+                tcp::accept_session(listener, erased::Inline(&mut tcp_control, &mut timer));
             let state_session = state_session.run(&mut state);
             return run(accept_session, state_session).await;
         }
@@ -337,7 +335,7 @@ async fn main() -> anyhow::Result<()> {
             move |buf: &_| to_replica_on_buf::<SocketAddr>(buf, &mut state_sender),
         )?));
 
-        let accept_session = tcp_accept_session(
+        let accept_session = tcp::accept_session(
             listener,
             erased::session::Sender::from(tcp_session.sender()),
         );
@@ -371,7 +369,7 @@ async fn main() -> anyhow::Result<()> {
         )?));
 
         let accept_session =
-            quic_accept_session(quic, erased::session::Sender::from(quic_session.sender()));
+            quic::accept_session(quic, erased::session::Sender::from(quic_session.sender()));
         erased::session::Sender::from(quic_session.sender()).send(Init)?;
         let quic_session = quic_session.run(&mut quic_control);
         let state_session = state_session.run(&mut state);

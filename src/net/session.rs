@@ -1,24 +1,15 @@
 use std::{
     collections::{hash_map::Entry, HashMap},
     fmt::Debug,
-    io::ErrorKind,
     mem::replace,
     net::SocketAddr,
     sync::Arc,
     time::Duration,
 };
 
-use bincode::Options;
-use rustls::RootCertStore;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
-        TcpListener, TcpStream,
-    },
-    sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-};
-use tracing::{info, warn, Instrument};
+use derive_where::derive_where;
+
+use tracing::{info, warn};
 
 use crate::event::{
     erased::{events::Init, OnEvent},
@@ -121,24 +112,25 @@ const MAX_BUF_LEN: usize = 1 << 20; // hard limit of single serialized message
 //   session, but we don't try to predict when the next session will come
 //
 // this solution comes with inherit overhead: each outgoing message must go
-// through two channels, the first one for getting into `Dispatch` and the
-// second one for dispatching into corresponding `write_task`. the first queuing
-// is necessary for keeping all mutation to connection cache inside
+// through two channels, the first one from `DispatchNet` to `Dispatch` and the
+// second one from `Dispatch` to the corresponded `write_task`. the first
+// queuing is necessary for maintaining a global view of all connections in the
 // `Dispatch`. the performance is not comparable to bare metal udp net
-#[derive(Debug)]
-pub struct Dispatch<P, B, F> {
+#[derive_where(Debug; P, P::Sender)]
+pub struct Dispatch<P: Protocol<B>, B, F> {
     protocol: P,
-    connections: HashMap<SocketAddr, Connection<B>>,
+    connections: HashMap<SocketAddr, Connection<P, B>>,
+    #[derive_where(skip)]
     on_buf: F,
 }
 
-#[derive(Debug)]
-struct Connection<B> {
-    sender: UnboundedSender<B>,
+#[derive_where(Debug; P::Sender)]
+struct Connection<P: Protocol<B>, B> {
+    sender: P::Sender,
     using: bool,
 }
 
-impl<P, B, F> Dispatch<P, B, F> {
+impl<P: Protocol<B>, B, F> Dispatch<P, B, F> {
     pub fn new(protocol: P, on_buf: F) -> anyhow::Result<Self> {
         Ok(Self {
             protocol,
@@ -148,28 +140,28 @@ impl<P, B, F> Dispatch<P, B, F> {
     }
 }
 
-impl<P, B, F> OnEvent<Init> for Dispatch<P, B, F> {
+impl<P: Protocol<B>, B, F> OnEvent<Init> for Dispatch<P, B, F> {
     fn on_event(&mut self, Init: Init, timer: &mut impl Timer) -> anyhow::Result<()> {
         timer.set(Duration::from_secs(1))?;
         Ok(())
     }
 }
 
-pub trait Protocol {
-    fn connect<B: Buf>(
+pub trait Protocol<B> {
+    type Sender: SendEvent<B>;
+
+    fn connect(
         &self,
         remote: SocketAddr,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
-        receiver: UnboundedReceiver<B>,
-    );
+    ) -> Self::Sender;
 
     type Incoming;
 
-    fn accept<B: Buf>(
+    fn accept(
         connection: Self::Incoming,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
-        receiver: UnboundedReceiver<B>,
-    ) -> Option<SocketAddr>;
+    ) -> Option<(SocketAddr, Self::Sender)>;
 }
 
 pub struct Outgoing<B>(SocketAddr, B);
@@ -194,31 +186,38 @@ impl<E: SendEvent<Outgoing<B>>, B: Buf> SendMessage<IterAddr<'_, SocketAddr>, B>
     }
 }
 
-impl<P: Protocol, B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static>
+impl<P: Protocol<B>, B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static>
     OnEvent<Outgoing<B>> for Dispatch<P, B, F>
 {
     fn on_event(
         &mut self,
-        Outgoing(remote, mut buf): Outgoing<B>,
+        Outgoing(remote, buf): Outgoing<B>,
         _: &mut impl Timer,
     ) -> anyhow::Result<()> {
         if let Some(connection) = self.connections.get_mut(&remote) {
-            match connection.sender.send(buf) {
+            match connection.sender.send(buf.clone()) {
                 Ok(()) => {
                     connection.using = true;
                     return Ok(());
                 }
                 Err(err) => {
-                    warn!(">=> {remote} reconnecting: {err}");
+                    warn!(">=> {remote} connection discontinued: {err}");
                     self.connections.remove(&remote);
-                    buf = err.0
+                    // in an ideal world the SendError will return the buf back to us, and we can
+                    // directly reuse that in below, saving a `clone` above especially for fast path
+                    // but that's not happening as noted in `event::session` module, so far we have
+                    // to settle on either this cloning solution or directly give up this message
+                    // cloning should be fine since `Buf` is expected to be trivially cloned, but
+                    // still will consider that alternative if performance is much affected
                 }
             }
         }
-        let (sender, receiver) = unbounded_channel();
-        self.protocol.connect(remote, self.on_buf.clone(), receiver);
+        let mut sender = self.protocol.connect(remote, self.on_buf.clone());
         if sender.send(buf).is_err() {
             warn!(">=> {remote} new connection immediately fail")
+            // we don't try again in such case since the remote is probably never reachable anymore
+            // not sure whether this should be considered as a fatal error. if this is happening,
+            // will it happen for every following outgoing connection?
         } else {
             self.connections.insert(
                 remote,
@@ -234,7 +233,7 @@ impl<P: Protocol, B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send +
 
 pub struct Incoming<T>(T);
 
-impl<P: Protocol, B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static>
+impl<P: Protocol<B>, B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static>
     OnEvent<Incoming<P::Incoming>> for Dispatch<P, B, F>
 {
     fn on_event(
@@ -242,421 +241,41 @@ impl<P: Protocol, B: Buf, F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send +
         Incoming(event): Incoming<P::Incoming>,
         _: &mut impl Timer,
     ) -> anyhow::Result<()> {
-        let (sender, receiver) = unbounded_channel();
-        if let Some(remote) = P::accept(event, self.on_buf.clone(), receiver) {
-            // let replaced = self.connections.insert(
-            //     remote,
-            //     Connection {
-            //         sender,
-            //         using: true,
-            //     },
-            // );
-            // if replaced.is_some() {
-            //     warn!("<<< {remote} replacing previous connection")
-            // }
-            // always prefer to keep the connection created locally
-            // the connection in `self.connections` may not be created locally, but the incoming
-            // connection is definitely created remotely
-            if let Entry::Vacant(entry) = self.connections.entry(remote) {
-                entry.insert(Connection {
-                    sender,
-                    using: true,
-                });
-            } else {
-                info!("<<< {remote} skip inserting incoming connection")
-            }
+        let Some((remote, sender)) = P::accept(event, self.on_buf.clone()) else {
+            return Ok(());
+        };
+        // always prefer to keep the connection created locally
+        // the connection in `self.connections` may not be created locally, but the incoming
+        // connection is definitely created remotely
+        if let Entry::Vacant(entry) = self.connections.entry(remote) {
+            entry.insert(Connection {
+                sender,
+                using: true,
+            });
+        } else {
+            info!("<<< {remote} skip inserting incoming connection")
         }
         Ok(())
     }
 }
 
-impl<P, B, F> OnTimer for Dispatch<P, B, F> {
+impl<P: Protocol<B>, B, F> OnTimer for Dispatch<P, B, F> {
     fn on_timer(&mut self, _: crate::event::TimerId, _: &mut impl Timer) -> anyhow::Result<()> {
         if self.connections.is_empty() {
             return Ok(());
         }
-        self.connections.retain(|_, connection| {
-            replace(&mut connection.using, false) && !connection.sender.is_closed()
-        });
+        self.connections
+            .retain(|_, connection| replace(&mut connection.using, false));
         info!("retaining {} connections", self.connections.len());
         Ok(())
     }
 }
 
-pub struct Tcp(bytes::Bytes);
+pub mod quic;
+pub mod tcp;
 
-type TcpPreamble = Option<SocketAddr>;
-
-const TCP_PREAMBLE_LEN: usize = 16;
-
-impl Tcp {
-    pub fn new(addr: impl Into<Option<SocketAddr>>) -> anyhow::Result<Self> {
-        let addr = addr.into();
-        let mut preamble = bincode::options().serialize(&addr)?;
-        assert!(preamble.len() < TCP_PREAMBLE_LEN);
-        preamble.resize(TCP_PREAMBLE_LEN, Default::default());
-        Ok(Self(preamble.into()))
-    }
-
-    async fn read_task(
-        mut stream: OwnedReadHalf,
-        mut on_buf: impl FnMut(&[u8]) -> anyhow::Result<()>,
-        remote: impl Into<Option<SocketAddr>>,
-    ) {
-        let remote = remote.into();
-        if let Err(err) = async {
-            loop {
-                let len = match stream.read_u64().await {
-                    Ok(len) => len as _,
-                    Err(err) if matches!(err.kind(), ErrorKind::UnexpectedEof) => break Ok(()),
-                    Err(err) => Err(err)?,
-                };
-                anyhow::ensure!(len <= MAX_BUF_LEN, "invalid buffer length {len}");
-                let mut buf = vec![0; len];
-                stream.read_exact(&mut buf).await?;
-                on_buf(&buf)?
-            }
-        }
-        .await
-        {
-            warn!(
-                "{:?} (remote {remote:?}) >>> {:?} {err}",
-                stream.peer_addr(),
-                stream.local_addr()
-            );
-        }
-    }
-
-    async fn write_task<B: Buf>(
-        mut stream: OwnedWriteHalf,
-        mut receiver: UnboundedReceiver<B>,
-        remote: SocketAddr,
-    ) {
-        while let Some(buf) = receiver.recv().await {
-            if let Err(err) = async {
-                stream.write_u64(buf.as_ref().len() as _).await?;
-                stream.write_all(buf.as_ref()).await?;
-                stream.flush().await
-            }
-            .await
-            {
-                warn!(
-                    "{:?} >=> {:?} (remote {remote}) {err}",
-                    stream.local_addr(),
-                    stream.peer_addr()
-                );
-                break;
-            }
-        }
-    }
-}
-
-impl Protocol for Tcp {
-    fn connect<B: Buf>(
-        &self,
-        remote: SocketAddr,
-        on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Send + 'static,
-        receiver: UnboundedReceiver<B>,
-    ) {
-        let preamble = self.0.clone();
-        tokio::spawn(async move {
-            let task = async {
-                let mut stream = TcpStream::connect(remote).await?;
-                stream.set_nodelay(true)?;
-                stream.write_all(&preamble).await?;
-                anyhow::Result::<_>::Ok(stream)
-            };
-            let stream = match task
-                .instrument(tracing::debug_span!("connect", ?remote))
-                .await
-            {
-                Ok(stream) => stream,
-                Err(err) => {
-                    warn!(">=> {remote} {err}");
-                    return;
-                }
-            };
-            let (read, write) = stream.into_split();
-            tokio::spawn(Self::read_task(read, on_buf, remote));
-            tokio::spawn(Self::write_task(write, receiver, remote));
-        });
-    }
-
-    type Incoming = (TcpPreamble, TcpStream);
-
-    fn accept<B: Buf>(
-        (preamble, stream): Self::Incoming,
-        on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Send + 'static,
-        receiver: UnboundedReceiver<B>,
-    ) -> Option<SocketAddr> {
-        let (read, write) = stream.into_split();
-        tokio::spawn(Tcp::read_task(read, on_buf, preamble));
-        if let Some(remote) = preamble {
-            tokio::spawn(Tcp::write_task(write, receiver, remote));
-        } else {
-            // write.forget()
-        }
-        preamble
-    }
-}
-
-pub async fn tcp_accept_session(
-    listener: TcpListener,
-    mut sender: impl SendEvent<Incoming<(TcpPreamble, TcpStream)>>,
-) -> anyhow::Result<()> {
-    loop {
-        let (mut stream, peer_addr) = listener.accept().await?;
-        let task = async {
-            stream.set_nodelay(true)?;
-            let mut preamble = vec![0; TCP_PREAMBLE_LEN];
-            stream.read_exact(&mut preamble).await?;
-            anyhow::Result::<_>::Ok(
-                bincode::options()
-                    .allow_trailing_bytes()
-                    .deserialize(&preamble)?,
-            )
-        };
-        let preamble = match task.await {
-            Ok(preamble) => preamble,
-            Err(err) => {
-                warn!("{peer_addr} {err}");
-                continue;
-            }
-        };
-        // println!("{peer_addr} -> {remote}");
-        sender.send(Incoming((preamble, stream)))?
-    }
-}
-
-// `simplex::Tcp` provides a stateless `impl SendMessage` which initiate an
-// ephemeral tcp connection for every message. this results in a setup closer to
-// udp, but the performance will be much worse, and it cannot accept incoming
-// connections anymore. you can use a second `TcpControl` that wrapped as
-//   Inline(&mut control, &mut UnreachableTimer)
-// to `impl SendEvent<Incoming>` and pass into `tcp_accept_session` for incoming
-// connections. check unreplicated benchmark for demonstration. the simplex
-// variant is compatible with the default duplex one i.e. it is ok to have
-// messages sent by simplex tcp net to be received with a duplex one, and vice
-// versa
-pub mod simplex {
-    use std::net::SocketAddr;
-
-    use bincode::Options;
-    use tokio::io::AsyncWriteExt;
-    use tracing::warn;
-
-    use crate::net::{Buf, IterAddr, SendMessage};
-
-    use super::{TcpPreamble, TCP_PREAMBLE_LEN};
-
-    pub struct Tcp;
-
-    impl<B: Buf> SendMessage<SocketAddr, B> for Tcp {
-        fn send(&mut self, dest: SocketAddr, message: B) -> anyhow::Result<()> {
-            tokio::spawn(async move {
-                if let Err(err) = async {
-                    // have to enable REUSEADDR otherwise port number exhausted after sending to
-                    // same `dest` 28K messages within 1min
-                    // let mut stream = TcpStream::connect(dest).await?;
-                    let socket = tokio::net::TcpSocket::new_v4()?;
-                    socket.set_reuseaddr(true)?;
-                    let mut stream = socket.connect(dest).await?;
-                    let mut preamble = bincode::options().serialize(&TcpPreamble::None)?;
-                    preamble.resize(TCP_PREAMBLE_LEN, Default::default());
-                    stream.write_all(&preamble).await?;
-                    stream.write_u64(message.as_ref().len() as _).await?;
-                    stream.write_all(message.as_ref()).await?;
-                    stream.flush().await?;
-                    anyhow::Result::<_>::Ok(())
-                }
-                .await
-                {
-                    warn!("simplex >>> {dest} {err}")
-                }
-            });
-            Ok(())
-        }
-    }
-
-    impl<B: Buf> SendMessage<IterAddr<'_, SocketAddr>, B> for Tcp {
-        fn send(&mut self, dest: IterAddr<'_, SocketAddr>, message: B) -> anyhow::Result<()> {
-            for addr in dest.0 {
-                self.send(addr, message.clone())?
-            }
-            Ok(())
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Quic(pub quinn::Endpoint);
-
-fn quic_config() -> anyhow::Result<(quinn::ServerConfig, quinn::ClientConfig)> {
-    let issuer_key = rcgen::KeyPair::from_pem(include_str!("issuer_key.pem"))?;
-    let issuer = rcgen::Certificate::generate_self_signed(
-        rcgen::CertificateParams::from_ca_cert_pem(include_str!("issuer_cert.pem"))?,
-        &issuer_key,
-    )?;
-    let priv_key = rcgen::KeyPair::generate()?;
-    let cert = rcgen::Certificate::generate(
-        rcgen::CertificateParams::new(vec!["neatworks.quic".into()])?,
-        &priv_key,
-        &issuer,
-        &issuer_key,
-    )?;
-    let priv_key = rustls::PrivateKey(priv_key.serialize_der());
-    let cert_chain = vec![rustls::Certificate(cert.der().to_vec())];
-
-    let mut server_config = quinn::ServerConfig::with_single_cert(cert_chain, priv_key)?;
-    let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
-    // transport_config.max_concurrent_uni_streams(0_u8.into());
-    transport_config.max_concurrent_uni_streams(4096u32.into());
-    // transport_config.max_idle_timeout(Some(Duration::from_millis(2500).try_into()?));
-
-    let mut roots = RootCertStore::empty();
-    roots.add_parsable_certificates(&[issuer.der()]);
-    let client_config = quinn::ClientConfig::with_root_certificates(roots);
-    Ok((server_config, client_config))
-}
-
-impl Quic {
-    pub fn new(addr: SocketAddr) -> anyhow::Result<Self> {
-        let (server_config, client_config) = quic_config()?;
-        let mut endpoint = quinn::Endpoint::server(server_config, addr)?;
-        endpoint.set_default_client_config(client_config);
-        Ok(Self(endpoint))
-    }
-
-    async fn read_task(
-        connection: quinn::Connection,
-        on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
-    ) {
-        let remote_addr = connection.remote_address();
-        loop {
-            let mut stream = match connection.accept_uni().await {
-                Ok(stream) => stream,
-                // TODO
-                Err(
-                    quinn::ConnectionError::ConnectionClosed(_)
-                    | quinn::ConnectionError::LocallyClosed
-                    | quinn::ConnectionError::TimedOut,
-                ) => break,
-                Err(err) => {
-                    warn!("<<< {remote_addr} {err}");
-                    break;
-                }
-            };
-            let mut on_buf = on_buf.clone();
-            tokio::spawn(async move {
-                if let Err(err) = async {
-                    // determine incomplete stream?
-                    on_buf(&stream.read_to_end(MAX_BUF_LEN).await?)?;
-                    anyhow::Result::<_>::Ok(())
-                }
-                .await
-                {
-                    warn!("<<< {remote_addr} {err}")
-                }
-            });
-        }
-    }
-
-    async fn write_task<B: Buf>(connection: quinn::Connection, mut receiver: UnboundedReceiver<B>) {
-        while let Some(buf) = receiver.recv().await {
-            let connection = connection.clone();
-            tokio::spawn(async move {
-                if let Err(err) = async {
-                    connection.open_uni().await?.write_all(buf.as_ref()).await?;
-                    anyhow::Result::<_>::Ok(())
-                }
-                .await
-                {
-                    warn!(">>> {} {err}", connection.remote_address())
-                }
-            });
-        }
-        // connection.close(Default::default(), Default::default())
-    }
-}
-
-impl Protocol for Quic {
-    fn connect<B: Buf>(
-        &self,
-        remote: SocketAddr,
-        on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
-        receiver: UnboundedReceiver<B>,
-    ) {
-        let endpoint = self.0.clone();
-        // tracing::debug!("{:?} connect {remote}", endpoint.local_addr());
-        tokio::spawn(async move {
-            let task = async {
-                let span = tracing::debug_span!("connecting", local = ?endpoint.local_addr(), remote = ?remote).entered();
-                let connecting = {
-                    let _s = tracing::debug_span!(parent: None, "dummy detached").entered();
-                    endpoint.connect(remote, "neatworks.quic")
-                }?;
-                drop(span.exit());
-                anyhow::Result::<_>::Ok(
-                    connecting
-                        .instrument(tracing::debug_span!("connect", local = ?endpoint.local_addr(), remote = ?remote))
-                        .await?,
-                )
-            };
-            let connection = match task.await {
-                Ok(connection) => connection,
-                Err(err) => {
-                    warn!(">>> {remote} {err}");
-                    return;
-                }
-            };
-            tokio::spawn(Self::read_task(connection.clone(), on_buf));
-            tokio::spawn(Self::write_task(connection, receiver));
-        });
-    }
-
-    type Incoming = quinn::Connection;
-
-    fn accept<B: Buf>(
-        connection: Self::Incoming,
-        on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
-        receiver: UnboundedReceiver<B>,
-    ) -> Option<SocketAddr> {
-        let remote = connection.remote_address();
-        tokio::spawn(Self::read_task(connection.clone(), on_buf));
-        tokio::spawn(Self::write_task(connection, receiver));
-        // tracing::debug!("{remote}");
-        if remote.ip().is_unspecified() {
-            None
-        } else {
-            Some(remote)
-        }
-    }
-}
-
-pub async fn quic_accept_session(
-    Quic(endpoint): Quic,
-    sender: impl SendEvent<Incoming<quinn::Connection>> + Clone + Send + 'static,
-) -> anyhow::Result<()> {
-    while let Some(conn) = endpoint.accept().await {
-        let remote_addr = conn.remote_address();
-        tracing::trace!(
-            "remote {remote_addr} >>> {:?} accept",
-            endpoint.local_addr()
-        );
-        let mut sender = sender.clone();
-        tokio::spawn(async move {
-            if let Err(err) = async {
-                sender.send(Incoming(conn.await?))?;
-                anyhow::Result::<_>::Ok(())
-            }
-            .await
-            {
-                warn!("<<< {remote_addr} {err}")
-            }
-        });
-    }
-    Ok(())
-}
+pub use quic::Quic;
+pub use tcp::Tcp;
 
 // cSpell:words quic bincode rustls libp2p kademlia oneshot rcgen unreplicated
 // cSpell:words neatworks

@@ -1,5 +1,6 @@
 use std::{collections::HashMap, fmt::Debug, time::Duration};
 
+use derive_where::derive_where;
 use tokio::{
     sync::{
         mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
@@ -15,6 +16,41 @@ use super::{OnEventUniversal, OnTimerUniversal, SendEventOnce};
 
 // useful impl on foreign types that has been also leveraged elsewhere
 // consider move to more proper place
+
+#[derive_where(Debug)]
+#[derive(derive_more::Display, derive_more::Error)]
+#[display(fmt = "{}", display)]
+pub struct SendError<M> {
+    display: String,
+    #[derive_where(skip)]
+    pub inner: M,
+}
+// this suppose to be the error type of `UnboundedSender<_> as SendEvent<_>` and
+// `oneshot::Sender<_> as SendEvent<_>`, but currently it is not
+// if i want to turn (i.e. wrap) it into a `anyhow::Error`, it must be
+// `Send + Sync + 'static`, which means `M` must be `Send + Sync + 'static`
+// this is stricter than the minimal trait bound to make the two senders usable,
+// which is just `Send`
+// (details: the senders are `Send + Sync` as long as `M` is `Send`. senders'
+// lifetime is bounded by `M`'s lifetime, and not necessary to be `'static` as
+// long as you are ok with a sender that can only lives shorter)
+// although `M` is probably already `Send + 'static` through this codebase, they
+// may not be `Sync`, most notably, `event::erased::Event<...>` and
+// `worker::Work<...>`
+// sure they can be `Sync` at any time, since they are under my control and are
+// already be `Send` for working with this event loop and be `'static` just for
+// simplicity. but i don't want to add one hundred `+ Sync` for this rarely used
+// feature that allows you to retrieve sent item that failed to be sent
+// the correct approach and the ideal solution for this issue is that what i
+// actually desired through this codebase is `Box<dyn Error + Send>`, as i
+// probably never want to share an error across threads. (should this be a
+// common practice? i start to wonder why anyhow decides errors to must be
+// `Sync` at the first place)
+// but back to the real world, anyhow will probably never add a `Send` only
+// variant, and vanilla `Box<dyn std::error::Error + Send>` will still take long
+// to be a drop in replacement of anyhow, so all i can do for now is noting down
+// this approach and start to make tradeoffs
+
 impl<N: Into<M>, M> SendEvent<N> for UnboundedSender<M> {
     fn send(&mut self, event: N) -> anyhow::Result<()> {
         UnboundedSender::send(self, event.into()).map_err(|err| anyhow::anyhow!(err.to_string()))
@@ -43,8 +79,8 @@ impl<M> Clone for Sender<M> {
     }
 }
 
-impl<M: Into<N>, N> SendEvent<M> for Sender<N> {
-    fn send(&mut self, event: M) -> anyhow::Result<()> {
+impl<N: Into<M>, M> SendEvent<N> for Sender<M> {
+    fn send(&mut self, event: N) -> anyhow::Result<()> {
         SendEvent::send(&mut self.0, Event::Other(event.into()))
     }
 }

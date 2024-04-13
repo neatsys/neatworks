@@ -3,7 +3,10 @@ use std::{cmp::Ordering, collections::VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    event::{erased::OnEvent, SendEvent, Timer},
+    event::{
+        erased::{OnEventRichTimer as OnEvent, RichTimer as Timer},
+        SendEvent,
+    },
     net::{events::Recv, Addr, All, SendMessage},
     util::Payload,
 };
@@ -150,7 +153,7 @@ impl<M: ServerCommon> OnEvent<Recv<Get<M::V, M::A>>> for Server<M::N, M::CN, M::
     fn on_event(
         &mut self,
         Recv(get): Recv<Get<M::V, M::A>>,
-        _: &mut impl Timer,
+        _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         for (id, state) in self.store.iter().enumerate() {
             if get.deps.dep_cmp(&state.version_deps, id as _).is_gt() {
@@ -171,7 +174,7 @@ impl<M: ServerCommon> OnEvent<Recv<Put<M::V, M::A>>> for Server<M::N, M::CN, M::
     fn on_event(
         &mut self,
         Recv(put): Recv<Put<M::V, M::A>>,
-        _: &mut impl Timer,
+        _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         for (id, state) in self.store.iter().enumerate() {
             if put.deps.dep_cmp(&state.version_deps, id as _).is_gt() {
@@ -194,14 +197,22 @@ impl<M: ServerCommon> OnEvent<Recv<Put<M::V, M::A>>> for Server<M::N, M::CN, M::
 }
 
 impl<M: ServerCommon> OnEvent<Recv<SyncKey<M::V>>> for Server<M::N, M::CN, M::VS, M::V, M::A, M> {
-    fn on_event(&mut self, Recv(_): Recv<SyncKey<M::V>>, _: &mut impl Timer) -> anyhow::Result<()> {
+    fn on_event(
+        &mut self,
+        Recv(_): Recv<SyncKey<M::V>>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
         // TODO
         Ok(())
     }
 }
 
 impl<M: ServerCommon> OnEvent<CompleteMerged<M::V>> for Server<M::N, M::CN, M::VS, M::V, M::A, M> {
-    fn on_event(&mut self, merged: CompleteMerged<M::V>, _: &mut impl Timer) -> anyhow::Result<()> {
+    fn on_event(
+        &mut self,
+        merged: CompleteMerged<M::V>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
         let state = &mut self.store[merged.id as usize];
         let Some(put) = state.pending_puts.pop_front() else {
             anyhow::bail!("missing pending puts")
@@ -235,6 +246,80 @@ impl<M: ServerCommon> OnEvent<CompleteMerged<M::V>> for Server<M::N, M::CN, M::V
             self.version_service.send(merge)?
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VectorClock(Vec<u32>);
+
+impl VectorClock {
+    pub fn new(num_key: usize) -> Self {
+        Self(vec![0; num_key])
+    }
+
+    fn merge(&self, other: &Self) -> Self {
+        Self(
+            self.0
+                .iter()
+                .zip(&other.0)
+                .map(|(a, b)| a.max(b))
+                .copied()
+                .collect(),
+        )
+    }
+
+    fn update(&self, id: KeyId, other: &Self) -> Self {
+        let mut merged = self.merge(other);
+        merged.0[id as usize] += 1;
+        merged
+    }
+}
+
+impl PartialOrd for VectorClock {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        let merged = self.merge(other);
+        match (*self == merged, *other == merged) {
+            (true, true) => Some(Ordering::Equal),
+            (true, false) => Some(Ordering::Greater),
+            (false, true) => Some(Ordering::Less),
+            (false, false) => None,
+        }
+    }
+}
+
+impl DepOrd for VectorClock {
+    fn dep_cmp(&self, other: &Self, id: KeyId) -> Ordering {
+        self.0[id as usize].cmp(&other.0[id as usize])
+    }
+}
+
+pub struct VectorClockService<E>(E);
+
+impl<E: SendEvent<IncompleteMerged<VectorClock>>> OnEvent<IncompleteMerge<VectorClock>>
+    for VectorClockService<E>
+{
+    fn on_event(
+        &mut self,
+        IncompleteMerge(clock, another_clock): IncompleteMerge<VectorClock>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
+        self.0.send(IncompleteMerged(clock.merge(&another_clock)))
+    }
+}
+
+impl<E: SendEvent<CompleteMerged<VectorClock>>> OnEvent<CompleteMerge<VectorClock>>
+    for VectorClockService<E>
+{
+    fn on_event(
+        &mut self,
+        event: CompleteMerge<VectorClock>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
+        let merged = CompleteMerged {
+            id: event.id,
+            version_deps: event.previous.update(event.id, &event.deps),
+        };
+        self.0.send(merged)
     }
 }
 

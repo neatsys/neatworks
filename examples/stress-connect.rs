@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
         let mut control_session = Session::new();
         // sessions.spawn(augustus::net::session::tcp_accept_session(
         //     listener,
-        sessions.spawn(augustus::net::session::quic_accept_session(
+        sessions.spawn(augustus::net::session::quic::accept_session(
             quic,
             Sender::from(control_session.sender()),
         ));
