@@ -36,16 +36,15 @@ use derive_where::derive_where;
 
 use tracing::{info, warn};
 
-use crate::event::{erased::OnEvent, SendEvent, SendEventOnce, Timer};
+use crate::event::{erased, OnEvent, OnTimer, SendEvent, SendEventOnce, Timer};
 
 use super::{Buf, IterAddr, SendMessage};
 
-#[derive_where(Debug; P, P::Sender)]
+#[derive_where(Debug; E, P, P::Sender)]
 pub struct Dispatch<E, P: Protocol<B>, B, F> {
     protocol: P,
     connections: HashMap<SocketAddr, Connection<P, B>>,
     seq: u32,
-    #[derive_where(skip)]
     close_sender: E,
     #[derive_where(skip)]
     on_buf: F,
@@ -67,6 +66,13 @@ impl<E, P: Protocol<B>, B, F> Dispatch<E, P, B, F> {
             seq: 0,
         })
     }
+}
+
+#[derive(derive_more::From)]
+pub enum Event<P: Protocol<B>, B> {
+    Incoming(Incoming<P::Incoming>),
+    Outgoing(Outgoing<B>),
+    Closed(Closed),
 }
 
 pub struct Closed(SocketAddr, u32);
@@ -126,7 +132,25 @@ impl<
         P: Protocol<B>,
         B: Buf,
         F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
-    > OnEvent<Outgoing<B>> for Dispatch<E, P, B, F>
+    > OnEvent for Dispatch<E, P, B, F>
+{
+    type Event = Event<P, B>;
+
+    fn on_event(&mut self, event: Self::Event, timer: &mut impl Timer) -> anyhow::Result<()> {
+        match event {
+            Event::Outgoing(event) => erased::OnEvent::on_event(self, event, timer),
+            Event::Incoming(event) => erased::OnEvent::on_event(self, event, timer),
+            Event::Closed(event) => erased::OnEvent::on_event(self, event, timer),
+        }
+    }
+}
+
+impl<
+        E: SendEventOnce<Closed> + Clone,
+        P: Protocol<B>,
+        B: Buf,
+        F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
+    > erased::OnEvent<Outgoing<B>> for Dispatch<E, P, B, F>
 {
     fn on_event(
         &mut self,
@@ -178,7 +202,7 @@ impl<
         P: Protocol<B>,
         B: Buf,
         F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
-    > OnEvent<Incoming<P::Incoming>> for Dispatch<E, P, B, F>
+    > erased::OnEvent<Incoming<P::Incoming>> for Dispatch<E, P, B, F>
 {
     fn on_event(
         &mut self,
@@ -205,17 +229,19 @@ impl<
     }
 }
 
-impl<E, P: Protocol<B>, B, F> OnEvent<Closed> for Dispatch<E, P, B, F> {
-    fn on_event(
-        &mut self,
-        Closed(addr, seq): Closed,
-        timer: &mut impl Timer,
-    ) -> anyhow::Result<()> {
+impl<E, P: Protocol<B>, B, F> erased::OnEvent<Closed> for Dispatch<E, P, B, F> {
+    fn on_event(&mut self, Closed(addr, seq): Closed, _: &mut impl Timer) -> anyhow::Result<()> {
         if let Some(connection) = self.connections.get(&addr) {
             if connection.seq == seq {
                 self.connections.remove(&addr);
             }
         }
         Ok(())
+    }
+}
+
+impl<E, P: Protocol<B>, B, F> OnTimer for Dispatch<E, P, B, F> {
+    fn on_timer(&mut self, _: crate::event::TimerId, _: &mut impl Timer) -> anyhow::Result<()> {
+        unreachable!()
     }
 }

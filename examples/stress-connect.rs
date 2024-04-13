@@ -9,10 +9,7 @@ use std::{
 };
 
 use augustus::{
-    event::{
-        erased::{events::Init, session::Sender, Blanket, Session, Unify},
-        SendEvent,
-    },
+    event::{Once, Session, Unify},
     net::{dispatch::Net, Dispatch, SendMessage},
 };
 
@@ -47,7 +44,8 @@ async fn main() -> anyhow::Result<()> {
         // let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", 3000 + i)).await?;
         let quic = augustus::net::session::Quic::new(SocketAddr::from(([0, 0, 0, 0], 3000 + i)))?;
 
-        let mut control = Blanket(Unify(Dispatch::new(
+        let mut control_session = Session::new();
+        let mut control = Unify(Dispatch::new(
             // augustus::net::session::Tcp::new(None)?,
             quic.clone(),
             {
@@ -57,20 +55,17 @@ async fn main() -> anyhow::Result<()> {
                     Ok(())
                 }
             },
-        )?));
+            Once(control_session.sender()),
+        )?);
 
-        let mut control_session = Session::new();
         // sessions.spawn(augustus::net::session::tcp_accept_session(
         //     listener,
         sessions.spawn(augustus::net::session::quic::accept_session(
             quic,
-            Sender::from(control_session.sender()),
+            control_session.sender(),
         ));
-        let mut net = Net(Sender::from(control_session.sender()));
-        sessions.spawn(async move {
-            Sender::from(control_session.sender()).send(Init)?;
-            control_session.run(&mut control).await
-        });
+        let mut net = Net(control_session.sender());
+        sessions.spawn(async move { control_session.run(&mut control).await });
         sessions.spawn(async move {
             for j in 0..multiplier {
                 for k in 0..num_peer {

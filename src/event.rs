@@ -57,6 +57,15 @@ impl<T: SendEventOnce<M>, M> SendEvent<M> for Option<T> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct Once<E>(pub E);
+
+impl<T: SendEvent<M>, M> SendEventOnce<M> for Once<T> {
+    fn send_once(mut self, event: M) -> anyhow::Result<()> {
+        self.0.send(event)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, derive_more::Deref, derive_more::DerefMut)]
 pub struct Transient<M>(Vec<M>);
 
