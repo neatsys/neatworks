@@ -31,8 +31,9 @@ use augustus::{
         Inline, OnTimer, SendEvent as _, Session, Unify, UnreachableTimer,
     },
     net::{
-        session::{quic, tcp, tcp::simplex, Dispatch, DispatchNet, Quic, Tcp, Udp},
-        IndexNet,
+        dispatch::Net,
+        session::{quic, tcp, tcp::simplex, Quic, Tcp, Udp},
+        Dispatch, IndexNet,
     },
     unreplicated::{
         self, to_client_on_buf, to_replica_on_buf, Client, Replica, ReplicaEvent,
@@ -134,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         let mut tcp_session = erased::Session::new();
                         let raw_net =
-                            DispatchNet(erased::session::Sender::from(tcp_session.sender()));
+                            Net(erased::session::Sender::from(tcp_session.sender()));
                         let mut state = Unify(Client::new(
                             id,
                             listener.local_addr()?,
@@ -168,7 +169,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 } else if flag_quic {
                     let mut quic_session = erased::Session::new();
-                    let raw_net = DispatchNet(erased::session::Sender::from(quic_session.sender()));
+                    let raw_net = Net(erased::session::Sender::from(quic_session.sender()));
                     let quic = Quic::new(client_addr)?;
                     let mut state = Unify(Client::new(
                         id,
@@ -326,7 +327,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         let mut tcp_session = erased::Session::new();
-        let raw_net = DispatchNet(erased::session::Sender::from(tcp_session.sender()));
+        let raw_net = Net(erased::session::Sender::from(tcp_session.sender()));
         let mut state = Unify(Replica::new(Null, ToClientMessageNet::new(raw_net)));
         let mut state_session = Session::new();
         let mut state_sender = state_session.sender();
@@ -358,7 +359,7 @@ async fn main() -> anyhow::Result<()> {
 
     if flag_quic {
         let mut quic_session = erased::Session::new();
-        let raw_net = DispatchNet(erased::session::Sender::from(quic_session.sender()));
+        let raw_net = Net(erased::session::Sender::from(quic_session.sender()));
         let mut state = Unify(Replica::new(Null, ToClientMessageNet::new(raw_net)));
         let mut state_session = Session::new();
         let mut state_sender = state_session.sender();

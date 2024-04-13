@@ -12,10 +12,6 @@
 // over network stack like TCP. there are many details user cannot specify, but
 // they probably do not care anyway if they are happy with SendMessage<_, _>
 
-pub mod blocking;
-pub mod kademlia;
-pub mod session;
-
 use std::{fmt::Debug, hash::Hash, marker::PhantomData};
 
 use bincode::Options as _;
@@ -38,6 +34,8 @@ pub trait Buf: AsRef<[u8]> + Send + Sync + Clone + From<Vec<u8>> + 'static {}
 
 // not blanket impl here because we further require `Buf` to be "cheaply" cloned
 impl Buf for bytes::Bytes {}
+
+const MAX_BUF_LEN: usize = 1 << 20; // hard limit of single serialized message
 
 // terms about nets that used in this codebase
 // raw net: implementation of `SendMessage<_, impl Buf>`
@@ -217,5 +215,12 @@ impl<N: for<'a> SendMessageToEach<A, M>, A: Addr, M> SendMessage<All, M> for Ind
         self.inner_net.send_to_each(addrs, message)
     }
 }
+
+pub mod blocking;
+pub mod dispatch;
+pub mod kademlia;
+pub mod session;
+
+pub use dispatch::Dispatch;
 
 // cSpell:words oneshot kademlia bincode

@@ -11,9 +11,13 @@ use tokio::{
 };
 use tracing::{warn, Instrument};
 
-use crate::{event::SendEvent, net::Buf};
-
-use super::{Incoming, Protocol, MAX_BUF_LEN};
+use crate::{
+    event::SendEvent,
+    net::{
+        dispatch::{Incoming, Protocol},
+        Buf, MAX_BUF_LEN,
+    },
+};
 
 pub struct Tcp(bytes::Bytes);
 

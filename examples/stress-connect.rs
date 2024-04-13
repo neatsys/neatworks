@@ -13,10 +13,7 @@ use augustus::{
         erased::{events::Init, session::Sender, Blanket, Session, Unify},
         SendEvent,
     },
-    net::{
-        session::{Dispatch, DispatchNet},
-        SendMessage,
-    },
+    net::{dispatch::Net, Dispatch, SendMessage},
 };
 
 use tokio::{
@@ -69,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
             quic,
             Sender::from(control_session.sender()),
         ));
-        let mut net = DispatchNet(Sender::from(control_session.sender()));
+        let mut net = Net(Sender::from(control_session.sender()));
         sessions.spawn(async move {
             Sender::from(control_session.sender()).send(Init)?;
             control_session.run(&mut control).await
