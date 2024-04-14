@@ -33,10 +33,7 @@ use derive_where::derive_where;
 
 use tracing::{debug, warn};
 
-use crate::event::{
-    erased, OnEventRichTimer as OnEvent, RichTimer as Timer, SendEvent, SendEventOnce,
-    UnreachableTimer,
-};
+use crate::event::{OnEventRichTimer as OnEvent, RichTimer as Timer, SendEvent, SendEventOnce};
 
 use super::{Addr, Buf, IterAddr, SendMessage};
 
@@ -150,7 +147,7 @@ impl<
     fn on_event(&mut self, event: Self::Event, timer: &mut impl Timer) -> anyhow::Result<()> {
         match event {
             Event::Outgoing(event) => self.handle_outgoing(event, timer),
-            Event::Incoming(event) => erased::OnEvent::on_event(self, event, &mut UnreachableTimer),
+            Event::Incoming(event) => self.handle_incoming(event, timer),
             Event::Closed(event) => self.handle_closed(event, timer),
         }
     }
@@ -215,12 +212,12 @@ impl<
         A: Addr,
         B: Buf,
         F: FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
-    > erased::OnEvent<Incoming<P::Incoming>> for Dispatch<E, P, A, B, F>
+    > Dispatch<E, P, A, B, F>
 {
-    fn on_event(
+    fn handle_incoming(
         &mut self,
         Incoming(event): Incoming<P::Incoming>,
-        _: &mut impl crate::event::Timer,
+        _: &mut impl Timer,
     ) -> anyhow::Result<()> {
         self.seq += 1;
         let close_guard = CloseGuard(self.close_sender.clone(), None, self.seq);

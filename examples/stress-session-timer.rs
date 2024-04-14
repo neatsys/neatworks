@@ -1,3 +1,43 @@
+// stress test for the "reset forever" timer pattern
+// reset forever pattern is commonly used for keep alive test: the desired
+// semantic is "do not make a move as long as some condition holds", while
+// "some condition" can be satisfied via handling certain events
+// with a event loop that does not support reset (i.e. unset, since reset is
+// effectively unset than set), reset forever pattern can only be approximated
+// with a "aliveness" flag and a periodical "check liveness" timer. the
+// downsides include
+// * when state machine may only take action on check liveness timer alarm,
+//   which is somewhere (T, 2T] after the liveness go off, where T is the check
+//   liveness interval. there's no way for state machine to take action exactly
+//   after a fixed delay
+//   (it's true that state machine may take action at any time may not be the
+//   desired behavior in some case, i'm just talking about user loses an option)
+// * the meaning of timer is weakened. it has to be paired with a flag state to
+//   restore the original intent. in another word, the expressiveness is
+//   degraded
+// this codebase requires event loop to not only support unset timers, but in
+// a semantically strong way: it must support reliably cancellation of timers.
+// in another word, a timer is guaranteed to not go off as soon as it has been
+// unset. in the context of reset forever pattern, it means as soon as you reset
+// a timer, it will be reliably postponed, will not alarm at the original
+// deadline under any circumstance
+//
+// while this is great for application, event loop must carefully implement it
+// to ensure constant timer overhead over time. with current tokio based
+// implementation, the latency overhead is constant, while memory consumption
+// keeps growing. there's probably no memory leak, just tokio is not reclaiming
+// dead tasks as fast as event loop creating new ones
+// anyway this stress test is just for future proof. currently there's no
+// protocol taking reset forever pattern, and presumably no protocol will ever
+// take it in such a tight loop
+// the ever growing memory consumption issue could be solved if i don't spawn
+// a task for every `set`. currently the reset intent is not passed to timer
+// service: all it can see is a `unset` immediately followed by a `set`. if we
+// pass down the reset intent, and manage to make use of tokio's `Sleep::reset`
+// method (yeah it's all about that: i'm unhappy just because there's a reset
+// available while my codebase is not using it), maybe the event loop can
+// perform better in this stress test, hopefully
+
 use std::time::Duration;
 
 use augustus::event::{

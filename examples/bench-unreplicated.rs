@@ -118,21 +118,19 @@ async fn main() -> anyhow::Result<()> {
                             erased::session::Sender::from(close_loop_session.sender()),
                         ));
                         let mut state_sender = state_session.sender();
-                        let mut tcp_control = Dispatch::<_, _, _, bytes::Bytes, _>::new(
-                            Tcp::new(None)?,
-                            move |buf: &_| to_client_on_buf(buf, &mut state_sender),
-                            // effectively disable connection table clean up
-                            // probably not good, not nothing much can do without a event loop
-                            BlackHole,
-                        )?;
+                        let mut tcp_control =
+                            Unify(Buffered::from(Dispatch::<_, _, _, bytes::Bytes, _>::new(
+                                Tcp::new(None)?,
+                                move |buf: &_| to_client_on_buf(buf, &mut state_sender),
+                                // effectively disable connection table clean up
+                                // probably not good, not nothing much can do without a event loop
+                                BlackHole,
+                            )?));
                         let mut timer = UnreachableTimer;
                         sessions.spawn_on(
                             async move {
-                                tcp::accept_session(
-                                    listener,
-                                    erased::Inline(&mut tcp_control, &mut timer),
-                                )
-                                .await
+                                tcp::accept_session(listener, Inline(&mut tcp_control, &mut timer))
+                                    .await
                             },
                             runtime.handle(),
                         );
@@ -316,14 +314,14 @@ async fn main() -> anyhow::Result<()> {
             let mut state = Unify(Replica::new(Null, ToClientMessageNet::new(simplex::Tcp)));
             let mut state_session = Session::new();
             let mut state_sender = state_session.sender();
-            let mut tcp_control = Dispatch::<_, _, _, bytes::Bytes, _>::new(
+            let mut tcp_control = Unify(Buffered::from(Dispatch::<_, _, _, bytes::Bytes, _>::new(
                 Tcp::new(None)?,
                 move |buf: &_| to_replica_on_buf::<SocketAddr>(buf, &mut state_sender),
                 BlackHole,
-            )?;
+            )?));
             let mut timer = UnreachableTimer;
             let accept_session =
-                tcp::accept_session(listener, erased::Inline(&mut tcp_control, &mut timer));
+                tcp::accept_session(listener, Inline(&mut tcp_control, &mut timer));
             let state_session = state_session.run(&mut state);
             return run(accept_session, state_session).await;
         }
