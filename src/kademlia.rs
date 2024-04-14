@@ -483,10 +483,9 @@ impl<M: PeerCommon> OnEvent<ResendFindPeer<M::A>> for Peer<M::N, M::U, M::CW, M:
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let state = self.query_states.get_mut(&target).unwrap();
-        // eprintln!(
-        //     "Resend FindPeer({}, {}) {record:?}",
-        //     H256(target),
-        //     state.find_peer.count
+        // warn!(
+        //     "resend FindPeer({target}, {}) {:?}",
+        //     state.find_peer.count, record.addr
         // );
         // self.net
         //     .send_to_each([record.addr.clone()].into_iter(), state.find_peer.clone())

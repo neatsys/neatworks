@@ -19,7 +19,7 @@ use crate::{
     },
 };
 
-pub struct Tcp(bytes::Bytes);
+pub struct Tcp(Option<SocketAddr>, bytes::Bytes);
 
 type TcpPreamble = Option<SocketAddr>;
 
@@ -31,7 +31,7 @@ impl Tcp {
         let mut preamble = bincode::options().serialize(&addr)?;
         assert!(preamble.len() < TCP_PREAMBLE_LEN);
         preamble.resize(TCP_PREAMBLE_LEN, Default::default());
-        Ok(Self(preamble.into()))
+        Ok(Self(addr, preamble.into()))
     }
 
     async fn read_task(
@@ -88,6 +88,10 @@ impl Tcp {
 }
 
 impl<B: Buf> Protocol<SocketAddr, B> for Tcp {
+    fn local_addr(&self) -> Option<SocketAddr> {
+        self.0
+    }
+
     type Sender = UnboundedSender<B>;
 
     fn connect<E: SendEventOnce<Closed<SocketAddr>>>(
@@ -96,7 +100,7 @@ impl<B: Buf> Protocol<SocketAddr, B> for Tcp {
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Send + 'static,
         close_guard: CloseGuard<E, SocketAddr>,
     ) -> Self::Sender {
-        let preamble = self.0.clone();
+        let preamble = self.1.clone();
         let (sender, receiver) = unbounded_channel();
         tokio::spawn(async move {
             let task = async {

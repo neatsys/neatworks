@@ -17,21 +17,10 @@ use tokio::{
     task::JoinSet,
     time::{sleep, timeout_at, Instant},
 };
-use tracing::Level;
-use tracing_subscriber::{
-    filter::Targets, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt as _,
-};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_span_events(FmtSpan::CLOSE)
-        .with_max_level(Level::DEBUG)
-        // .with_ansi(false)
-        .finish()
-        // .with("augustus=debug".parse::<Targets>()?)
-        .with("warn".parse::<Targets>()?)
-        .init();
+    tracing_subscriber::fmt::init();
 
     let num_peer = args().nth(1).map(|n| n.parse::<u16>()).unwrap_or(Ok(50))?;
     let multiplier = args().nth(2).map(|n| n.parse::<u8>()).unwrap_or(Ok(200))?;
@@ -58,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
             Once(control_session.sender()),
         )?));
 
-        // sessions.spawn(augustus::net::session::tcp_accept_session(
+        // sessions.spawn(augustus::net::session::tcp::accept_session(
         //     listener,
         sessions.spawn(augustus::net::session::quic::accept_session(
             quic,
@@ -101,3 +90,5 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
     // std::future::pending().await
 }
+
+// cSpell:words quic

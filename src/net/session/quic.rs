@@ -60,10 +60,13 @@ impl Quic {
         loop {
             let mut stream = match connection.accept_uni().await {
                 Ok(stream) => stream,
-                // TODO
-                // Err(quinn::ConnectionError::ConnectionClosed(_)) => break,
+                // `LocallyClosed` when `Endpoint` is dropped
+                // more gracefully shutdown?
+                Err(quinn::ConnectionError::TimedOut | quinn::ConnectionError::LocallyClosed) => {
+                    break
+                }
                 Err(err) => {
-                    warn!("<<< {remote_addr} {err}");
+                    warn!("<< {remote_addr} {err}");
                     break;
                 }
             };
@@ -77,6 +80,7 @@ impl Quic {
                 .await
                 {
                     warn!("<<< {remote_addr} {err}")
+                    // we are dropping message here
                 }
             });
         }
@@ -106,13 +110,18 @@ impl Quic {
                         }
                         .await
                         {
+                            // there's small chance that we get a timeout error here, when the
+                            // timeout happens almost at the same time of `open_uni()` (which
+                            // suppose to prevent the timeout to happen)
+                            // very rare, so not bother downcast and filter it
                             warn!(">>> {} {err}", connection.remote_address())
+                            // more importantly, `buf` is probably dropped if reaches here
                         }
                     });
                 }
                 Select::Closed(err) => {
                     if !matches!(err, ConnectionError::TimedOut) {
-                        warn!(">> {:?} {err}", connection.remote_address())
+                        warn!(">> {} {err}", connection.remote_address())
                     }
                     break;
                 }
@@ -125,6 +134,10 @@ impl Quic {
 }
 
 impl<B: Buf> Protocol<SocketAddr, B> for Quic {
+    fn local_addr(&self) -> Option<SocketAddr> {
+        self.0.local_addr().ok()
+    }
+
     type Sender = UnboundedSender<B>;
 
     fn connect<E: SendEventOnce<Closed<SocketAddr>> + Send + 'static>(

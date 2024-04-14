@@ -270,12 +270,14 @@ async fn start_peer(
     let _ = remove_dir_all(path).await;
     create_dir(path).await?;
     let addr = record.addr;
-    let listener = TcpListener::bind(SocketAddr::from(([0; 4], addr.port()))).await?;
+    // let listener = TcpListener::bind(SocketAddr::from(([0; 4], addr.port()))).await?;
+    let listener = TcpListener::bind(addr).await?;
     // let quic = augustus::net::session::Quic::new(SocketAddr::from(([0; 4], addr.port())))?;
+    // let quic = augustus::net::session::Quic::new(addr)?;
 
     let ip = record.addr.ip();
     let mut buckets = Buckets::new(record);
-    // we don't really need this to be deterministic actually... just too late to realize
+    // we don't really need this to be deterministic actually... just too late when realized
     records.shuffle(&mut rng);
     for record in records {
         if record.id == peer_id {
@@ -288,8 +290,7 @@ async fn start_peer(
     let mut kademlia_control_session = Session::new();
     let (mut bulk_sender, bulk_receiver) = unbounded_channel();
     let (fs_sender, fs_receiver) = unbounded_channel();
-    let mut tcp_control_session = session::Session::new();
-    // let mut quic_control_session = Session::new();
+    let mut dispatch_control_session = session::Session::new();
 
     let mut kademlia_peer = Blanket(Buffered::from(
         // TODO when there's dynamical joining peer that actually need to do bootstrap (and wait for
@@ -297,9 +298,8 @@ async fn start_peer(
         kademlia::Peer::<_, _, _, BlackHole, _>::new(
             buckets,
             Box::new(MessageNet::new(dispatch::Net::from(
-                tcp_control_session.sender(),
+                dispatch_control_session.sender(),
             ))) as Box<dyn kademlia::Net<SocketAddr> + Send + Sync>,
-            // MessageNet::new(DispatchNet(Sender::from(quic_control_session.sender()))),
             Sender::from(kademlia_control_session.sender()),
             Box::new(kademlia::CryptoWorker::from(Worker::Inline(
                 crypto.clone(),
@@ -309,9 +309,8 @@ async fn start_peer(
         ),
     ));
     let mut kademlia_control = Blanket(Buffered::from(Control::new(
-        Box::new(dispatch::Net::from(tcp_control_session.sender()))
+        Box::new(dispatch::Net::from(dispatch_control_session.sender()))
             as Box<dyn augustus::net::kademlia::Net<SocketAddr, bytes::Bytes> + Send + Sync>,
-        // DispatchNet(Sender::from(quic_control_session.sender())),
         Box::new(Sender::from(kademlia_session.sender()))
             as Box<dyn SendEvent<Query> + Send + Sync>,
     )));
@@ -334,10 +333,10 @@ async fn start_peer(
         ))) as _,
         Box::new(fs_sender) as _,
     )));
-    let mut tcp_control = Unify(event::Buffered::from(Dispatch::new(
+    let mut dispatch_control = Unify(event::Buffered::from(Dispatch::new(
         augustus::net::session::Tcp::new(addr)?,
+        // quic.clone(),
         {
-            // let mut quic_control = Blanket(Unify(Dispatch::new(quic.clone(), {
             let mut peer_sender = Sender::from(peer_session.sender());
             let mut kademlia_sender = Sender::from(kademlia_session.sender());
             move |buf: &_| {
@@ -349,17 +348,15 @@ async fn start_peer(
                 )
             }
         },
-        Once(tcp_control_session.sender()),
+        Once(dispatch_control_session.sender()),
     )?));
 
     let socket_session =
-        augustus::net::session::tcp::accept_session(listener, tcp_control_session.sender());
-    // let socket_session = augustus::net::session::quic_accept_session(
-    //     quic,
-    //     Sender::from(quic_control_session.sender()),
-    // );
+        augustus::net::session::tcp::accept_session(listener, dispatch_control_session.sender());
+    // let socket_session =
+    //     augustus::net::session::quic::accept_session(quic, dispatch_control_session.sender());
     let kademlia_session = kademlia_session.run(&mut kademlia_peer);
-    let blob_session = bulk::session(
+    let bulk_session = bulk::session(
         ip,
         bulk_receiver,
         MessageNet::<_, SocketAddr>::new(PeerNet(Sender::from(kademlia_control_session.sender()))),
@@ -368,19 +365,16 @@ async fn start_peer(
     let kademlia_control_session = kademlia_control_session.run(&mut kademlia_control);
     let fs_session = entropy::fs::session(path, fs_receiver, Sender::from(peer_session.sender()));
     let peer_session = peer_session.run(&mut peer);
-    let tcp_control_session = tcp_control_session.run(&mut tcp_control);
-    // Sender::from(quic_control_session.sender()).send(Init)?;
-    // let quic_control_session = quic_control_session.run(&mut quic_control);
+    let dispatch_control_session = dispatch_control_session.run(&mut dispatch_control);
 
     tokio::select! {
         result = socket_session => result?,
         result = kademlia_session => result?,
         result = kademlia_control_session => result?,
-        result = blob_session => result?,
+        result = bulk_session => result?,
         result = fs_session => result?,
         result = peer_session => result?,
-        result = tcp_control_session => result?,
-        // result = quic_control_session => result?,
+        result = dispatch_control_session => result?,
     }
     Err(anyhow::format_err!("unexpected shutdown"))
 }

@@ -275,7 +275,7 @@ async fn latency_benchmark(
     }
 
     for _ in 0..num_total {
-        operation_session(
+        let op_session = operation_session(
             control_client.clone(),
             instances,
             category,
@@ -284,8 +284,11 @@ async fn latency_benchmark(
             k,
             n,
             &mut out,
-        )
-        .await?;
+        );
+        tokio::select! {
+            result = op_session => result?,
+            Some(result) = start_peers_sessions.join_next() => result??
+        }
         sleep(Duration::from_secs(1)).await
     }
 

@@ -53,7 +53,8 @@ pub struct SendError<M> {
 
 impl<N: Into<M>, M> SendEvent<N> for UnboundedSender<M> {
     fn send(&mut self, event: N) -> anyhow::Result<()> {
-        UnboundedSender::send(self, event.into()).map_err(|err| anyhow::format_err!(err.to_string()))
+        UnboundedSender::send(self, event.into())
+            .map_err(|err| anyhow::format_err!(err.to_string()))
     }
 }
 
@@ -207,6 +208,7 @@ impl<M> Session<M> {
 
 impl Timer for SessionTimer {
     fn set(&mut self, period: Duration) -> anyhow::Result<TimerId> {
+        let period = period.max(Duration::from_nanos(1));
         self.id += 1;
         let timer_id = self.id;
         let mut sender = self.sender.boxed_clone();
