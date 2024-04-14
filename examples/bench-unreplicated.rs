@@ -52,7 +52,7 @@ use tokio::{
     signal::ctrl_c,
     sync::mpsc::unbounded_channel,
     task::{spawn_blocking, JoinSet},
-    time::sleep,
+    time::timeout,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -66,8 +66,8 @@ use tokio_util::sync::CancellationToken;
 #[tokio::main(flavor = "current_thread")]
 // #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
-    let replica_addr = SocketAddr::from(([10, 0, 0, 7], 4000));
-    let client_addr = SocketAddr::from(([10, 0, 0, 8], 0));
+    let replica_addr = SocketAddr::from(([10, 0, 0, 4], 4000));
+    let client_addr = SocketAddr::from(([10, 0, 0, 3], 0));
     tracing_subscriber::fmt::init();
     let mut args = args().skip(1).collect::<HashSet<_>>();
     let flag_latency = args.remove("latency");
@@ -249,12 +249,10 @@ async fn main() -> anyhow::Result<()> {
             }
             runtimes.push(runtime)
         }
-        'select: {
-            tokio::select! {
-                Some(result) = sessions.join_next() => result??,
-                () = sleep(Duration::from_secs(10)) => break 'select,
-            }
-            anyhow::bail!("unreachable")
+        match timeout(Duration::from_secs(10), sessions.join_next()).await {
+            Err(_) => {}
+            Ok(None | Some(Ok(Ok(())))) => anyhow::bail!("unreachable"),
+            Ok(Some(result)) => result??,
         }
         cancel.cancel();
         drop(count_sender);
@@ -346,7 +344,7 @@ async fn main() -> anyhow::Result<()> {
         let state_session = state_session.run(&mut state);
         return run(
             async {
-                // mulplex the two sessions probably does not hurt performance since
+                // multiplex the two sessions probably does not hurt performance since
                 // `accept_session` pending forever ever since all client connections established
                 tokio::select! {
                     result = accept_session => result,
@@ -423,3 +421,7 @@ async fn run(
     }
     anyhow::bail!("unreachable")
 }
+
+// cSpell:words unreplicated quic tikv jemalloc jemallocator msvc nonminimal
+// cSpell:words rustix sched
+// cSpell:ignore taskset setaffinity

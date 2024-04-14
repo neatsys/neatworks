@@ -57,8 +57,8 @@ impl Tcp {
         {
             warn!(
                 "{:?} (remote {remote:?}) >>> {:?} {err}",
-                stream.peer_addr(),
-                stream.local_addr()
+                stream.peer_addr().ok(),
+                stream.local_addr().ok()
             );
         }
     }
@@ -78,8 +78,8 @@ impl Tcp {
             {
                 warn!(
                     "{:?} >=> {:?} (remote {remote}) {err}",
-                    stream.local_addr(),
-                    stream.peer_addr()
+                    stream.local_addr().ok(),
+                    stream.peer_addr().ok()
                 );
                 break;
             }
@@ -184,7 +184,7 @@ pub mod simplex {
     use std::net::SocketAddr;
 
     use bincode::Options;
-    use tokio::io::AsyncWriteExt;
+    use tokio::{io::AsyncWriteExt, sync::mpsc::unbounded_channel};
     use tracing::warn;
 
     use crate::net::{Buf, IterAddr, SendMessage};
@@ -193,6 +193,8 @@ pub mod simplex {
 
     pub struct Tcp;
 
+    // TODO completely reuse `super::Tcp` for this
+    // otherwise i really don't want to keep this useless= =
     impl<B: Buf> SendMessage<SocketAddr, B> for Tcp {
         fn send(&mut self, dest: SocketAddr, message: B) -> anyhow::Result<()> {
             tokio::spawn(async move {
@@ -203,12 +205,13 @@ pub mod simplex {
                     let socket = tokio::net::TcpSocket::new_v4()?;
                     socket.set_reuseaddr(true)?;
                     let mut stream = socket.connect(dest).await?;
+                    stream.set_nodelay(true)?;
                     let mut preamble = bincode::options().serialize(&TcpPreamble::None)?;
                     preamble.resize(TCP_PREAMBLE_LEN, Default::default());
                     stream.write_all(&preamble).await?;
-                    stream.write_u64(message.as_ref().len() as _).await?;
-                    stream.write_all(message.as_ref()).await?;
-                    stream.flush().await?;
+                    let (sender, receiver) = unbounded_channel();
+                    sender.send(message)?;
+                    super::Tcp::write_task(stream.into_split().1, receiver, dest).await;
                     anyhow::Ok(())
                 }
                 .await
