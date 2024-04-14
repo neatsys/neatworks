@@ -1,4 +1,4 @@
-use std::{io::ErrorKind, net::SocketAddr};
+use std::{io::ErrorKind, net::SocketAddr, time::Duration};
 
 use bincode::Options;
 use tokio::{
@@ -8,6 +8,7 @@ use tokio::{
         TcpListener, TcpStream,
     },
     sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    time::timeout,
 };
 use tracing::{warn, Instrument};
 
@@ -63,12 +64,18 @@ impl Tcp {
         }
     }
 
-    async fn write_task<B: Buf>(
+    async fn write_task<B: Buf, E: SendEventOnce<Closed<SocketAddr>>>(
         mut stream: OwnedWriteHalf,
         mut receiver: UnboundedReceiver<B>,
         remote: SocketAddr,
+        close_guard: impl Into<Option<CloseGuard<E, SocketAddr>>>,
     ) {
-        while let Some(buf) = receiver.recv().await {
+        loop {
+            let buf = match timeout(Duration::from_millis(1000), receiver.recv()).await {
+                Ok(None) => return,
+                Err(_) => break,
+                Ok(Some(buf)) => buf,
+            };
             if let Err(err) = async {
                 stream.write_u64(buf.as_ref().len() as _).await?;
                 stream.write_all(buf.as_ref()).await?;
@@ -84,6 +91,11 @@ impl Tcp {
                 break;
             }
         }
+        if let Some(close_guard) = close_guard.into() {
+            if let Err(err) = close_guard.close(remote) {
+                warn!("close {remote} {err}")
+            }
+        }
     }
 }
 
@@ -94,7 +106,7 @@ impl<B: Buf> Protocol<SocketAddr, B> for Tcp {
 
     type Sender = UnboundedSender<B>;
 
-    fn connect<E: SendEventOnce<Closed<SocketAddr>>>(
+    fn connect<E: SendEventOnce<Closed<SocketAddr>> + Send + 'static>(
         &self,
         remote: SocketAddr,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Send + 'static,
@@ -121,14 +133,14 @@ impl<B: Buf> Protocol<SocketAddr, B> for Tcp {
             };
             let (read, write) = stream.into_split();
             tokio::spawn(Self::read_task(read, on_buf, remote));
-            tokio::spawn(Self::write_task(write, receiver, remote));
+            tokio::spawn(Self::write_task(write, receiver, remote, close_guard));
         });
         sender
     }
 
     type Incoming = (TcpPreamble, TcpStream);
 
-    fn accept<E: SendEventOnce<Closed<SocketAddr>>>(
+    fn accept<E: SendEventOnce<Closed<SocketAddr>> + Send + 'static>(
         (preamble, stream): Self::Incoming,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Send + 'static,
         close_guard: CloseGuard<E, SocketAddr>,
@@ -137,7 +149,7 @@ impl<B: Buf> Protocol<SocketAddr, B> for Tcp {
         tokio::spawn(Tcp::read_task(read, on_buf, preamble));
         if let Some(remote) = preamble {
             let (sender, receiver) = unbounded_channel();
-            tokio::spawn(Tcp::write_task(write, receiver, remote));
+            tokio::spawn(Tcp::write_task(write, receiver, remote, close_guard));
             Some((remote, sender))
         } else {
             // write.forget()
@@ -191,7 +203,10 @@ pub mod simplex {
     use tokio::{io::AsyncWriteExt, sync::mpsc::unbounded_channel};
     use tracing::warn;
 
-    use crate::net::{Buf, IterAddr, SendMessage};
+    use crate::{
+        event::BlackHole,
+        net::{Buf, IterAddr, SendMessage},
+    };
 
     use super::{TcpPreamble, TCP_PREAMBLE_LEN};
 
@@ -215,7 +230,13 @@ pub mod simplex {
                     stream.write_all(&preamble).await?;
                     let (sender, receiver) = unbounded_channel();
                     sender.send(message)?;
-                    super::Tcp::write_task(stream.into_split().1, receiver, dest).await;
+                    super::Tcp::write_task::<_, BlackHole>(
+                        stream.into_split().1,
+                        receiver,
+                        dest,
+                        None,
+                    )
+                    .await;
                     anyhow::Ok(())
                 }
                 .await

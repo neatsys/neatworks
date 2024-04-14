@@ -128,7 +128,7 @@ impl Quic {
             }
         }
         if let Err(err) = close_guard.close(connection.remote_address()) {
-            warn!("close {:?} {err}", connection.remote_address())
+            warn!("close {} {err}", connection.remote_address())
         }
     }
 }

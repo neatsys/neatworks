@@ -4,6 +4,7 @@ use std::{
     env::args,
     future::IntoFuture,
     net::SocketAddr,
+    str::FromStr,
     sync::{
         atomic::{AtomicU32, Ordering::SeqCst},
         Arc,
@@ -61,7 +62,10 @@ use tokio::{
     task::{JoinHandle, JoinSet},
     time::timeout,
 };
-use tracing::warn;
+use tracing::{warn, Level};
+use tracing_subscriber::{
+    filter::Targets, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt,
+};
 use wirehair::{Decoder, Encoder};
 
 #[derive(Debug, Clone, derive_more::From)]
@@ -72,12 +76,16 @@ enum Upcall {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
-    // tracing_subscriber::fmt()
-    //     .with_file(true)
-    //     .with_line_number(true)
-    //     .with_ansi(false)
-    //     .init();
+    tracing_subscriber::fmt()
+        .with_span_events(FmtSpan::CLOSE)
+        .with_max_level(Level::TRACE)
+        .finish()
+        .with(if let Ok(var) = std::env::var("RUST_LOG") {
+            Targets::from_str(&var)?
+        } else {
+            Targets::new().with_default(Level::INFO)
+        })
+        .init();
 
     let mut rlimit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
     if rlimit.current.is_some() && rlimit.current < rlimit.maximum {
@@ -271,9 +279,9 @@ async fn start_peer(
     create_dir(path).await?;
     let addr = record.addr;
     // let listener = TcpListener::bind(SocketAddr::from(([0; 4], addr.port()))).await?;
-    let listener = TcpListener::bind(addr).await?;
+    // let listener = TcpListener::bind(addr).await?;
     // let quic = augustus::net::session::Quic::new(SocketAddr::from(([0; 4], addr.port())))?;
-    // let quic = augustus::net::session::Quic::new(addr)?;
+    let quic = augustus::net::session::Quic::new(addr)?;
 
     let ip = record.addr.ip();
     let mut buckets = Buckets::new(record);
@@ -334,8 +342,8 @@ async fn start_peer(
         Box::new(fs_sender) as _,
     )));
     let mut dispatch_control = Unify(event::Buffered::from(Dispatch::new(
-        augustus::net::session::Tcp::new(addr)?,
-        // quic.clone(),
+        // augustus::net::session::Tcp::new(addr)?,
+        quic.clone(),
         {
             let mut peer_sender = Sender::from(peer_session.sender());
             let mut kademlia_sender = Sender::from(kademlia_session.sender());
@@ -352,9 +360,8 @@ async fn start_peer(
     )?));
 
     let socket_session =
-        augustus::net::session::tcp::accept_session(listener, dispatch_control_session.sender());
-    // let socket_session =
-    //     augustus::net::session::quic::accept_session(quic, dispatch_control_session.sender());
+        // augustus::net::session::tcp::accept_session(listener, dispatch_control_session.sender());
+        augustus::net::session::quic::accept_session(quic, dispatch_control_session.sender());
     let kademlia_session = kademlia_session.run(&mut kademlia_peer);
     let bulk_session = bulk::session(
         ip,
