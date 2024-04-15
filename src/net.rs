@@ -19,7 +19,11 @@ use bytes::Bytes;
 use derive_where::derive_where;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use crate::event::{BlackHole, SendEvent};
+use crate::{
+    event::{BlackHole, SendEvent},
+    util::Payload,
+    workload::Invoke,
+};
 
 pub trait Addr:
     Send + Sync + Clone + Eq + Hash + Debug + Serialize + DeserializeOwned + 'static
@@ -30,7 +34,7 @@ impl<T: Send + Sync + Clone + Eq + Hash + Debug + Serialize + DeserializeOwned +
 {
 }
 
-pub trait Buf: AsRef<[u8]> + Send + Sync + Clone + From<Vec<u8>> + 'static {}
+pub trait Buf: AsRef<[u8]> + Into<Vec<u8>> + Send + Sync + Clone + From<Vec<u8>> + 'static {}
 
 // not blanket impl here because we further require `Buf` to be "cheaply" cloned
 impl Buf for bytes::Bytes {}
@@ -213,6 +217,15 @@ impl<N: for<'a> SendMessageToEach<A, M>, A: Addr, M> SendMessage<All, M> for Ind
             }
         });
         self.inner_net.send_to_each(addrs, message)
+    }
+}
+
+#[derive(Debug)]
+pub struct InvokeNet<C>(pub C);
+
+impl<C: SendEvent<Invoke<Payload>>, B: Buf> SendMessage<All, B> for InvokeNet<C> {
+    fn send(&mut self, All: All, message: B) -> anyhow::Result<()> {
+        self.0.send(Invoke(Payload(message.into())))
     }
 }
 

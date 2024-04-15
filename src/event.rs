@@ -269,7 +269,8 @@ pub mod erased {
     // this fact causes a few headaches, like the Buffered below has to stick on some fixed
     // `impl Timer` type (which prevents us to reuse the `Buffered` above), workaround trait
     // `OnEventFixTimer` must be introduced, etc
-    pub type Event<S, T> = Box<dyn FnOnce(&mut S, &mut T) -> anyhow::Result<()> + Send>;
+    #[allow(clippy::complexity)]
+    pub struct Event<S, T>(Box<dyn FnOnce(&mut S, &mut T) -> anyhow::Result<()> + Send>);
 
     pub trait OnEvent<M> {
         fn on_event(&mut self, event: M, timer: &mut impl Timer) -> anyhow::Result<()>;
@@ -290,7 +291,7 @@ pub mod erased {
     impl<S, T> OnEventUniversal<T> for Blanket<S> {
         type Event = Event<Blanket<S>, T>;
 
-        fn on_event(&mut self, event: Self::Event, timer: &mut T) -> anyhow::Result<()> {
+        fn on_event(&mut self, Event(event): Self::Event, timer: &mut T) -> anyhow::Result<()> {
             event(self, timer)
         }
     }
@@ -346,7 +347,7 @@ pub mod erased {
             let event = move |state: &mut Blanket<S>, timer: &mut T| {
                 OnEventFixTimer::on_event(&mut **state, event, timer)
             };
-            self.0.send(Box::new(event))
+            self.0.send(Event(Box::new(event)))
         }
     }
 

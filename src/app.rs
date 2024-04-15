@@ -34,6 +34,18 @@ impl App for Null {
     }
 }
 
+#[derive(Debug)]
+pub struct Detach<E>(pub E);
+
+impl<E: SendEvent<Payload>> App for Detach<E> {
+    fn execute(&mut self, op: &[u8]) -> anyhow::Result<Vec<u8>> {
+        self.0.send(Payload(op.to_vec()))?;
+        Ok(Default::default())
+    }
+}
+
 pub use btree::BTreeMap;
 pub use kvstore::KVStore;
 pub use sqlite::Sqlite;
+
+use crate::{event::SendEvent, util::Payload};
