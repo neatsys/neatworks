@@ -3,6 +3,7 @@
 // maybe not the most reasonable organization but makes enough sense to me
 
 use std::{
+    fmt::Debug,
     mem::replace,
     sync::{
         atomic::{AtomicU32, Ordering::SeqCst},
@@ -12,34 +13,45 @@ use std::{
 };
 
 use derive_where::derive_where;
+use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{
     event::{
         erased::{events::Init, OnEvent},
-        OnTimer, SendEvent, SendEventOnce, Timer, BlackHole,
+        BlackHole, OnTimer, SendEvent, SendEventOnce, Timer,
     },
     util::Payload,
 };
 
 pub trait Workload {
+    type Op;
+    type Result;
     type Attach;
 
-    fn next_op(&mut self) -> anyhow::Result<Option<(Payload, Self::Attach)>>;
+    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::Attach)>>;
 
-    fn on_result(&mut self, result: Payload, attach: Self::Attach) -> anyhow::Result<()>;
+    fn on_result(&mut self, result: Self::Result, attach: Self::Attach) -> anyhow::Result<()>;
 }
 
 #[derive(Debug, Clone)]
-pub struct Iter<I>(pub I);
+pub struct Iter<I, O = Payload, R = Payload>(I, std::marker::PhantomData<(O, R)>);
 
-impl<T: Iterator<Item = Payload>> Workload for Iter<T> {
+impl<I, O, R> From<I> for Iter<I, O, R> {
+    fn from(value: I) -> Self {
+        Self(value, Default::default())
+    }
+}
+
+impl<T: Iterator<Item = O>, O, R> Workload for Iter<T, O, R> {
     type Attach = ();
+    type Op = O;
+    type Result = R;
 
-    fn next_op(&mut self) -> anyhow::Result<Option<(Payload, Self::Attach)>> {
+    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::Attach)>> {
         Ok(self.0.next().map(|op| (op, ())))
     }
 
-    fn on_result(&mut self, _: Payload, (): Self::Attach) -> anyhow::Result<()> {
+    fn on_result(&mut self, _: Self::Result, (): Self::Attach) -> anyhow::Result<()> {
         Ok(())
     }
 }
@@ -71,29 +83,35 @@ impl<W> From<OpLatency<W>> for Vec<Duration> {
 }
 
 impl<W: Workload> Workload for OpLatency<W> {
+    type Op = W::Op;
+    type Result = W::Result;
     type Attach = (Instant, W::Attach);
 
-    fn next_op(&mut self) -> anyhow::Result<Option<(Payload, Self::Attach)>> {
+    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::Attach)>> {
         let Some((op, attach)) = self.inner.next_op()? else {
             return Ok(None);
         };
         Ok(Some((op, (Instant::now(), attach))))
     }
 
-    fn on_result(&mut self, result: Payload, (start, attach): Self::Attach) -> anyhow::Result<()> {
+    fn on_result(
+        &mut self,
+        result: Self::Result,
+        (start, attach): Self::Attach,
+    ) -> anyhow::Result<()> {
         self.latencies.push(start.elapsed());
         self.inner.on_result(result, attach)
     }
 }
 
 #[derive(Debug, Clone, derive_more::Deref)]
-pub struct Recorded<W> {
+pub struct Recorded<W: Workload> {
     #[deref]
     inner: W,
-    pub invocations: Vec<(Payload, Payload)>,
+    pub invocations: Vec<(W::Op, W::Result)>,
 }
 
-impl<W> From<W> for Recorded<W> {
+impl<W: Workload> From<W> for Recorded<W> {
     fn from(value: W) -> Self {
         Self {
             inner: value,
@@ -102,17 +120,27 @@ impl<W> From<W> for Recorded<W> {
     }
 }
 
-impl<W: Workload> Workload for Recorded<W> {
-    type Attach = (Payload, W::Attach);
+impl<W: Workload> Workload for Recorded<W>
+where
+    W::Op: Clone,
+    W::Result: Clone,
+{
+    type Op = W::Op;
+    type Result = W::Result;
+    type Attach = (W::Op, W::Attach);
 
-    fn next_op(&mut self) -> anyhow::Result<Option<(Payload, Self::Attach)>> {
+    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::Attach)>> {
         Ok(self
             .inner
             .next_op()?
             .map(|(op, attach)| (op.clone(), (op, attach))))
     }
 
-    fn on_result(&mut self, result: Payload, (op, attach): Self::Attach) -> anyhow::Result<()> {
+    fn on_result(
+        &mut self,
+        result: Self::Result,
+        (op, attach): Self::Attach,
+    ) -> anyhow::Result<()> {
         self.invocations.push((op, result.clone()));
         self.inner.on_result(result, attach)
     }
@@ -134,9 +162,11 @@ impl<W> Total<W> {
 }
 
 impl<W: Workload> Workload for Total<W> {
+    type Op = W::Op;
+    type Result = W::Result;
     type Attach = W::Attach;
 
-    fn next_op(&mut self) -> anyhow::Result<Option<(Payload, Self::Attach)>> {
+    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::Attach)>> {
         let mut remain_count = self.remain_count.load(SeqCst);
         loop {
             if remain_count == 0 {
@@ -155,37 +185,44 @@ impl<W: Workload> Workload for Total<W> {
         self.inner.next_op()
     }
 
-    fn on_result(&mut self, result: Payload, attach: Self::Attach) -> anyhow::Result<()> {
+    fn on_result(&mut self, result: Self::Result, attach: Self::Attach) -> anyhow::Result<()> {
         self.inner.on_result(result, attach)
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct Check<I> {
+pub struct Check<I, O, R> {
     inner: I,
-    expected_result: Option<Payload>,
+    expected_result: Option<R>,
+    _m: std::marker::PhantomData<O>,
 }
 
-impl<I> Check<I> {
+impl<I, O, R> Check<I, O, R> {
     pub fn new(inner: I) -> Self {
         Self {
             inner,
             expected_result: None,
+            _m: Default::default(),
         }
     }
 }
 
 #[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display(bound = "R: Debug")]
 #[display(fmt = "{self:?}")]
-pub struct UnexpectedResult {
-    pub expect: Payload,
-    pub actual: Payload,
+pub struct UnexpectedResult<R> {
+    pub expect: R,
+    pub actual: R,
 }
 
-impl<I: Iterator<Item = (Payload, Payload)>> Workload for Check<I> {
+impl<I: Iterator<Item = (O, R)>, O, R: Debug + Eq + Send + Sync + 'static> Workload
+    for Check<I, O, R>
+{
+    type Op = O;
+    type Result = R;
     type Attach = ();
 
-    fn next_op(&mut self) -> anyhow::Result<Option<(Payload, Self::Attach)>> {
+    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::Attach)>> {
         let Some((op, expected_result)) = self.inner.next() else {
             return Ok(None);
         };
@@ -194,7 +231,7 @@ impl<I: Iterator<Item = (Payload, Payload)>> Workload for Check<I> {
         Ok(Some((op, ())))
     }
 
-    fn on_result(&mut self, result: Payload, (): Self::Attach) -> anyhow::Result<()> {
+    fn on_result(&mut self, result: Self::Result, (): Self::Attach) -> anyhow::Result<()> {
         let Some(expected_result) = self.expected_result.take() else {
             anyhow::bail!("missing invocation")
         };
@@ -209,14 +246,38 @@ impl<I: Iterator<Item = (Payload, Payload)>> Workload for Check<I> {
     }
 }
 
+#[derive(Debug, Clone, derive_more::Deref)]
+pub struct Json<W>(pub W);
+
+impl<W: Workload> Workload for Json<W>
+where
+    W::Op: Serialize,
+    W::Result: DeserializeOwned,
+{
+    type Op = Payload;
+    type Result = Payload;
+    type Attach = W::Attach;
+
+    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::Attach)>> {
+        let Some((op, attach)) = self.0.next_op()? else {
+            return Ok(None);
+        };
+        Ok(Some((Payload(serde_json::to_vec(&op)?), attach)))
+    }
+
+    fn on_result(&mut self, result: Self::Result, attach: Self::Attach) -> anyhow::Result<()> {
+        self.0.on_result(serde_json::from_slice(&result)?, attach)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Invoke(pub Payload);
+pub struct Invoke<O = Payload>(pub O);
 
 // newtype namespace may be desired after the type erasure migration
 // the `u32` field was for client id, and becomes unused after remove multiple
 // client support on `CloseLoop`
 // too lazy to refactor it off
-pub type InvokeOk = (u32, Payload);
+pub type InvokeOk<R = Payload> = (u32, R);
 
 pub struct Stop;
 
@@ -247,7 +308,7 @@ impl<W: Workload, E> CloseLoop<W, E> {
     }
 }
 
-impl<W: Workload, E: SendEvent<Invoke>, SE> OnEvent<Init> for CloseLoop<W, E, SE> {
+impl<W: Workload, E: SendEvent<Invoke<W::Op>>, SE> OnEvent<Init> for CloseLoop<W, E, SE> {
     fn on_event(&mut self, Init: Init, _: &mut impl Timer) -> anyhow::Result<()> {
         let (op, attach) = self
             .workload
@@ -259,10 +320,14 @@ impl<W: Workload, E: SendEvent<Invoke>, SE> OnEvent<Init> for CloseLoop<W, E, SE
     }
 }
 
-impl<W: Workload, E: SendEvent<Invoke>, SE: SendEventOnce<Stop>> OnEvent<InvokeOk>
+impl<W: Workload, E: SendEvent<Invoke<W::Op>>, SE: SendEventOnce<Stop>> OnEvent<InvokeOk<W::Result>>
     for CloseLoop<W, E, SE>
 {
-    fn on_event(&mut self, (_, result): InvokeOk, _: &mut impl Timer) -> anyhow::Result<()> {
+    fn on_event(
+        &mut self,
+        (_, result): InvokeOk<W::Result>,
+        _: &mut impl Timer,
+    ) -> anyhow::Result<()> {
         let Some(attach) = self.workload_attach.take() else {
             anyhow::bail!("missing workload attach")
         };

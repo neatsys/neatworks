@@ -260,7 +260,7 @@ pub mod check {
             OnTimer as _, TimerId, Transient, UnreachableTimer,
         },
         net::{events::Recv, SendMessage},
-        util::Request,
+        util::{Payload, Request},
         workload::{CloseLoop, Invoke, InvokeOk, Workload},
     };
 
@@ -367,7 +367,7 @@ pub mod check {
         }
     }
 
-    impl<W: Workload> crate::search::State for State<W> {
+    impl<W: Workload<Op = Payload, Result = Payload>> crate::search::State for State<W> {
         type Event = Event;
 
         fn events(&self) -> Vec<Self::Event> {
@@ -417,7 +417,7 @@ pub mod check {
         }
     }
 
-    impl<W: Workload> State<W> {
+    impl<W: Workload<Op = Payload, Result = Payload>> State<W> {
         pub fn launch(&mut self) -> anyhow::Result<()> {
             for client in &mut self.clients {
                 client.close_loop.on_event(Init, &mut UnreachableTimer)?

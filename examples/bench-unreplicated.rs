@@ -101,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
 
                 let mut close_loop = Blanket(erased::Unify(CloseLoop::new(
                     state_session.sender(),
-                    OpLatency::new(Iter(repeat_with(Default::default))),
+                    OpLatency::new(Iter::from(repeat_with(Default::default))),
                 )));
 
                 if flag_tcp {

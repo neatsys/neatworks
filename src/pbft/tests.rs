@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use crate::{
     app::{
         kvstore::{
-            static_workload,
             Op::{Get, Put},
             Result::{GetResult, PutOk},
         },
@@ -32,7 +31,7 @@ use crate::{
     pbft::CLIENT_RESEND_INTERVAL,
     util::Payload,
     worker::Worker,
-    workload::{CloseLoop, Invoke, InvokeOk, Iter, Workload},
+    workload::{Check, CloseLoop, Invoke, InvokeOk, Iter, Json, Workload},
 };
 
 use super::{
@@ -292,8 +291,8 @@ impl<W: Workload, F: Filter, const CHECK: bool> State<W, F, CHECK> {
     }
 }
 
-impl<W: Workload, F: Filter + Clone, const CHECK: bool> crate::search::State
-    for State<W, F, CHECK>
+impl<W: Workload<Op = Payload, Result = Payload>, F: Filter + Clone, const CHECK: bool>
+    crate::search::State for State<W, F, CHECK>
 {
     type Event = Event;
 
@@ -381,7 +380,7 @@ impl<W: Workload, F: Filter + Clone, const CHECK: bool> crate::search::State
     }
 }
 
-impl<W: Workload, F: Filter, const CHECK: bool> State<W, F, CHECK> {
+impl<W: Workload<Op = Payload, Result = Payload>, F: Filter, const CHECK: bool> State<W, F, CHECK> {
     fn launch(&mut self) -> anyhow::Result<()> {
         for client in &mut self.clients {
             client.close_loop.on_event(Init, &mut UnreachableTimer)?
@@ -492,8 +491,10 @@ pub trait SimulateState: crate::search::State {
     }
 }
 
-impl<W: Workload + Clone, F: Filter + Clone> SimulateState for State<W, F, false> where
-    W::Attach: Clone
+impl<W: Workload<Op = Payload, Result = Payload> + Clone, F: Filter + Clone> SimulateState
+    for State<W, F, false>
+where
+    W::Attach: Clone,
 {
 }
 
@@ -514,7 +515,7 @@ fn t02_basic() -> anyhow::Result<()> {
     let num_faulty = 1;
     let mut state = State::<_, _>::new(num_replica, num_faulty);
     let op = Put("hello".into(), "world".into());
-    let workload = static_workload([(op.clone(), PutOk)].into_iter())?;
+    let workload = Json(Check::new([(op.clone(), PutOk)].into_iter()));
     state.push_client(workload, num_replica, num_faulty);
     state.launch()?;
 
@@ -548,7 +549,7 @@ fn t03_no_partition() -> anyhow::Result<()> {
         (Put("foo".into(), "baz".into()), PutOk),
         (Get("foo".into()), GetResult("baz".into())),
     ] {
-        let workload = static_workload([(op, result)].into_iter())?;
+        let workload = Json(Check::new([(op, result)].into_iter()));
         let index = state.push_client(workload, num_replica, num_faulty);
         state.launch_client(index)?;
 
@@ -577,7 +578,9 @@ fn t04_progress_in_majority() -> anyhow::Result<()> {
             ],
         )
     });
-    let workload = static_workload([(Put("hello".into(), "world".into()), PutOk)].into_iter())?;
+    let workload = Json(Check::new(
+        [(Put("hello".into(), "world".into()), PutOk)].into_iter(),
+    ));
     state.push_client(workload, num_replica, num_faulty);
     state.launch()?;
 
@@ -608,7 +611,9 @@ fn t05_no_progress_in_minority() -> anyhow::Result<()> {
             )
         })
         .map_filter(|filter| Deadline(filter, CLIENT_RESEND_INTERVAL * 20));
-    let workload = static_workload([(Put("hello".into(), "world".into()), PutOk)].into_iter())?;
+    let workload = Json(Check::new(
+        [(Put("hello".into(), "world".into()), PutOk)].into_iter(),
+    ));
     state.push_client(workload, num_replica, num_faulty);
     state.launch()?;
 
@@ -643,7 +648,9 @@ fn t06_progress_after_heal() -> anyhow::Result<()> {
             )
         })
         .map_filter(|filter| Deadline(filter, CLIENT_RESEND_INTERVAL * 20));
-    let workload = static_workload([(Put("hello".into(), "world".into()), PutOk)].into_iter())?;
+    let workload = Json(Check::new(
+        [(Put("hello".into(), "world".into()), PutOk)].into_iter(),
+    ));
     let index = state.push_client(workload, num_replica, num_faulty);
     state.launch_client(index)?;
 
@@ -662,7 +669,9 @@ fn t06_progress_after_heal() -> anyhow::Result<()> {
         state.step_simulate()?
     }
 
-    let workload = static_workload([(Get("hello".into()), GetResult("world".into()))].into_iter())?;
+    let workload = Json(Check::new(
+        [(Get("hello".into()), GetResult("world".into()))].into_iter(),
+    ));
     let index = state.push_client(workload, num_replica, num_faulty);
     state.launch_client(index)?;
     while !state.clients[index].close_loop.done {
@@ -677,7 +686,9 @@ fn t07_server_switches_partitions() -> anyhow::Result<()> {
     let num_replica = 7;
     let num_faulty = 2;
     let mut state = State::<_, _>::new(num_replica, num_faulty);
-    let workload = static_workload([(Put("hello".into(), "world".into()), PutOk)].into_iter())?;
+    let workload = Json(Check::new(
+        [(Put("hello".into(), "world".into()), PutOk)].into_iter(),
+    ));
     let index = state.push_client(workload, num_replica, num_faulty);
     let mut state = state.map_filter(|filter| {
         WithPartition(
@@ -700,7 +711,9 @@ fn t07_server_switches_partitions() -> anyhow::Result<()> {
         state.step_simulate()?
     }
 
-    let workload = static_workload([(Get("hello".into()), GetResult("world".into()))].into_iter())?;
+    let workload = Json(Check::new(
+        [(Get("hello".into()), GetResult("world".into()))].into_iter(),
+    ));
     let index = state.push_client(workload, num_replica, num_faulty);
     let mut state = state.map_filter(|_| AllowAll).map_filter(|filter| {
         WithPartition(

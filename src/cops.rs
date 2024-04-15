@@ -53,7 +53,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    app::kvstore,
+    app::ycsb,
     event::{
         erased::{OnEventRichTimer as OnEvent, RichTimer as Timer},
         SendEvent,
@@ -150,6 +150,7 @@ pub struct UpdateOk<V> {
 
 pub struct Client<N, U, V, A> {
     addr: A,
+    id: u8, // server id that send messages to
     deps: BTreeMap<KeyId, V>,
     working_key: Option<KeyId>,
 
@@ -157,11 +158,11 @@ pub struct Client<N, U, V, A> {
     upcall: U,
 }
 
-impl<N: ServerNet<A, V>, U, V: Version, A: Addr> OnEvent<kvstore::Op> for Client<N, U, V, A> {
-    fn on_event(&mut self, op: kvstore::Op, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
+impl<N: ServerNet<A, V>, U, V: Version, A: Addr> OnEvent<ycsb::Op> for Client<N, U, V, A> {
+    fn on_event(&mut self, op: ycsb::Op, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
         let key = match &op {
-            kvstore::Op::Append(..) => anyhow::bail!("unimplemented"),
-            kvstore::Op::Get(key) | kvstore::Op::Put(key, _) => key.parse()?,
+            ycsb::Op::Read(key) | ycsb::Op::Update(key, ..) => key.parse()?,
+            _ => anyhow::bail!("unimplemented"),
         };
         let replaced = self.working_key.replace(key);
         // Put/Put concurrent is forbid by original work as well
@@ -171,30 +172,29 @@ impl<N: ServerNet<A, V>, U, V: Version, A: Addr> OnEvent<kvstore::Op> for Client
         // the client will be driven by a close loop without concurrent invocation after all
         anyhow::ensure!(replaced.is_none(), "concurrent op");
         match op {
-            kvstore::Op::Append(..) => anyhow::bail!("unimplemented"),
-            kvstore::Op::Put(_, value) => {
+            ycsb::Op::Update(_, index, value) => {
+                anyhow::ensure!(index == 0, "unimplemented");
                 let put = Put {
                     key,
                     value,
                     deps: self.deps.clone(),
                     client_addr: self.addr.clone(),
                 };
-                self.net.send(0, put)
+                self.net.send(self.id, put) // TODO
             }
-            kvstore::Op::Get(_) => {
+            ycsb::Op::Read(_) => {
                 let get = Get {
                     key,
                     client_addr: self.addr.clone(),
                 };
-                self.net.send(0, get)
+                self.net.send(self.id, get)
             }
+            _ => unreachable!(),
         }
     }
 }
 
-impl<N, U: SendEvent<kvstore::Result>, V: Version, A> OnEvent<Recv<PutOk<V>>>
-    for Client<N, U, V, A>
-{
+impl<N, U: SendEvent<ycsb::Result>, V: Version, A> OnEvent<Recv<PutOk<V>>> for Client<N, U, V, A> {
     fn on_event(
         &mut self,
         Recv(put_ok): Recv<PutOk<V>>,
@@ -212,13 +212,11 @@ impl<N, U: SendEvent<kvstore::Result>, V: Version, A> OnEvent<Recv<PutOk<V>>>
             return Ok(());
         }
         self.deps = [(key, put_ok.version_deps)].into();
-        self.upcall.send(kvstore::Result::PutOk)
+        self.upcall.send(ycsb::Result::Ok)
     }
 }
 
-impl<N, U: SendEvent<kvstore::Result>, V: Version, A> OnEvent<Recv<GetOk<V>>>
-    for Client<N, U, V, A>
-{
+impl<N, U: SendEvent<ycsb::Result>, V: Version, A> OnEvent<Recv<GetOk<V>>> for Client<N, U, V, A> {
     fn on_event(
         &mut self,
         Recv(get_ok): Recv<GetOk<V>>,
@@ -235,7 +233,7 @@ impl<N, U: SendEvent<kvstore::Result>, V: Version, A> OnEvent<Recv<GetOk<V>>>
             return Ok(());
         }
         self.deps.insert(key, get_ok.version_deps);
-        self.upcall.send(kvstore::Result::GetResult(get_ok.value))
+        self.upcall.send(ycsb::Result::ReadOk(vec![get_ok.value]))
     }
 }
 
@@ -528,4 +526,4 @@ impl<E: SendEvent<UpdateOk<DefaultVersion>>> OnEvent<Update<DefaultVersion>>
     }
 }
 
-// cSpell:words deque upcall kvstore sosp
+// cSpell:words deque upcall ycsb sosp

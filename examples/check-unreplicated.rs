@@ -2,14 +2,13 @@ use std::{thread::available_parallelism, time::Duration};
 
 use augustus::{
     app::kvstore::{
-        self, static_workload, InfinitePutGet,
+        self, InfinitePutGet,
         Op::{Append, Get, Put},
         Result::{AppendResult, GetResult, PutOk},
     },
     search::{breadth_first, random_depth_first, Settings},
     unreplicated::check::State,
-    util::Payload,
-    workload::{Check, Iter, Recorded, Workload},
+    workload::{Check, Iter, Json, Recorded, Workload},
 };
 use rand::thread_rng;
 
@@ -23,7 +22,7 @@ static GLOBAL: Jemalloc = Jemalloc;
 fn main() -> anyhow::Result<()> {
     println!("* Single client; Put, Append, Get");
     let mut state = State::new();
-    state.push_client(static_workload(
+    state.push_client(Json(Check::new(
         [
             (Put(String::from("foo"), String::from("bar")), PutOk),
             (
@@ -33,7 +32,7 @@ fn main() -> anyhow::Result<()> {
             (Get(String::from("foo")), GetResult(String::from("barbaz"))),
         ]
         .into_iter(),
-    )?);
+    )));
     state.launch()?;
 
     let settings = Settings {
@@ -63,12 +62,12 @@ fn main() -> anyhow::Result<()> {
     println!("* Multi-client different keys");
     let mut state = State::new();
     for i in 0..2 {
-        state.push_client(static_workload((0..3).map(move |x| {
+        state.push_client(Json(Check::new((0..3).map(move |x| {
             (
                 Append(format!("KEY-{i}"), x.to_string()),
                 AppendResult((0..=x).map(|x| x.to_string()).collect::<Vec<_>>().concat()),
             )
-        }))?)
+        }))))
     }
     state.launch()?;
 
@@ -99,27 +98,25 @@ fn main() -> anyhow::Result<()> {
     println!("* Multi-client same key");
     let mut state = State::new();
     for _ in 0..2 {
-        state.push_client(Recorded::from(Iter(
-            (0..3)
-                .map(move |x| (Append(String::from("foo"), x.to_string())))
-                .map(|op| Ok(Payload(serde_json::to_vec(&op)?)))
-                .collect::<anyhow::Result<Vec<_>>>()?
-                .into_iter(),
-        )))
+        state.push_client(Json(Recorded::from(Iter::from(
+            (0..3).map(move |x| (Append(String::from("foo"), x.to_string()))),
+        ))))
     }
     state.launch()?;
 
-    fn append_linearizable<W: Workload>(state: &State<Recorded<W>>) -> anyhow::Result<()> {
+    fn append_linearizable<W: Workload<Op = kvstore::Op, Result = kvstore::Result>>(
+        state: &State<Json<Recorded<W>>>,
+    ) -> anyhow::Result<()> {
         let mut all_results = Vec::new();
         for client in &state.clients {
             for (op, result) in &client.close_loop.workload.invocations {
-                let Append(_, append_value) = serde_json::from_slice::<kvstore::Op>(op)? else {
+                let Append(_, append_value) = op else {
                     anyhow::bail!("unexpected {op:?}")
                 };
-                let AppendResult(value) = serde_json::from_slice::<kvstore::Result>(result)? else {
+                let AppendResult(value) = result else {
                     anyhow::bail!("unexpected {result:?}")
                 };
-                anyhow::ensure!(value.ends_with(&append_value), "{op:?} get {result:?}");
+                anyhow::ensure!(value.ends_with(append_value), "{op:?} get {result:?}");
                 all_results.push(value)
             }
         }
@@ -129,7 +126,7 @@ fn main() -> anyhow::Result<()> {
                 unreachable!()
             };
             anyhow::ensure!(
-                value.starts_with(prev_value),
+                value.starts_with(*prev_value),
                 "{value} inconsistent with {prev_value}"
             );
         }

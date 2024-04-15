@@ -43,7 +43,7 @@ use rand_distr::{WeightedAliasIndex, Zeta, Zipf};
 use rustc_hash::FxHasher;
 use serde::{Deserialize, Serialize};
 
-use crate::util::Payload;
+use crate::{util::Payload, workload};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Op {
@@ -394,9 +394,11 @@ impl<R: Rng> Workload<R> {
 }
 
 impl<R: Rng> crate::workload::Workload for Workload<R> {
+    type Op = Op;
+    type Result = Result;
     type Attach = Option<usize>;
 
-    fn next_op(&mut self) -> anyhow::Result<Option<(Payload, Self::Attach)>> {
+    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::Attach)>> {
         let mut key_num = 0;
         let op = 'op: {
             if let Some(op) = self.rmw_update.take() {
@@ -435,24 +437,19 @@ impl<R: Rng> crate::workload::Workload for Workload<R> {
             })
         };
         Ok(if let Some(op) = op {
-            Some((
-                Payload(bincode::options().serialize(&op)?),
-                if matches!(op, Op::Insert(..)) {
-                    Some(key_num)
-                } else {
-                    None
-                },
-            ))
+            let attach = if matches!(op, Op::Insert(..)) {
+                Some(key_num)
+            } else {
+                None
+            };
+            Some((op, attach))
         } else {
             None
         })
     }
 
-    fn on_result(&mut self, result: Payload, key_num: Self::Attach) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            !matches!(bincode::options().deserialize(&result)?, Result::NotFound),
-            "unexpected NotFound"
-        );
+    fn on_result(&mut self, result: Self::Result, key_num: Self::Attach) -> anyhow::Result<()> {
+        anyhow::ensure!(!matches!(result, Result::NotFound), "unexpected NotFound");
         if let Some(key_num) = key_num {
             self.insert_state.ack(key_num)
         }
@@ -466,9 +463,9 @@ impl<R: Rng> crate::workload::Workload for Workload<R> {
     }
 }
 
-impl<R> From<Workload<R>> for Vec<Duration> {
-    fn from(value: Workload<R>) -> Self {
-        value.latencies
+impl<R> From<workload::Json<Workload<R>>> for Vec<Duration> {
+    fn from(value: workload::Json<Workload<R>>) -> Self {
+        value.0.latencies
     }
 }
 

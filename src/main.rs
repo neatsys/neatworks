@@ -20,8 +20,9 @@ use augustus::{
     },
     net::{session::Udp, IndexNet},
     pbft, unreplicated,
+    util::Payload,
     worker::{spawn_backend, Submit},
-    workload::{CloseLoop, Invoke, InvokeOk, Iter, OpLatency, Workload},
+    workload::{self, CloseLoop, Invoke, InvokeOk, Iter, OpLatency, Workload},
 };
 use axum::{
     extract::State,
@@ -165,7 +166,7 @@ where
                 config,
                 new_client,
                 on_buf,
-                || OpLatency::new(Iter(repeat_with(Default::default))),
+                || OpLatency::new(Iter::from(repeat_with(Default::default))),
                 stop.clone(),
                 latencies.clone(),
                 barrier.clone(),
@@ -193,7 +194,7 @@ where
                 on_buf,
                 || {
                     i += 1;
-                    workload.clone_reseed(StdRng::seed_from_u64(117418 + i))
+                    workload::Json(workload.clone_reseed(StdRng::seed_from_u64(117418 + i)))
                 },
                 stop.clone(),
                 latencies.clone(),
@@ -233,7 +234,7 @@ async fn spawn_client_sessions<
         + Send
         + Sync
         + 'static,
-    W: Workload + Into<Vec<Duration>> + Send + Sync + 'static,
+    W: Workload<Op = Payload, Result = Payload> + Into<Vec<Duration>> + Send + Sync + 'static,
 >(
     sessions: &mut JoinSet<anyhow::Result<()>>,
     config: ClientConfig,
