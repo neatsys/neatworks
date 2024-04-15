@@ -1,5 +1,3 @@
-use bincode::Options;
-
 use super::{
     ycsb::{Op, Result},
     App,
@@ -16,7 +14,7 @@ impl BTreeMap {
 
 impl App for BTreeMap {
     fn execute(&mut self, op: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let result = match bincode::options().deserialize(op)? {
+        let result = match serde_json::from_slice(op)? {
             Op::Read(key) => {
                 if let Some(record) = self.0.get(&key) {
                     // for simplicity, panic on out of bound
@@ -71,6 +69,6 @@ impl App for BTreeMap {
                 }
             }
         };
-        Ok(bincode::options().serialize(&result)?)
+        Ok(serde_json::to_vec(&result)?)
     }
 }

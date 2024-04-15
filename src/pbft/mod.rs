@@ -278,7 +278,7 @@ pub struct Replica<N, CN, CW, S, A, _M = (N, CN, CW, S, A)> {
     num_replica: usize,
     num_faulty: usize,
 
-    results: BTreeMap<u32, (u32, Option<Reply>)>, // client id -> (seq, result)
+    replies: BTreeMap<u32, (u32, Option<Reply>)>, // client id -> (seq, result)
     requests: Vec<Request<A>>,
     view_num: u32,
     new_views: BTreeMap<u32, Verifiable<NewView>>,
@@ -383,7 +383,7 @@ impl<N, CN, CW, S, A> Replica<N, CN, CW, S, A> {
             // `DoViewChange` timeout, which is longer than `ProgressPrepared`
             progress_view_change: TimerState::new(CLIENT_RESEND_INTERVAL / 10),
 
-            results,
+            replies: results,
             requests,
             view_num,
             new_views,
@@ -449,7 +449,7 @@ impl<M: ReplicaCommon> OnEvent<Recv<Request<M::A>>> for Replica<M::N, M::CN, M::
         if self.view_change() {
             return Ok(());
         }
-        match self.results.get(&request.client_id) {
+        match self.replies.get(&request.client_id) {
             Some((seq, _)) if *seq > request.seq => return Ok(()),
             Some((seq, reply)) if *seq == request.seq => {
                 if let Some(reply) = reply {
@@ -466,7 +466,7 @@ impl<M: ReplicaCommon> OnEvent<Recv<Request<M::A>>> for Replica<M::N, M::CN, M::
                 .ensure_set(DoViewChange(self.view_num + 1), timer)?;
             return Ok(());
         }
-        self.results.insert(request.client_id, (request.seq, None));
+        self.replies.insert(request.client_id, (request.seq, None));
         self.requests.push(request);
         if self.op_num() <= self.commit_num + Self::NUM_CONCURRENT_PRE_PREPARE {
             self.close_batch()
@@ -487,6 +487,9 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
             .collect::<Vec<_>>();
         let view_num = self.view_num;
         let op_num = self.op_num();
+        if self.log.get(op_num as usize).is_none() {
+            self.log.resize_with(op_num as usize + 1, Default::default)
+        }
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
             let pre_prepare = PrePrepare {
                 view_num,
@@ -509,14 +512,12 @@ impl<M: ReplicaCommon> OnEvent<(Signed<PrePrepare>, Vec<Request<M::A>>)>
         (Signed(pre_prepare), requests): (Signed<PrePrepare>, Vec<Request<M::A>>),
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
+        // println!("Signed {pre_prepare:?}");
         if pre_prepare.view_num != self.view_num {
             return Ok(());
         }
 
         let op_num = pre_prepare.op_num as usize;
-        if self.log.get(op_num).is_none() {
-            self.log.resize_with(op_num + 1, Default::default)
-        }
         let replaced = self.log[op_num].pre_prepare.replace(pre_prepare.clone());
         assert!(replaced.is_none());
 
@@ -939,17 +940,24 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
             // println!("[{}] Execute {}", self.id, self.commit_num);
 
             for request in &log_entry.requests {
+                // println!("Execute {request:?}");
                 let reply = Reply {
                     seq: request.seq,
                     result: Payload(self.app.execute(&request.op)?),
                     view_num: pre_prepare.view_num,
                     replica_id: self.id,
                 };
-                let replaced = self
-                    .results
-                    .insert(request.client_id, (request.seq, Some(reply.clone())));
-                if let Some((seq, reply)) = replaced {
-                    assert!(seq < request.seq || seq == request.seq && reply.is_none());
+                // this replica can be very late on executing the request i.e. client already
+                // collect enough replies from other replicas, move on to the following request, and
+                // the later request has been captured by `replies`, so not assert anything
+                if self
+                    .replies
+                    .get(&request.client_id)
+                    .map(|(seq, _)| *seq <= request.seq)
+                    .unwrap_or(true)
+                {
+                    self.replies
+                        .insert(request.client_id, (request.seq, Some(reply.clone())));
                 }
                 self.client_net.send(request.client_addr.clone(), reply)?
             }

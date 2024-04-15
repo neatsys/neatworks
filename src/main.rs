@@ -327,7 +327,7 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
                 ycsb::Workload::new(StdRng::seed_from_u64(117418), settings).unwrap();
             println!("YCSB startup");
             for op in workload.startup_ops() {
-                app.execute(&op).unwrap();
+                app.execute(&serde_json::to_vec(&op).unwrap()).unwrap();
             }
             app
         }

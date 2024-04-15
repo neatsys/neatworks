@@ -18,10 +18,10 @@
 //   in upstream) as well. this change enables optional `operationcount`
 // * only hashed insertion order is implemented
 // * only zipfian, latest and uniform request distributions are implemented
-// * zero padding length is default to 20 which correponding to 24 byte keys,
+// * zero padding length is default to 20 which corresponding to 24 byte keys,
 //   matching the expectation of upstream's workload comment "1KB record (...
 //   plus key)"
-// * see below for disccusion on zipfian paramter
+// * see below for discussion on zipfian parameter
 
 use std::{
     collections::HashSet,
@@ -34,7 +34,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bincode::Options;
 use rand::{
     distributions::{Alphanumeric, Distribution as _, Uniform},
     Rng,
@@ -43,7 +42,7 @@ use rand_distr::{WeightedAliasIndex, Zeta, Zipf};
 use rustc_hash::FxHasher;
 use serde::{Deserialize, Serialize};
 
-use crate::{util::Payload, workload};
+use crate::workload;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Op {
@@ -367,16 +366,9 @@ impl<R: Rng> Workload<R> {
         Op::Insert(key, value)
     }
 
-    pub fn startup_ops(&mut self) -> impl Iterator<Item = Payload> + '_ {
+    pub fn startup_ops(&mut self) -> impl Iterator<Item = Op> + '_ {
         let record_count = self.settings.record_count;
-        repeat_with(|| {
-            Payload(
-                bincode::options()
-                    .serialize(&self.startup_insert())
-                    .unwrap(),
-            )
-        })
-        .take(record_count)
+        repeat_with(|| self.startup_insert()).take(record_count)
     }
 
     fn key_num(&mut self) -> usize {
@@ -484,7 +476,7 @@ mod tests {
         let mut app = BTreeMap::new();
         let mut workload = Workload::new(thread_rng(), WorkloadSettings::new(100))?;
         for op in workload.startup_ops() {
-            app.execute(&op)?;
+            app.execute(&serde_json::to_vec(&op)?)?;
         }
         assert_eq!(app.0.len(), 100);
         Ok(())
