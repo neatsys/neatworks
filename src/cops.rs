@@ -10,28 +10,44 @@
 // dependency set (when i say "roughly" i mean it's the superset of the nearest
 // set). the `V` values returned by server contains the original version number
 // as well: it's a combination of the assigned version number of a `Put` value
-// and the nearest set of that `Put`. that's why the `V` values sent by client
-// and sent (and stored) by server are named `deps` and `version_deps`
+// and the nearest dependency set of that `Put`. that's why the `V` values sent
+// by client and sent (and stored) by server are named `deps` and `version_deps`
 // respectively
 // the `version_deps` is something added to the original work. it enables client
 // to learn about the nearest set of some version of a value in a verifiable way
 // (assuming `V` is verifiable). thus client can check whether the version of
 // values in the following replies consistent with this information, and reject
 // malicious replies that violate causal consistency
-// in a trusted setup, `version_deps` could just be the version number, and
-// `dep_cmp` can always return Greater, as the case in the original work where
-// every server/client is correctly behaving
+// (at the same time, upon Put requests server also perform checks on submitted
+// `deps`, ensure that it will not be fooled by malicious client and end up in
+// an inconsistent state)
+// besides of these additions, the only substantial difference to the original
+// work is a deletion in the (geological) synchronization: the nearest set is
+// omitted since all it's information is covered by the `V` value
+// because of this deletion and also considering the additional storage and
+// checking overhead is lightweight, i have the referenced implementation for
+// trusted setup, i.e. the `DefaultVersion` below, also follows this design.
+// so the protocol has unified logic under different setup (just all additional
+// checks are expected to always pass under trusted setup), just plug in
+// different `V` type for difference use case
 // producing `V` typed value potentially takes long latency: it may require the
 // computational expensive incrementally verifiable computation, or asynchronous
 // network communication. so instead of inlined "version bumping" as in the
 // original work, a version service is extracted to asynchronously produce `V`
 // values. this incurs unnecessary overhead for the case that follows the
-// original work's setup (i.e. the default version service included in this
-// implementation), hopefully not critical (or even noticeable) since the work
-// targets geological replication scenario
+// original work's setup (i.e. the referenced `DefaultVersion` implementation),
+// hopefully not critical (or even noticeable) since the work targets geological
+// replication scenario
+// the original work does not talk specifically about the causality policy of
+// the same key across sessions. for the conflict-free scenario we assume an
+// incremental causality of each key: the causal dependencies of the old version
+// automatically carries to the new version. this policy is equivalent to the
+// original work as long as it ensure to sequentially synchronize all versions
+// of each key
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, VecDeque},
+    mem::take,
 };
 
 use serde::{Deserialize, Serialize};
@@ -43,27 +59,38 @@ use crate::{
         SendEvent,
     },
     net::{events::Recv, Addr, All, SendMessage},
-    util::Payload,
 };
 
 // "key" under COPS context, "id" under Boson's logical clock context
 pub type KeyId = u32;
 
-// precisely `deps` and `version_deps` should have different types
-// get lazy on that
-
-pub trait DepOrd {
-    fn dep_cmp(&self, other: &Self, id: KeyId) -> Ordering;
-}
-
-// `self` must be `version_deps` and `other` must be `deps`
+// `PartialOrd` for causality check: whether `self` happens after `other` in the
+// sense of causality
+// say Put(k2, _, {}) returns c2: {k2: 2}, then Put(k1, _, {k2: c2}) may return
+// c1: {k1: 1, k2: 2} so that c1.partial_cmp(c2) == Some(Greater), but not just
+// c1': {k1: 1}
 pub trait Version: PartialOrd + DepOrd + Clone + Send + Sync + 'static {}
 impl<T: PartialOrd + DepOrd + Clone + Send + Sync + 'static> Version for T {}
+
+// `DepOrd` for dependency check: `self` may not happen after `other`, but must
+// happen after (not earlier than) something involves `id` that happens before
+// the `other`
+// say Get(k1) returns c1: {k1: 1, k2: 2} from above, then Get(k2) may return
+// c2: {k2: 2} from above, or c2': {k2: 3, k3: 1} that may happen after that c2
+// (e.g. for a Put(k2, _, {k3: 1})), so that c2/c2'.dep_cmp(c1).is_ge() == true,
+// but not c2'': {k2: 1}
+pub trait DepOrd {
+    fn dep_cmp(&self, other: &Self, id: KeyId) -> Ordering;
+
+    // the `id`s that when calling `other.dep_cmp(self, id)`, Less may ever get returned
+    // in another word, all `KeyId`s that `self` may have opinion regarding dependency check
+    fn deps(&self) -> impl Iterator<Item = KeyId> + '_;
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct Put<V, A> {
     key: KeyId,
-    value: Payload,
+    value: String,
     deps: BTreeMap<KeyId, V>,
     client_addr: A,
 }
@@ -81,14 +108,14 @@ pub struct Get<A> {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct GetOk<V> {
-    value: Payload,
+    value: String,
     version_deps: V,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct SyncKey<V> {
     key: KeyId,
-    value: Payload,
+    value: String,
     version_deps: V,
 }
 
@@ -124,27 +151,39 @@ pub struct UpdateOk<V> {
 pub struct Client<N, U, V, A> {
     addr: A,
     deps: BTreeMap<KeyId, V>,
+    working_key: Option<KeyId>,
 
     net: N,
     upcall: U,
 }
 
 impl<N: ServerNet<A, V>, U, V: Version, A: Addr> OnEvent<kvstore::Op> for Client<N, U, V, A> {
-    fn on_event(&mut self, event: kvstore::Op, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
-        match event {
+    fn on_event(&mut self, op: kvstore::Op, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
+        let key = match &op {
             kvstore::Op::Append(..) => anyhow::bail!("unimplemented"),
-            kvstore::Op::Put(key, value) => {
+            kvstore::Op::Get(key) | kvstore::Op::Put(key, _) => key.parse()?,
+        };
+        let replaced = self.working_key.replace(key);
+        // Put/Put concurrent is forbid by original work as well
+        // Put/Get concurrent is allowed there, but may incur some difficulties when checking the
+        // validity of PutOk/GetOk (not sure)
+        // Get/Get concurrent could be supported, maybe in future
+        // the client will be driven by a close loop without concurrent invocation after all
+        anyhow::ensure!(replaced.is_none(), "concurrent op");
+        match op {
+            kvstore::Op::Append(..) => anyhow::bail!("unimplemented"),
+            kvstore::Op::Put(_, value) => {
                 let put = Put {
-                    key: key.parse()?,
-                    value: Payload(value.into_bytes()),
+                    key,
+                    value,
                     deps: self.deps.clone(),
                     client_addr: self.addr.clone(),
                 };
                 self.net.send(0, put)
             }
-            kvstore::Op::Get(key) => {
+            kvstore::Op::Get(_) => {
                 let get = Get {
-                    key: key.parse()?,
+                    key,
                     client_addr: self.addr.clone(),
                 };
                 self.net.send(0, get)
@@ -161,6 +200,9 @@ impl<N, U: SendEvent<kvstore::Result>, V: Version, A> OnEvent<Recv<PutOk<V>>>
         Recv(put_ok): Recv<PutOk<V>>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
+        let Some(key) = self.working_key.take() else {
+            anyhow::bail!("missing working key")
+        };
         if !self.deps.values().all(|dep| {
             matches!(
                 put_ok.version_deps.partial_cmp(dep),
@@ -169,7 +211,7 @@ impl<N, U: SendEvent<kvstore::Result>, V: Version, A> OnEvent<Recv<PutOk<V>>>
         }) {
             return Ok(());
         }
-        self.deps = [(0, put_ok.version_deps)].into(); // TODO
+        self.deps = [(key, put_ok.version_deps)].into();
         self.upcall.send(kvstore::Result::PutOk)
     }
 }
@@ -182,24 +224,25 @@ impl<N, U: SendEvent<kvstore::Result>, V: Version, A> OnEvent<Recv<GetOk<V>>>
         Recv(get_ok): Recv<GetOk<V>>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
+        let Some(key) = self.working_key.take() else {
+            anyhow::bail!("missing working key")
+        };
         if !self
             .deps
-            .iter()
-            .all(|(id, dep)| get_ok.version_deps.dep_cmp(dep, *id).is_ge())
+            .values()
+            .all(|dep| get_ok.version_deps.dep_cmp(dep, key).is_ge())
         {
             return Ok(());
         }
-        self.deps.insert(0, get_ok.version_deps);
-        self.upcall
-            .send(kvstore::Result::GetResult(String::from_utf8(
-                get_ok.value.0,
-            )?))
+        self.deps.insert(key, get_ok.version_deps);
+        self.upcall.send(kvstore::Result::GetResult(get_ok.value))
     }
 }
 
 pub struct Server<N, CN, VS, V, A, _M = (N, CN, VS, V, A)> {
     store: BTreeMap<KeyId, KeyState<V, A>>,
     version_zero: V,
+    pending_sync_keys: Vec<SyncKey<V>>,
     net: N,
     client_net: CN,
     version_service: VS,
@@ -208,7 +251,7 @@ pub struct Server<N, CN, VS, V, A, _M = (N, CN, VS, V, A)> {
 
 #[derive(Clone)]
 struct KeyState<V, A> {
-    value: Payload,
+    value: String,
     version_deps: V,
     pending_puts: VecDeque<Put<V, A>>,
 }
@@ -221,6 +264,7 @@ impl<N, CN, VS, V: Clone, A: Clone> Server<N, CN, VS, V, A> {
             version_service,
             version_zero,
             store: Default::default(),
+            pending_sync_keys: Default::default(),
             _m: Default::default(),
         }
     }
@@ -295,24 +339,78 @@ impl<M: ServerCommon> OnEvent<Recv<Put<M::V, M::A>>> for Server<M::N, M::CN, M::
         });
         state.pending_puts.push_back(put.clone());
         if state.pending_puts.len() == 1 {
-            let merge = Update {
+            let update = Update {
                 id: put.key,
                 previous: state.version_deps.clone(),
                 deps: put.deps.into_values().collect(),
             };
-            self.version_service.send(merge)?
+            self.version_service.send(update)?
         }
         Ok(())
+    }
+}
+
+impl<M: ServerCommon> Server<M::N, M::CN, M::VS, M::V, M::A, M> {
+    fn can_sync(&self, sync_key: &SyncKey<M::V>) -> bool {
+        for id in sync_key.version_deps.deps() {
+            if id == sync_key.key {
+                continue;
+            }
+            if !self
+                .store
+                .get(&id)
+                .map(|state| &state.version_deps)
+                .unwrap_or(&self.version_zero)
+                .dep_cmp(&sync_key.version_deps, id)
+                .is_ge()
+            {
+                return false;
+            }
+        }
+        true
     }
 }
 
 impl<M: ServerCommon> OnEvent<Recv<SyncKey<M::V>>> for Server<M::N, M::CN, M::VS, M::V, M::A, M> {
     fn on_event(
         &mut self,
-        Recv(_): Recv<SyncKey<M::V>>,
+        Recv(sync_key): Recv<SyncKey<M::V>>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        // TODO
+        if !self.can_sync(&sync_key) {
+            self.pending_sync_keys.push(sync_key);
+            return Ok(());
+        }
+        for sync_key in take(&mut self.pending_sync_keys) {
+            if !self.can_sync(&sync_key) {
+                self.pending_sync_keys.push(sync_key);
+                continue;
+            }
+            if let Some(state) = self.store.get_mut(&sync_key.key) {
+                anyhow::ensure!(
+                    state.pending_puts.is_empty(),
+                    "conflicting Put across servers"
+                );
+                if !matches!(
+                    sync_key.version_deps.partial_cmp(&state.version_deps),
+                    Some(Ordering::Greater)
+                ) {
+                    //
+                    continue;
+                }
+                state.value = sync_key.value;
+                state.version_deps = sync_key.version_deps
+            } else {
+                self.store.insert(
+                    sync_key.key,
+                    KeyState {
+                        value: sync_key.value,
+                        version_deps: sync_key.version_deps,
+                        pending_puts: Default::default(),
+                    },
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -350,40 +448,60 @@ impl<M: ServerCommon> OnEvent<UpdateOk<M::V>> for Server<M::N, M::CN, M::VS, M::
         };
         self.net.send(All, sync_key)?;
         if let Some(pending_put) = state.pending_puts.front() {
-            let merge = Update {
+            let update = Update {
                 id: update_ok.id,
                 previous: update_ok.version_deps,
                 deps: pending_put.deps.values().cloned().collect(),
             };
-            self.version_service.send(merge)?
+            self.version_service.send(update)?
         }
         Ok(())
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DefaultVersion(KeyId, u32);
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DefaultVersion(BTreeMap<KeyId, u32>);
 
 impl DefaultVersion {
-    pub fn new(id: KeyId) -> Self {
-        Self(id, 0)
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn merge(&self, other: &Self) -> Self {
+        let mut merged = self.0.clone();
+        for (id, version) in &other.0 {
+            merged
+                .entry(*id)
+                .and_modify(|v| *v = (*v).max(*version))
+                .or_insert(*version);
+        }
+        Self(merged)
     }
 }
 
 impl PartialOrd for DefaultVersion {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if self.0 == other.0 {
-            Some(self.1.cmp(&other.1))
-        } else {
-            Some(Ordering::Greater)
+        let merged = self.merge(other);
+        match (merged == *self, merged == *other) {
+            (true, true) => Some(Ordering::Equal),
+            (true, false) => Some(Ordering::Greater),
+            (false, true) => Some(Ordering::Less),
+            (false, false) => None,
         }
     }
 }
 
 impl DepOrd for DefaultVersion {
-    fn dep_cmp(&self, _: &Self, id: KeyId) -> Ordering {
-        assert_eq!(id, self.0);
-        Ordering::Greater
+    fn dep_cmp(&self, other: &Self, id: KeyId) -> Ordering {
+        self.0
+            .get(&id)
+            .copied()
+            .unwrap_or_default()
+            .cmp(&other.0[&id])
+    }
+
+    fn deps(&self) -> impl Iterator<Item = KeyId> + '_ {
+        self.0.keys().copied()
     }
 }
 
@@ -397,11 +515,14 @@ impl<E: SendEvent<UpdateOk<DefaultVersion>>> OnEvent<Update<DefaultVersion>>
         update: Update<DefaultVersion>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        let DefaultVersion(id, version) = update.previous;
-        anyhow::ensure!(id == update.id);
+        let mut version_deps = update
+            .deps
+            .into_iter()
+            .fold(update.previous, |version, dep| version.merge(&dep));
+        *version_deps.0.entry(update.id).or_default() += 1;
         let update_ok = UpdateOk {
             id: update.id,
-            version_deps: DefaultVersion(update.id, version + 1),
+            version_deps,
         };
         self.0.send(update_ok)
     }
