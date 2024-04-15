@@ -1,8 +1,43 @@
-use std::{cmp::Ordering, collections::VecDeque};
+// notes on this implementation of
+// Don’t Settle for Eventual: Scalable Causal Consistency for Wide-Area Storage
+// with COPS (SOSP'11)
+// the implementation contains the COPS variant in the paper, COPS-GT and
+// COPS-CD are not included
+// the implementation is prepared for a Byzantine fault security model.
+// additional checks and proof passing take places
+// the version type `V` in this implementation does not map to the version
+// number in the original work. instead, it roughly maps to the "nearest"
+// dependency set (when i say "roughly" i mean it's the superset of the nearest
+// set). the `V` values returned by server contains the original version number
+// as well: it's a combination of the assigned version number of a `Put` value
+// and the nearest set of that `Put`. that's why the `V` values sent by client
+// and sent (and stored) by server are named `deps` and `version_deps`
+// respectively
+// the `version_deps` is something added to the original work. it enables client
+// to learn about the nearest set of some version of a value in a verifiable way
+// (assuming `V` is verifiable). thus client can check whether the version of
+// values in the following replies consistent with this information, and reject
+// malicious replies that violate causal consistency
+// in a trusted setup, `version_deps` could just be the version number, and
+// `dep_cmp` can always return Greater, as the case in the original work where
+// every server/client is correctly behaving
+// producing `V` typed value potentially takes long latency: it may require the
+// computational expensive incrementally verifiable computation, or asynchronous
+// network communication. so instead of inlined "version bumping" as in the
+// original work, a version service is extracted to asynchronously produce `V`
+// values. this incurs unnecessary overhead for the case that follows the
+// original work's setup (i.e. the default version service included in this
+// implementation), hopefully not critical (or even noticeable) since the work
+// targets geological replication scenario
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, VecDeque},
+};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    app::kvstore,
     event::{
         erased::{OnEventRichTimer as OnEvent, RichTimer as Timer},
         SendEvent,
@@ -14,11 +49,22 @@ use crate::{
 // "key" under COPS context, "id" under Boson's logical clock context
 pub type KeyId = u32;
 
+// precisely `deps` and `version_deps` should have different types
+// get lazy on that
+
+pub trait DepOrd {
+    fn dep_cmp(&self, other: &Self, id: KeyId) -> Ordering;
+}
+
+// `self` must be `version_deps` and `other` must be `deps`
+pub trait Version: PartialOrd + DepOrd + Clone + Send + Sync + 'static {}
+impl<T: PartialOrd + DepOrd + Clone + Send + Sync + 'static> Version for T {}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct Put<V, A> {
     key: KeyId,
     value: Payload,
-    deps: V,
+    deps: BTreeMap<KeyId, V>,
     client_addr: A,
 }
 
@@ -28,9 +74,8 @@ pub struct PutOk<V> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash)]
-pub struct Get<V, A> {
+pub struct Get<A> {
     key: KeyId,
-    deps: V,
     client_addr: A,
 }
 
@@ -51,44 +96,110 @@ pub trait ClientNet<A, V>: SendMessage<A, GetOk<V>> + SendMessage<A, PutOk<V>> {
 impl<T: SendMessage<A, GetOk<V>> + SendMessage<A, PutOk<V>>, A, V> ClientNet<A, V> for T {}
 
 pub trait ServerNet<A, V>:
-    SendMessage<u8, Put<V, A>> + SendMessage<u8, Get<V, A>> + SendMessage<All, SyncKey<V>>
+    SendMessage<u8, Put<V, A>> + SendMessage<u8, Get<A>> + SendMessage<All, SyncKey<V>>
 {
 }
 impl<
-        T: SendMessage<u8, Put<V, A>> + SendMessage<u8, Get<V, A>> + SendMessage<All, SyncKey<V>>,
+        T: SendMessage<u8, Put<V, A>> + SendMessage<u8, Get<A>> + SendMessage<All, SyncKey<V>>,
         A,
         V,
     > ServerNet<A, V> for T
 {
 }
 
-pub trait DepOrd {
-    fn dep_cmp(&self, other: &Self, id: KeyId) -> Ordering;
-}
+// events with version service
+// version service expects at most one outstanding `Update<_>` per `id`
 
-pub trait Version: PartialOrd + DepOrd + Clone + Send + Sync + 'static {}
-impl<T: PartialOrd + DepOrd + Clone + Send + Sync + 'static> Version for T {}
-
-pub struct IncompleteMerge<V>(pub V, pub V);
-
-pub struct CompleteMerge<V> {
+pub struct Update<V> {
     pub id: KeyId,
-    pub previous: V, // must be complete, consider encode this into type
-    pub deps: V,     // either complete or incomplete
+    pub previous: V, // `version_deps`
+    pub deps: Vec<V>,
 }
 
-pub struct IncompleteMerged<V>(pub V);
-
-pub struct CompleteMerged<V> {
+pub struct UpdateOk<V> {
     pub id: KeyId,
     pub version_deps: V,
 }
 
-// pub struct Client<V> {
-// }
+pub struct Client<N, U, V, A> {
+    addr: A,
+    deps: BTreeMap<KeyId, V>,
+
+    net: N,
+    upcall: U,
+}
+
+impl<N: ServerNet<A, V>, U, V: Version, A: Addr> OnEvent<kvstore::Op> for Client<N, U, V, A> {
+    fn on_event(&mut self, event: kvstore::Op, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
+        match event {
+            kvstore::Op::Append(..) => anyhow::bail!("unimplemented"),
+            kvstore::Op::Put(key, value) => {
+                let put = Put {
+                    key: key.parse()?,
+                    value: Payload(value.into_bytes()),
+                    deps: self.deps.clone(),
+                    client_addr: self.addr.clone(),
+                };
+                self.net.send(0, put)
+            }
+            kvstore::Op::Get(key) => {
+                let get = Get {
+                    key: key.parse()?,
+                    client_addr: self.addr.clone(),
+                };
+                self.net.send(0, get)
+            }
+        }
+    }
+}
+
+impl<N, U: SendEvent<kvstore::Result>, V: Version, A> OnEvent<Recv<PutOk<V>>>
+    for Client<N, U, V, A>
+{
+    fn on_event(
+        &mut self,
+        Recv(put_ok): Recv<PutOk<V>>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
+        if !self.deps.values().all(|dep| {
+            matches!(
+                put_ok.version_deps.partial_cmp(dep),
+                Some(Ordering::Greater)
+            )
+        }) {
+            return Ok(());
+        }
+        self.deps = [(0, put_ok.version_deps)].into(); // TODO
+        self.upcall.send(kvstore::Result::PutOk)
+    }
+}
+
+impl<N, U: SendEvent<kvstore::Result>, V: Version, A> OnEvent<Recv<GetOk<V>>>
+    for Client<N, U, V, A>
+{
+    fn on_event(
+        &mut self,
+        Recv(get_ok): Recv<GetOk<V>>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
+        if !self
+            .deps
+            .iter()
+            .all(|(id, dep)| get_ok.version_deps.dep_cmp(dep, *id).is_ge())
+        {
+            return Ok(());
+        }
+        self.deps.insert(0, get_ok.version_deps);
+        self.upcall
+            .send(kvstore::Result::GetResult(String::from_utf8(
+                get_ok.value.0,
+            )?))
+    }
+}
 
 pub struct Server<N, CN, VS, V, A, _M = (N, CN, VS, V, A)> {
-    store: Vec<KeyState<V, A>>,
+    store: BTreeMap<KeyId, KeyState<V, A>>,
+    version_zero: V,
     net: N,
     client_net: CN,
     version_service: VS,
@@ -103,25 +214,13 @@ struct KeyState<V, A> {
 }
 
 impl<N, CN, VS, V: Clone, A: Clone> Server<N, CN, VS, V, A> {
-    pub fn new(
-        num_key: usize,
-        version_zero: V,
-        net: N,
-        client_net: CN,
-        version_service: VS,
-    ) -> Self {
+    pub fn new(version_zero: V, net: N, client_net: CN, version_service: VS) -> Self {
         Self {
-            store: vec![
-                KeyState {
-                    value: Default::default(),
-                    version_deps: version_zero,
-                    pending_puts: Default::default()
-                };
-                num_key
-            ],
             net,
             client_net,
             version_service,
+            version_zero,
+            store: Default::default(),
             _m: Default::default(),
         }
     }
@@ -130,7 +229,7 @@ impl<N, CN, VS, V: Clone, A: Clone> Server<N, CN, VS, V, A> {
 pub trait ServerCommon {
     type N: ServerNet<Self::A, Self::V>;
     type CN: ClientNet<Self::A, Self::V>;
-    type VS: SendEvent<CompleteMerge<Self::V>>;
+    type VS: SendEvent<Update<Self::V>>;
     type V: Version;
     type A: Addr;
 }
@@ -138,7 +237,7 @@ impl<N, CN, VS, V, A> ServerCommon for (N, CN, VS, V, A)
 where
     N: ServerNet<A, V>,
     CN: ClientNet<A, V>,
-    VS: SendEvent<CompleteMerge<V>>,
+    VS: SendEvent<Update<V>>,
     V: Version,
     A: Addr,
 {
@@ -149,22 +248,23 @@ where
     type A = A;
 }
 
-impl<M: ServerCommon> OnEvent<Recv<Get<M::V, M::A>>> for Server<M::N, M::CN, M::VS, M::V, M::A, M> {
+impl<M: ServerCommon> OnEvent<Recv<Get<M::A>>> for Server<M::N, M::CN, M::VS, M::V, M::A, M> {
     fn on_event(
         &mut self,
-        Recv(get): Recv<Get<M::V, M::A>>,
+        Recv(get): Recv<Get<M::A>>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        for (id, state) in self.store.iter().enumerate() {
-            if get.deps.dep_cmp(&state.version_deps, id as _).is_gt() {
-                //
-                return Ok(());
+        let get_ok = if let Some(state) = self.store.get(&get.key) {
+            GetOk {
+                value: state.value.clone(),
+                version_deps: state.version_deps.clone(),
             }
-        }
-        let state = &self.store[get.key as usize];
-        let get_ok = GetOk {
-            value: state.value.clone(),
-            version_deps: state.version_deps.clone(),
+        } else {
+            // reasonable default?
+            GetOk {
+                value: Default::default(),
+                version_deps: self.version_zero.clone(),
+            }
         };
         self.client_net.send(get.client_addr, get_ok)
     }
@@ -176,19 +276,29 @@ impl<M: ServerCommon> OnEvent<Recv<Put<M::V, M::A>>> for Server<M::N, M::CN, M::
         Recv(put): Recv<Put<M::V, M::A>>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        for (id, state) in self.store.iter().enumerate() {
-            if put.deps.dep_cmp(&state.version_deps, id as _).is_gt() {
-                //
+        for (id, dep) in &put.deps {
+            if !self
+                .store
+                .get(id)
+                .map(|state| &state.version_deps)
+                .unwrap_or(&self.version_zero)
+                .dep_cmp(dep, *id)
+                .is_ge()
+            {
                 return Ok(());
             }
         }
-        let state = &mut self.store[put.key as usize];
+        let state = self.store.entry(put.key).or_insert_with(|| KeyState {
+            value: Default::default(),
+            version_deps: self.version_zero.clone(),
+            pending_puts: Default::default(),
+        });
         state.pending_puts.push_back(put.clone());
         if state.pending_puts.len() == 1 {
-            let merge = CompleteMerge {
+            let merge = Update {
                 id: put.key,
                 previous: state.version_deps.clone(),
-                deps: put.deps,
+                deps: put.deps.into_values().collect(),
             };
             self.version_service.send(merge)?
         }
@@ -207,41 +317,43 @@ impl<M: ServerCommon> OnEvent<Recv<SyncKey<M::V>>> for Server<M::N, M::CN, M::VS
     }
 }
 
-impl<M: ServerCommon> OnEvent<CompleteMerged<M::V>> for Server<M::N, M::CN, M::VS, M::V, M::A, M> {
+impl<M: ServerCommon> OnEvent<UpdateOk<M::V>> for Server<M::N, M::CN, M::VS, M::V, M::A, M> {
     fn on_event(
         &mut self,
-        merged: CompleteMerged<M::V>,
+        update_ok: UpdateOk<M::V>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        let state = &mut self.store[merged.id as usize];
+        let Some(state) = self.store.get_mut(&update_ok.id) else {
+            anyhow::bail!("missing put key state")
+        };
         let Some(put) = state.pending_puts.pop_front() else {
             anyhow::bail!("missing pending puts")
         };
-        anyhow::ensure!(matches!(
-            merged.version_deps.partial_cmp(&put.deps),
+        anyhow::ensure!(put.deps.values().all(|dep| matches!(
+            update_ok.version_deps.partial_cmp(dep),
             Some(Ordering::Greater)
-        ));
+        )));
         anyhow::ensure!(matches!(
-            merged.version_deps.partial_cmp(&state.version_deps),
+            update_ok.version_deps.partial_cmp(&state.version_deps),
             Some(Ordering::Greater)
         ));
         state.value = put.value.clone();
-        state.version_deps = merged.version_deps.clone();
+        state.version_deps = update_ok.version_deps.clone();
         let put_ok = PutOk {
-            version_deps: merged.version_deps.clone(),
+            version_deps: update_ok.version_deps.clone(),
         };
         self.client_net.send(put.client_addr, put_ok)?;
         let sync_key = SyncKey {
             key: put.key,
             value: put.value,
-            version_deps: merged.version_deps.clone(),
+            version_deps: update_ok.version_deps.clone(),
         };
         self.net.send(All, sync_key)?;
         if let Some(pending_put) = state.pending_puts.front() {
-            let merge = CompleteMerge {
-                id: merged.id,
-                previous: merged.version_deps,
-                deps: pending_put.deps.clone(),
+            let merge = Update {
+                id: update_ok.id,
+                previous: update_ok.version_deps,
+                deps: pending_put.deps.values().cloned().collect(),
             };
             self.version_service.send(merge)?
         }
@@ -250,77 +362,49 @@ impl<M: ServerCommon> OnEvent<CompleteMerged<M::V>> for Server<M::N, M::CN, M::V
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VectorClock(Vec<u32>);
+pub struct DefaultVersion(KeyId, u32);
 
-impl VectorClock {
-    pub fn new(num_key: usize) -> Self {
-        Self(vec![0; num_key])
-    }
-
-    fn merge(&self, other: &Self) -> Self {
-        Self(
-            self.0
-                .iter()
-                .zip(&other.0)
-                .map(|(a, b)| a.max(b))
-                .copied()
-                .collect(),
-        )
-    }
-
-    fn update(&self, id: KeyId, other: &Self) -> Self {
-        let mut merged = self.merge(other);
-        merged.0[id as usize] += 1;
-        merged
+impl DefaultVersion {
+    pub fn new(id: KeyId) -> Self {
+        Self(id, 0)
     }
 }
 
-impl PartialOrd for VectorClock {
+impl PartialOrd for DefaultVersion {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        let merged = self.merge(other);
-        match (*self == merged, *other == merged) {
-            (true, true) => Some(Ordering::Equal),
-            (true, false) => Some(Ordering::Greater),
-            (false, true) => Some(Ordering::Less),
-            (false, false) => None,
+        if self.0 == other.0 {
+            Some(self.1.cmp(&other.1))
+        } else {
+            Some(Ordering::Greater)
         }
     }
 }
 
-impl DepOrd for VectorClock {
-    fn dep_cmp(&self, other: &Self, id: KeyId) -> Ordering {
-        self.0[id as usize].cmp(&other.0[id as usize])
+impl DepOrd for DefaultVersion {
+    fn dep_cmp(&self, _: &Self, id: KeyId) -> Ordering {
+        assert_eq!(id, self.0);
+        Ordering::Greater
     }
 }
 
-pub struct VectorClockService<E>(E);
+pub struct DefaultVersionService<E>(E);
 
-impl<E: SendEvent<IncompleteMerged<VectorClock>>> OnEvent<IncompleteMerge<VectorClock>>
-    for VectorClockService<E>
+impl<E: SendEvent<UpdateOk<DefaultVersion>>> OnEvent<Update<DefaultVersion>>
+    for DefaultVersionService<E>
 {
     fn on_event(
         &mut self,
-        IncompleteMerge(clock, another_clock): IncompleteMerge<VectorClock>,
+        update: Update<DefaultVersion>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        self.0.send(IncompleteMerged(clock.merge(&another_clock)))
-    }
-}
-
-impl<E: SendEvent<CompleteMerged<VectorClock>>> OnEvent<CompleteMerge<VectorClock>>
-    for VectorClockService<E>
-{
-    fn on_event(
-        &mut self,
-        event: CompleteMerge<VectorClock>,
-        _: &mut impl Timer<Self>,
-    ) -> anyhow::Result<()> {
-        let merged = CompleteMerged {
-            id: event.id,
-            version_deps: event.previous.update(event.id, &event.deps),
+        let DefaultVersion(id, version) = update.previous;
+        anyhow::ensure!(id == update.id);
+        let update_ok = UpdateOk {
+            id: update.id,
+            version_deps: DefaultVersion(update.id, version + 1),
         };
-        self.0.send(merged)
+        self.0.send(update_ok)
     }
 }
 
-// cSpell:words deque
+// cSpell:words deque upcall kvstore sosp
