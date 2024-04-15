@@ -4,6 +4,7 @@ pub mod cops;
 pub mod crypto;
 pub mod event;
 pub mod kademlia;
+pub mod lamport_mutex;
 pub mod net;
 pub mod pbft;
 pub mod search;
@@ -186,4 +187,4 @@ pub mod workload;
 // propagating complete error context may be desirable if servers cannot be
 // accessed easily, but that's not my case for now
 
-// cSpell:words unreachability kademlia pbft unreplicated dpdk libclang
+// cSpell:words unreachability kademlia pbft unreplicated dpdk libclang lamport

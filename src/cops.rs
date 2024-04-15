@@ -139,7 +139,7 @@ impl<
 
 pub struct Update<V> {
     pub id: KeyId,
-    pub previous: V, // `version_deps`
+    pub prev: V, // `version_deps`
     pub deps: Vec<V>,
 }
 
@@ -339,7 +339,7 @@ impl<M: ServerCommon> OnEvent<Recv<Put<M::V, M::A>>> for Server<M::N, M::CN, M::
         if state.pending_puts.len() == 1 {
             let update = Update {
                 id: put.key,
-                previous: state.version_deps.clone(),
+                prev: state.version_deps.clone(),
                 deps: put.deps.into_values().collect(),
             };
             self.version_service.send(update)?
@@ -448,7 +448,7 @@ impl<M: ServerCommon> OnEvent<UpdateOk<M::V>> for Server<M::N, M::CN, M::VS, M::
         if let Some(pending_put) = state.pending_puts.front() {
             let update = Update {
                 id: update_ok.id,
-                previous: update_ok.version_deps,
+                prev: update_ok.version_deps,
                 deps: pending_put.deps.values().cloned().collect(),
             };
             self.version_service.send(update)?
@@ -516,7 +516,7 @@ impl<E: SendEvent<UpdateOk<DefaultVersion>>> OnEvent<Update<DefaultVersion>>
         let mut version_deps = update
             .deps
             .into_iter()
-            .fold(update.previous, |version, dep| version.merge(&dep));
+            .fold(update.prev, |version, dep| version.merge(&dep));
         *version_deps.0.entry(update.id).or_default() += 1;
         let update_ok = UpdateOk {
             id: update.id,
