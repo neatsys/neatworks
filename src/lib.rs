@@ -13,6 +13,13 @@ pub mod util;
 pub mod worker;
 pub mod workload;
 
+#[cfg(all(not(target_env = "msvc"), feature = "tikv-jemallocator"))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(all(not(target_env = "msvc"), feature = "tikv-jemallocator"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 // develop notes that does not apply to any specific code
 // (start writing dev docs usually follows by a complete code rewriting, hope
 // not the case this time)
@@ -188,3 +195,4 @@ pub mod workload;
 // accessed easily, but that's not my case for now
 
 // cSpell:words unreachability kademlia pbft unreplicated dpdk libclang lamport
+// cSpell:words tikv jemalloc jemallocator msvc
