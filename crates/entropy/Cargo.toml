@@ -13,7 +13,7 @@ bytes = "1.5.0"
 derive_more = "0.99.17"
 entropy-control-messages = { version = "0.1.0", path = "../../tools/entropy-control-messages" }
 rand = "0.8.5"
-reqwest = { version = "0.11.23", default-features = false, features = ["json", "multipart"] }
+reqwest = { version = "0.12.3", default-features = false, features = ["json", "multipart"] }
 rustix = { version = "0.38.30", features = ["process"] }
 serde = { version = "1.0.195", features = ["derive"] }
 tokio = { version = "1.35.1", features = ["rt", "fs", "macros", "sync", "rt-multi-thread"] }
