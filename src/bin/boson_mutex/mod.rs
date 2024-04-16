@@ -20,7 +20,7 @@ use augustus::{
     worker::{Submit, Worker},
     workload::InvokeOk,
 };
-use boson_control_messages::MutexUntrusted;
+use boson_control_messages::{MutexReplicated, MutexUntrusted};
 use tokio::{
     net::TcpListener,
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
@@ -103,15 +103,19 @@ pub async fn untrusted_session(
 }
 
 pub async fn replicated_session(
+    config: MutexReplicated,
     mut events: UnboundedReceiver<Event>,
     upcall: UnboundedSender<RequestOk>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    let id = 0;
-    let addrs = vec![];
-    let addr = "127.0.0.1:4000".parse::<std::net::SocketAddr>()?;
+    let id = config.id;
+    let client_addr = config.client_addrs[config.id as usize];
+    let addr = config.addrs[config.id as usize];
+    let num_replica = config.addrs.len();
+    let num_faulty = config.num_faulty;
+    let addrs = config.addrs;
 
-    let client_tcp_listener = TcpListener::bind(addr).await?;
+    let client_tcp_listener = TcpListener::bind(client_addr).await?;
     let tcp_listener = TcpListener::bind(addr).await?;
     let mut client_dispatch_session = event::Session::new();
     let mut client_session = Session::new();
@@ -121,7 +125,7 @@ pub async fn replicated_session(
     let mut processor_session = Session::new();
 
     let mut client_dispatch = event::Unify(event::Buffered::from(Dispatch::new(
-        Tcp::new(addr)?,
+        Tcp::new(client_addr)?,
         {
             let mut sender = Sender::from(client_session.sender());
             move |buf: &_| pbft::to_client_on_buf(buf, &mut sender)
@@ -137,8 +141,8 @@ pub async fn replicated_session(
         Once(dispatch_session.sender()),
     )?));
     let mut client = Blanket(Buffered::from(pbft::Client::new(
-        0,
-        addr,
+        id as _,
+        client_addr,
         pbft::ToReplicaMessageNet::new(IndexNet::new(
             dispatch::Net::from(client_dispatch_session.sender()),
             addrs.clone(),
@@ -146,11 +150,11 @@ pub async fn replicated_session(
         )),
         Box::new(Sender::from(queue_session.sender()))
             as Box<dyn SendEvent<InvokeOk> + Send + Sync>,
-        2,
-        0,
+        num_replica,
+        num_faulty,
     )));
     let mut replica = Blanket(Buffered::from(pbft::Replica::new(
-        0,
+        id,
         app::OnBuf({
             let mut sender = Replicated::new(Sender::from(processor_session.sender()));
             move |buf: &_| sender.send(Recv(deserialize::<lamport_mutex::Message>(buf)?))
@@ -158,20 +162,20 @@ pub async fn replicated_session(
         pbft::ToReplicaMessageNet::new(IndexNet::new(
             dispatch::Net::from(dispatch_session.sender()),
             addrs,
-            0,
+            id as usize,
         )),
         pbft::ToClientMessageNet::new(dispatch::Net::from(dispatch_session.sender())),
         Box::new(pbft::CryptoWorker::from(Worker::Inline(
-            Crypto::new_hardcoded_replication(2, 0u8, CryptoFlavor::Schnorrkel)?,
+            Crypto::new_hardcoded_replication(num_replica, id, CryptoFlavor::Schnorrkel)?,
             Sender::from(replica_session.sender()),
         ))) as Box<dyn Submit<Crypto, dyn pbft::SendCryptoEvent<SocketAddr>> + Send + Sync>,
-        2,
-        0,
+        num_replica,
+        num_faulty,
     )));
     let mut queue = Blanket(Unify(Queue::new(Sender::from(client_session.sender()))));
     let mut processor = Blanket(Unify(Processor::new(
         id,
-        2,
+        num_replica,
         |_| 0u32,
         augustus::net::MessageNet::<_, lamport_mutex::Message>::new(InvokeNet(Sender::from(
             queue_session.sender(),

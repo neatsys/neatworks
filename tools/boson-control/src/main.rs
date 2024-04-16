@@ -1,6 +1,5 @@
 use std::{net::SocketAddr, time::Duration};
 
-use boson_control_messages::MutexUntrusted;
 use tokio::{task::JoinSet, time::sleep};
 
 #[tokio::main(flavor = "current_thread")]
@@ -15,13 +14,24 @@ async fn main() -> anyhow::Result<()> {
     let addrs = (0..2)
         .map(|i| SocketAddr::from(([127, 0, 0, i + 1], 4000)))
         .collect::<Vec<_>>();
+    let client_addrs = (0..2)
+        .map(|i| SocketAddr::from(([127, 0, 0, i + 1], 5000)))
+        .collect::<Vec<_>>();
 
     let mut watchdog_sessions = JoinSet::new();
     for (index, url) in urls.iter().enumerate() {
-        let config = MutexUntrusted {
-            addrs: addrs.clone(),
-            id: index as _,
-        };
+        let config =
+            // boson_control_messages::Mutex::Untrusted(boson_control_messages::MutexUntrusted {
+            //     addrs: addrs.clone(),
+            //     id: index as _,
+            // });
+            boson_control_messages::Mutex::Replicated(boson_control_messages::MutexReplicated {
+                addrs: addrs.clone(),
+                client_addrs: client_addrs.clone(),
+                id: index as _,
+                num_faulty: 0,
+            });
+
         watchdog_sessions.spawn(mutex_start_session(client.clone(), url.clone(), config));
     }
     for _ in 0..10 {
@@ -44,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
 async fn mutex_start_session(
     client: reqwest::Client,
     url: String,
-    config: MutexUntrusted,
+    config: boson_control_messages::Mutex,
 ) -> anyhow::Result<()> {
     client
         .post(format!("{url}/mutex/start"))

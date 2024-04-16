@@ -65,9 +65,9 @@ impl Tcp {
         .await
         {
             warn!(
-                "{:?} (remote {remote:?}) >>> {:?} {err}",
+                "{:?} <<< {:?} (remote {remote:?}) {err}",
+                stream.local_addr().ok(),
                 stream.peer_addr().ok(),
-                stream.local_addr().ok()
             );
         }
     }
@@ -93,7 +93,7 @@ impl Tcp {
             .await
             {
                 warn!(
-                    "{:?} >=> {:?} (remote {remote}) {err}",
+                    "{:?} >>> {:?} (remote {remote}) {err}",
                     stream.local_addr().ok(),
                     stream.peer_addr().ok()
                 );
@@ -137,7 +137,7 @@ impl<B: Buf> Protocol<SocketAddr, B> for Tcp {
             {
                 Ok(stream) => stream,
                 Err(err) => {
-                    warn!(">=> {remote} {err}");
+                    warn!(">> {remote} {err}");
                     return;
                 }
             };
@@ -200,7 +200,7 @@ pub async fn accept_session(
         let preamble = match task.await {
             Ok(preamble) => preamble,
             Err(err) => {
-                warn!("{peer_addr} {err}");
+                warn!("<< {peer_addr} {err}");
                 continue;
             }
         };
