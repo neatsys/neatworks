@@ -3,7 +3,10 @@ name = "boson"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[workspace]
+
+[profile.release]
+lto = true
 
 [dependencies]
 anyhow = { version = "1.0.81", features = ["backtrace"] }
