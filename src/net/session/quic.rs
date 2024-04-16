@@ -176,6 +176,7 @@ impl<B: Buf> Protocol<SocketAddr, B> for Quic {
     type Incoming = quinn::Connection;
 
     fn accept<E: SendEventOnce<Closed<SocketAddr>> + Send + 'static>(
+        &self,
         connection: Self::Incoming,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
         close_guard: CloseGuard<E, SocketAddr>,

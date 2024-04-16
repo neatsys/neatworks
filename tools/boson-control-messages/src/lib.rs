@@ -1,14 +1,9 @@
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
-}
+use std::net::SocketAddr;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+use serde::{Deserialize, Serialize};
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MutexUntrusted {
+    pub addrs: Vec<SocketAddr>,
+    pub id: u8,
 }

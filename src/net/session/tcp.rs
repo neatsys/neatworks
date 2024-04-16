@@ -20,7 +20,11 @@ use crate::{
     },
 };
 
-pub struct Tcp(Option<SocketAddr>, bytes::Bytes);
+pub struct Tcp {
+    local_addr: Option<SocketAddr>,
+    preamble: bytes::Bytes,
+    pub write_timeout: Duration,
+}
 
 type TcpPreamble = Option<SocketAddr>;
 
@@ -32,7 +36,11 @@ impl Tcp {
         let mut preamble = bincode::options().serialize(&addr)?;
         assert!(preamble.len() < TCP_PREAMBLE_LEN);
         preamble.resize(TCP_PREAMBLE_LEN, Default::default());
-        Ok(Self(addr, preamble.into()))
+        Ok(Self {
+            local_addr: addr,
+            preamble: preamble.into(),
+            write_timeout: Duration::from_secs(86400),
+        })
     }
 
     async fn read_task(
@@ -68,10 +76,11 @@ impl Tcp {
         mut stream: OwnedWriteHalf,
         mut receiver: UnboundedReceiver<B>,
         remote: SocketAddr,
+        close_after: Duration,
         close_guard: impl Into<Option<CloseGuard<E, SocketAddr>>>,
     ) {
         loop {
-            let buf = match timeout(Duration::from_millis(1000), receiver.recv()).await {
+            let buf = match timeout(close_after, receiver.recv()).await {
                 Ok(None) => return,
                 Err(_) => break,
                 Ok(Some(buf)) => buf,
@@ -101,7 +110,7 @@ impl Tcp {
 
 impl<B: Buf> Protocol<SocketAddr, B> for Tcp {
     fn local_addr(&self) -> Option<SocketAddr> {
-        self.0
+        self.local_addr
     }
 
     type Sender = UnboundedSender<B>;
@@ -112,8 +121,9 @@ impl<B: Buf> Protocol<SocketAddr, B> for Tcp {
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Send + 'static,
         close_guard: CloseGuard<E, SocketAddr>,
     ) -> Self::Sender {
-        let preamble = self.1.clone();
+        let preamble = self.preamble.clone();
         let (sender, receiver) = unbounded_channel();
+        let close_after = self.write_timeout;
         tokio::spawn(async move {
             let task = async {
                 let mut stream = TcpStream::connect(remote).await?;
@@ -133,7 +143,13 @@ impl<B: Buf> Protocol<SocketAddr, B> for Tcp {
             };
             let (read, write) = stream.into_split();
             tokio::spawn(Self::read_task(read, on_buf, remote));
-            tokio::spawn(Self::write_task(write, receiver, remote, close_guard));
+            tokio::spawn(Self::write_task(
+                write,
+                receiver,
+                remote,
+                close_after,
+                close_guard,
+            ));
         });
         sender
     }
@@ -141,6 +157,7 @@ impl<B: Buf> Protocol<SocketAddr, B> for Tcp {
     type Incoming = (TcpPreamble, TcpStream);
 
     fn accept<E: SendEventOnce<Closed<SocketAddr>> + Send + 'static>(
+        &self,
         (preamble, stream): Self::Incoming,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Send + 'static,
         close_guard: CloseGuard<E, SocketAddr>,
@@ -149,7 +166,13 @@ impl<B: Buf> Protocol<SocketAddr, B> for Tcp {
         tokio::spawn(Tcp::read_task(read, on_buf, preamble));
         if let Some(remote) = preamble {
             let (sender, receiver) = unbounded_channel();
-            tokio::spawn(Tcp::write_task(write, receiver, remote, close_guard));
+            tokio::spawn(Tcp::write_task(
+                write,
+                receiver,
+                remote,
+                self.write_timeout,
+                close_guard,
+            ));
             Some((remote, sender))
         } else {
             // write.forget()
@@ -197,7 +220,7 @@ pub async fn accept_session(
 // messages sent by simplex tcp net to be received with a duplex one, and vice
 // versa
 pub mod simplex {
-    use std::net::SocketAddr;
+    use std::{net::SocketAddr, time::Duration};
 
     use bincode::Options;
     use tokio::{io::AsyncWriteExt, sync::mpsc::unbounded_channel};
@@ -234,6 +257,7 @@ pub mod simplex {
                         stream.into_split().1,
                         receiver,
                         dest,
+                        Duration::from_secs(86400),
                         None,
                     )
                     .await;

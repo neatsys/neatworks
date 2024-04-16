@@ -1,5 +1,3 @@
-use std::net::SocketAddr;
-
 use augustus::{
     event::{
         self,
@@ -13,6 +11,7 @@ use augustus::{
         Detach, Dispatch, IndexNet,
     },
 };
+use boson_control_messages::MutexUntrusted;
 use tokio::{
     net::TcpListener,
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
@@ -25,17 +24,15 @@ pub enum Event {
 }
 
 pub async fn untrusted_session(
+    config: MutexUntrusted,
     mut events: UnboundedReceiver<Event>,
     upcall: UnboundedSender<RequestOk>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    let addrs = (0..10)
-        .map(|i| SocketAddr::from(([127, 0, 0, 1], 4000 + i)))
-        .collect::<Vec<_>>();
-    let id = 0u8;
-    let addr = addrs[id as usize];
+    let id = config.id;
+    let addr = config.addrs[id as usize];
 
-    let tcp_listener = TcpListener::bind(addr).await?;
+    let tcp_listener = TcpListener::bind(config.addrs[config.id as usize]).await?;
     let mut dispatch_session = event::Session::new();
     let mut processor_session = Session::new();
     let mut causal_net_session = Session::new();
@@ -50,6 +47,8 @@ pub async fn untrusted_session(
     )?));
     let mut processor = Blanket(Unify(Processor::new(
         id,
+        config.addrs.len(),
+        |id| (0u32, id),
         Detach(Sender::from(causal_net_session.sender())),
         upcall,
     )));
@@ -61,7 +60,7 @@ pub async fn untrusted_session(
             as Box<dyn SendEvent<lamport_mutex::Update<LamportClock>> + Send + Sync>,
         lamport_mutex::MessageNet::<_, LamportClock>::new(IndexNet::new(
             dispatch::Net::from(dispatch_session.sender()),
-            addrs,
+            config.addrs,
             None,
         )),
     )?));

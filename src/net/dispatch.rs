@@ -107,6 +107,7 @@ pub trait Protocol<A, B> {
     type Incoming;
 
     fn accept<E: SendEventOnce<Closed<A>> + Send + 'static>(
+        &self,
         connection: Self::Incoming,
         on_buf: impl FnMut(&[u8]) -> anyhow::Result<()> + Clone + Send + 'static,
         close_guard: CloseGuard<E, A>,
@@ -289,7 +290,10 @@ impl<
     ) -> anyhow::Result<()> {
         self.seq += 1;
         let close_guard = CloseGuard(self.close_sender.clone(), None, self.seq);
-        let Some((remote, mut sender)) = P::accept(event, self.on_buf.clone(), close_guard) else {
+        let Some((remote, mut sender)) =
+            self.protocol
+                .accept(event, self.on_buf.clone(), close_guard)
+        else {
             return Ok(());
         };
 

@@ -1,5 +1,6 @@
-use std::time::Duration;
+use std::{net::SocketAddr, time::Duration};
 
+use boson_control_messages::MutexUntrusted;
 use tokio::{task::JoinSet, time::sleep};
 
 #[tokio::main(flavor = "current_thread")]
@@ -7,23 +8,32 @@ async fn main() -> anyhow::Result<()> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(1500))
         .build()?;
+
+    let urls = (0..2)
+        .map(|i| format!("http://127.0.0.{}:3000", i + 1))
+        .collect::<Vec<_>>();
+    let addrs = (0..2)
+        .map(|i| SocketAddr::from(([127, 0, 0, i + 1], 4000)))
+        .collect::<Vec<_>>();
+
     let mut watchdog_sessions = JoinSet::new();
-    for index in 0..2 {
-        watchdog_sessions.spawn(start_mutex_session(
-            client.clone(),
-            format!("http://127.0.0.{}:3000", index + 1),
-        ));
+    for (index, url) in urls.iter().enumerate() {
+        let config = MutexUntrusted {
+            addrs: addrs.clone(),
+            id: index as _,
+        };
+        watchdog_sessions.spawn(mutex_start_session(client.clone(), url.clone(), config));
     }
-    tokio::select! {
-        () = sleep(Duration::from_millis(3000)) => {}
-        Some(result) = watchdog_sessions.join_next() => result??,
+    for _ in 0..10 {
+        sleep(Duration::from_millis(1000)).await;
+        tokio::select! {
+            result = mutex_request_session(client.clone(), urls[0].clone()) => result?,
+            Some(result) = watchdog_sessions.join_next() => result??,
+        }
     }
     let mut stop_sessions = JoinSet::new();
-    for index in 0..2 {
-        stop_sessions.spawn(stop_mutex_session(
-            client.clone(),
-            format!("http://127.0.0.{}:3000", index + 1),
-        ));
+    for url in urls {
+        stop_sessions.spawn(mutex_stop_session(client.clone(), url));
     }
     while let Some(result) = stop_sessions.join_next().await {
         result??
@@ -31,9 +41,14 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn start_mutex_session(client: reqwest::Client, url: String) -> anyhow::Result<()> {
+async fn mutex_start_session(
+    client: reqwest::Client,
+    url: String,
+    config: MutexUntrusted,
+) -> anyhow::Result<()> {
     client
         .post(format!("{url}/mutex/start"))
+        .json(&config)
         .send()
         .await?
         .error_for_status()?;
@@ -47,11 +62,23 @@ async fn start_mutex_session(client: reqwest::Client, url: String) -> anyhow::Re
     }
 }
 
-async fn stop_mutex_session(client: reqwest::Client, url: String) -> anyhow::Result<()> {
+async fn mutex_stop_session(client: reqwest::Client, url: String) -> anyhow::Result<()> {
     client
         .post(format!("{url}/mutex/stop"))
         .send()
         .await?
         .error_for_status()?;
+    Ok(())
+}
+
+async fn mutex_request_session(client: reqwest::Client, url: String) -> anyhow::Result<()> {
+    let latency = client
+        .post(format!("{url}/mutex/request"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Duration>()
+        .await?;
+    println!("{latency:?}");
     Ok(())
 }

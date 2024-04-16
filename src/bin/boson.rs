@@ -7,6 +7,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use boson_control_messages::MutexUntrusted;
 use tokio::{
     signal::ctrl_c,
     sync::{
@@ -83,7 +84,10 @@ async fn ok(State(state): State<AppState>) -> StatusCode {
     StatusCode::INTERNAL_SERVER_ERROR
 }
 
-async fn mutex_start(State(state): State<AppState>) -> StatusCode {
+async fn mutex_start(
+    State(state): State<AppState>,
+    Json(config): Json<MutexUntrusted>,
+) -> StatusCode {
     if let Err(err) = async {
         let mut session = state.session.lock().await;
         anyhow::ensure!(session.is_none());
@@ -92,6 +96,7 @@ async fn mutex_start(State(state): State<AppState>) -> StatusCode {
         let cancel = CancellationToken::new();
         *session = Some(AppSession {
             handle: tokio::spawn(boson_mutex::untrusted_session(
+                config,
                 event_receiver,
                 upcall_sender,
                 cancel.clone(),

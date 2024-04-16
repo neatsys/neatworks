@@ -243,12 +243,18 @@ pub struct Processor<CN, U, C> {
 }
 
 impl<CN, U, C> Processor<CN, U, C> {
-    pub fn new(id: u8, causal_net: CN, upcall: U) -> Self {
+    pub fn new(
+        id: u8,
+        num_processor: usize,
+        clock_zero: impl Fn(u8) -> C,
+        causal_net: CN,
+        upcall: U,
+    ) -> Self {
         Self {
             id,
             causal_net,
             upcall,
-            latests: Default::default(),
+            latests: (0..num_processor as u8).map(clock_zero).collect(),
             requests: Default::default(),
             requesting: false,
         }
@@ -260,6 +266,9 @@ pub mod event {
     pub struct RequestOk;
     pub struct Release;
 }
+
+pub trait Net: SendMessage<u8, Message> + SendMessage<All, Message> {}
+impl<T: SendMessage<u8, Message> + SendMessage<All, Message>> Net for T {}
 
 impl<CN: SendMessage<All, Message>, U, C> OnEvent<event::Request> for Processor<CN, U, C> {
     fn on_event(
