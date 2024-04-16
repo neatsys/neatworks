@@ -1,3 +1,6 @@
+mod boson_cops;
+mod boson_mutex;
+
 use std::{backtrace::BacktraceStatus, sync::Arc};
 
 use axum::{
@@ -18,8 +21,6 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
-
-mod boson_mutex;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
