@@ -11,7 +11,9 @@ members = [
     "tools/replication-control",
     "tools/replication-control-messages",
     "tools/entropy-control",
-    "tools/entropy-control-messages",
+    "tools/entropy-control-messages", 
+    "tools/boson-control", 
+    "tools/boson-control-messages",
 ]
 
 [profile.dev]
@@ -80,6 +82,7 @@ rcgen = { git = "https://github.com/rustls/rcgen", version = "0.13.0", features 
 
 replication-control-messages = { version = "0.1.0", path = "tools/replication-control-messages" }
 scc = "2.0.19"
+boson-control-messages = { version = "0.1.0", path = "tools/boson-control-messages" }
 
 [dev-dependencies]
 proptest = "1.4.0"

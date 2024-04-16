@@ -123,6 +123,7 @@ dependencies = [
  "anyhow",
  "axum",
  "bincode",
+ "boson-control-messages",
  "bytes",
  "crossbeam-queue",
  "derive-where",
@@ -296,6 +297,20 @@ checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
 ]
+
+[[package]]
+name = "boson-control"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "boson-control-messages",
+ "reqwest",
+ "tokio",
+]
+
+[[package]]
+name = "boson-control-messages"
+version = "0.1.0"
 
 [[package]]
 name = "bumpalo"

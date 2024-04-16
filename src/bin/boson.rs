@@ -3,8 +3,9 @@ use std::{backtrace::BacktraceStatus, sync::Arc};
 use axum::{
     extract::State,
     http::StatusCode,
+    response::{IntoResponse, Response},
     routing::{get, post},
-    Router,
+    Json, Router,
 };
 use tokio::{
     signal::ctrl_c,
@@ -13,6 +14,7 @@ use tokio::{
         Mutex,
     },
     task::JoinHandle,
+    time::Instant,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -21,6 +23,7 @@ mod boson_mutex;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt::init();
     let app = Router::new()
         .route("/ok", get(ok))
         .route("/mutex/start", post(mutex_start))
@@ -51,73 +54,96 @@ struct AppSession {
     upcall: UnboundedReceiver<augustus::lamport_mutex::event::RequestOk>,
 }
 
-async fn ok(State(state): State<AppState>) -> (StatusCode, &'static str) {
+fn log_exit(err: anyhow::Error) -> StatusCode {
+    let err = err;
+    warn!("{err}");
+    if err.backtrace().status() == BacktraceStatus::Captured {
+        warn!("\n{}", err.backtrace())
+    } else {
+        warn!("{}", err.backtrace())
+    }
+    StatusCode::INTERNAL_SERVER_ERROR
+}
+
+async fn ok(State(state): State<AppState>) -> StatusCode {
     let mut session = state.session.lock().await;
     {
         let Some(session) = &mut *session else {
-            return (StatusCode::NOT_FOUND, "no session");
+            return StatusCode::NOT_FOUND;
         };
         if !session.handle.is_finished() {
-            return (StatusCode::OK, "ok");
+            return StatusCode::OK;
         }
     }
     match session.take().unwrap().handle.await {
         Err(err) => warn!("{err}"),
-        Ok(Err(err)) => {
-            warn!("{err}");
-            if err.backtrace().status() == BacktraceStatus::Captured {
-                warn!("\n{}", err.backtrace())
-            } else {
-                warn!("{}", err.backtrace())
-            }
-        }
+        Ok(Err(err)) => return log_exit(err),
         Ok(Ok(())) => warn!("unexpected peer exit"),
     }
-    (StatusCode::INTERNAL_SERVER_ERROR, "err")
+    StatusCode::INTERNAL_SERVER_ERROR
 }
 
-async fn mutex_start(State(state): State<AppState>) {
-    let mut session = state.session.lock().await;
-    assert!(session.is_none());
-    let (event_sender, event_receiver) = unbounded_channel();
-    let (upcall_sender, upcall_receiver) = unbounded_channel();
-    let cancel = CancellationToken::new();
-    *session = Some(AppSession {
-        handle: tokio::spawn(boson_mutex::untrusted_session(
-            event_receiver,
-            upcall_sender,
-            cancel.clone(),
-        )),
-        cancel,
-        event_sender,
-        upcall: upcall_receiver,
-    })
+async fn mutex_start(State(state): State<AppState>) -> StatusCode {
+    if let Err(err) = async {
+        let mut session = state.session.lock().await;
+        anyhow::ensure!(session.is_none());
+        let (event_sender, event_receiver) = unbounded_channel();
+        let (upcall_sender, upcall_receiver) = unbounded_channel();
+        let cancel = CancellationToken::new();
+        *session = Some(AppSession {
+            handle: tokio::spawn(boson_mutex::untrusted_session(
+                event_receiver,
+                upcall_sender,
+                cancel.clone(),
+            )),
+            cancel,
+            event_sender,
+            upcall: upcall_receiver,
+        });
+        anyhow::Ok(())
+    }
+    .await
+    {
+        log_exit(err)
+    } else {
+        StatusCode::OK
+    }
 }
 
-async fn mutex_stop(State(state): State<AppState>) {
-    let mut session = state.session.lock().await;
-    let Some(session) = session.take() else {
-        unimplemented!()
+async fn mutex_stop(State(state): State<AppState>) -> StatusCode {
+    if let Err(err) = async {
+        let mut session = state.session.lock().await;
+        let Some(session) = session.take() else {
+            anyhow::bail!("unimplemented")
+        };
+        session.cancel.cancel();
+        session.handle.await?
+    }
+    .await
+    {
+        log_exit(err)
+    } else {
+        StatusCode::OK
+    }
+}
+
+async fn mutex_request(State(state): State<AppState>) -> Response {
+    let task = async {
+        let mut session = state.session.lock().await;
+        let Some(session) = session.as_mut() else {
+            anyhow::bail!("unimplemented")
+        };
+        let start = Instant::now();
+        session.event_sender.send(boson_mutex::Event::Request)?;
+        // TODO timeout
+        session.upcall.recv().await;
+        session.event_sender.send(boson_mutex::Event::Release)?;
+        Ok(Json(start.elapsed()))
     };
-    session.cancel.cancel();
-    session.handle.await.unwrap().unwrap()
-}
-
-async fn mutex_request(State(state): State<AppState>) {
-    let mut session = state.session.lock().await;
-    let Some(session) = session.as_mut() else {
-        unimplemented!()
-    };
-    session
-        .event_sender
-        .send(boson_mutex::Event::Request)
-        .unwrap();
-    // TODO timeout
-    session.upcall.recv().await;
-    session
-        .event_sender
-        .send(boson_mutex::Event::Release)
-        .unwrap();
+    match task.await {
+        Ok(elapsed) => elapsed.into_response(),
+        Err(err) => log_exit(err).into_response(),
+    }
 }
 
 // cSpell:words upcall lamport
