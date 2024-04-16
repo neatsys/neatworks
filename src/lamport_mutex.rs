@@ -51,25 +51,27 @@ pub struct Clocked<M, C> {
     pub inner: M,
 }
 
-pub struct Replicated<E, N> {
+pub struct Replicated<E> {
     seq: u32,
     recv_sender: E,
-    net: N,
 }
 
-impl<E: SendEvent<Recv<Clocked<M, u32>>>, M, N> SendEvent<Recv<M>> for Replicated<E, N> {
+impl<E> Replicated<E> {
+    pub fn new(recv_sender: E) -> Self {
+        Self {
+            recv_sender,
+            seq: 0,
+        }
+    }
+}
+
+impl<E: SendEvent<Recv<Clocked<M, u32>>>, M> SendEvent<Recv<M>> for Replicated<E> {
     fn send(&mut self, Recv(message): Recv<M>) -> anyhow::Result<()> {
         self.seq += 1;
         self.recv_sender.send(Recv(Clocked {
             clock: self.seq,
             inner: message,
         }))
-    }
-}
-
-impl<E, N: SendMessage<A, M>, A, M> SendMessage<A, M> for Replicated<E, N> {
-    fn send(&mut self, dest: A, message: M) -> anyhow::Result<()> {
-        self.net.send(dest, message)
     }
 }
 

@@ -35,11 +35,11 @@ impl App for Null {
 }
 
 #[derive(Debug)]
-pub struct Detach<E>(pub E);
+pub struct OnBuf<F>(pub F);
 
-impl<E: SendEvent<Payload>> App for Detach<E> {
+impl<F: for<'a> FnMut(&'a [u8]) -> anyhow::Result<()>> App for OnBuf<F> {
     fn execute(&mut self, op: &[u8]) -> anyhow::Result<Vec<u8>> {
-        self.0.send(Payload(op.to_vec()))?;
+        (self.0)(op)?;
         Ok(Default::default())
     }
 }
@@ -47,5 +47,3 @@ impl<E: SendEvent<Payload>> App for Detach<E> {
 pub use btree::BTreeMap;
 pub use kvstore::KVStore;
 pub use sqlite::Sqlite;
-
-use crate::{event::SendEvent, util::Payload};

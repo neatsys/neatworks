@@ -1,12 +1,12 @@
 use std::net::SocketAddr;
 
 use augustus::{
-    app::Detach,
+    app::OnBuf,
     crypto::{Crypto, CryptoFlavor},
     event::{erased, OnEvent, OnTimer, SendEvent, Session, Unify},
-    net::{session::Udp, All, IndexNet, InvokeNet, MessageNet, SendMessage},
+    net::{deserialize, session::Udp, All, IndexNet, InvokeNet, MessageNet, SendMessage},
     pbft,
-    util::{BincodeDe, Queue},
+    util::Queue,
     worker::{Submit, Worker},
     workload::InvokeOk,
 };
@@ -96,7 +96,10 @@ async fn ping_pong_session<const PING: bool>(index: usize) -> anyhow::Result<()>
     )));
     let mut replica = erased::Blanket(erased::Buffered::from(pbft::Replica::new(
         index as _,
-        Detach(BincodeDe::<_, Message>::from(session.sender())),
+        OnBuf({
+            let mut sender = session.sender();
+            move |buf: &_| sender.send(deserialize::<Message>(buf)?)
+        }),
         pbft::ToReplicaMessageNet::new(IndexNet::new(replica_udp.clone(), replica_addrs, index)),
         pbft::ToClientMessageNet::new(replica_udp.clone()),
         Box::new(pbft::CryptoWorker::from(Worker::Inline(

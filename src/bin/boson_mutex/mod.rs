@@ -1,15 +1,24 @@
+use std::net::SocketAddr;
+
 use augustus::{
+    app,
+    crypto::{Crypto, CryptoFlavor},
     event::{
         self,
-        erased::{session::Sender, Blanket, Session, Unify},
+        erased::{session::Sender, Blanket, Buffered, Session, Unify},
         Once, SendEvent,
     },
-    lamport_mutex::{self, event::RequestOk, Causal, Lamport, LamportClock, Processor},
+    lamport_mutex::{self, event::RequestOk, Causal, Lamport, LamportClock, Processor, Replicated},
     net::{
-        dispatch,
+        deserialize, dispatch,
+        events::Recv,
         session::{tcp, Tcp},
-        Detach, Dispatch, IndexNet,
+        Detach, Dispatch, IndexNet, InvokeNet,
     },
+    pbft,
+    util::Queue,
+    worker::{Submit, Worker},
+    workload::InvokeOk,
 };
 use boson_control_messages::MutexUntrusted;
 use tokio::{
@@ -93,4 +102,118 @@ pub async fn untrusted_session(
     anyhow::bail!("unreachable")
 }
 
-// cSpell:words lamport upcall
+pub async fn replicated_session(
+    mut events: UnboundedReceiver<Event>,
+    upcall: UnboundedSender<RequestOk>,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
+    let id = 0;
+    let addrs = vec![];
+    let addr = "127.0.0.1:4000".parse::<std::net::SocketAddr>()?;
+
+    let client_tcp_listener = TcpListener::bind(addr).await?;
+    let tcp_listener = TcpListener::bind(addr).await?;
+    let mut client_dispatch_session = event::Session::new();
+    let mut client_session = Session::new();
+    let mut dispatch_session = event::Session::new();
+    let mut replica_session = Session::new();
+    let mut queue_session = Session::new();
+    let mut processor_session = Session::new();
+
+    let mut client_dispatch = event::Unify(event::Buffered::from(Dispatch::new(
+        Tcp::new(addr)?,
+        {
+            let mut sender = Sender::from(client_session.sender());
+            move |buf: &_| pbft::to_client_on_buf(buf, &mut sender)
+        },
+        Once(client_dispatch_session.sender()),
+    )?));
+    let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
+        Tcp::new(addr)?,
+        {
+            let mut sender = Sender::from(replica_session.sender());
+            move |buf: &_| pbft::to_replica_on_buf(buf, &mut sender)
+        },
+        Once(dispatch_session.sender()),
+    )?));
+    let mut client = Blanket(Buffered::from(pbft::Client::new(
+        0,
+        addr,
+        pbft::ToReplicaMessageNet::new(IndexNet::new(
+            dispatch::Net::from(client_dispatch_session.sender()),
+            addrs.clone(),
+            None,
+        )),
+        Box::new(Sender::from(queue_session.sender()))
+            as Box<dyn SendEvent<InvokeOk> + Send + Sync>,
+        2,
+        0,
+    )));
+    let mut replica = Blanket(Buffered::from(pbft::Replica::new(
+        0,
+        app::OnBuf({
+            let mut sender = Replicated::new(Sender::from(processor_session.sender()));
+            move |buf: &_| sender.send(Recv(deserialize::<lamport_mutex::Message>(buf)?))
+        }),
+        pbft::ToReplicaMessageNet::new(IndexNet::new(
+            dispatch::Net::from(dispatch_session.sender()),
+            addrs,
+            0,
+        )),
+        pbft::ToClientMessageNet::new(dispatch::Net::from(dispatch_session.sender())),
+        Box::new(pbft::CryptoWorker::from(Worker::Inline(
+            Crypto::new_hardcoded_replication(2, 0u8, CryptoFlavor::Schnorrkel)?,
+            Sender::from(replica_session.sender()),
+        ))) as Box<dyn Submit<Crypto, dyn pbft::SendCryptoEvent<SocketAddr>> + Send + Sync>,
+        2,
+        0,
+    )));
+    let mut queue = Blanket(Unify(Queue::new(Sender::from(client_session.sender()))));
+    let mut processor = Blanket(Unify(Processor::new(
+        id,
+        2,
+        |_| 0u32,
+        augustus::net::MessageNet::<_, lamport_mutex::Message>::new(InvokeNet(Sender::from(
+            queue_session.sender(),
+        ))),
+        upcall,
+    )));
+
+    let event_session = {
+        let mut sender = Sender::from(processor_session.sender());
+        async move {
+            while let Some(event) = events.recv().await {
+                match event {
+                    Event::Request => sender.send(lamport_mutex::event::Request)?,
+                    Event::Release => sender.send(lamport_mutex::event::Release)?,
+                }
+            }
+            anyhow::Ok(())
+        }
+    };
+    let client_tcp_accept_session =
+        tcp::accept_session(client_tcp_listener, client_dispatch_session.sender());
+    let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
+    let client_dispatch_session = client_dispatch_session.run(&mut client_dispatch);
+    let dispatch_session = dispatch_session.run(&mut dispatch);
+    let client_session = client_session.run(&mut client);
+    let replica_session = replica_session.run(&mut replica);
+    let queue_session = queue_session.run(&mut queue);
+    let processor_session = processor_session.run(&mut processor);
+
+    tokio::select! {
+        () = cancel.cancelled() => return Ok(()),
+        result = event_session => result?,
+        result = client_tcp_accept_session => result?,
+        result = client_dispatch_session => result?,
+        result = tcp_accept_session => result?,
+        result = dispatch_session => result?,
+        result = client_session => result?,
+        result = replica_session => result?,
+        result = queue_session => result?,
+        result = processor_session => result?,
+    }
+    anyhow::bail!("unreachable")
+}
+
+// cSpell:words lamport upcall pbft
