@@ -17,6 +17,7 @@ use tokio::{
     net::TcpListener,
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
 };
+use tokio_util::sync::CancellationToken;
 
 pub enum Event {
     Request,
@@ -26,6 +27,7 @@ pub enum Event {
 pub async fn untrusted_session(
     mut events: UnboundedReceiver<Event>,
     upcall: UnboundedSender<RequestOk>,
+    cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let addrs = (0..10)
         .map(|i| SocketAddr::from(([127, 0, 0, 1], 4000 + i)))
@@ -82,6 +84,7 @@ pub async fn untrusted_session(
     let causal_net_session = causal_net_session.run(&mut causal_net);
 
     tokio::select! {
+        () = cancel.cancelled() => return Ok(()),
         result = event_session => result?,
         result = tcp_accept_session => result?,
         result = dispatch_session => result?,
