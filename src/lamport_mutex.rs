@@ -21,9 +21,11 @@
 // for new messages
 use std::{cmp::Ordering, collections::VecDeque, mem::replace};
 
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+
 use crate::{
-    event::{erased::OnEvent, SendEvent, Timer},
-    net::{events::Recv, All, SendMessage},
+    event::{erased::OnEvent, OnTimer, SendEvent, Timer},
+    net::{deserialize, events::Recv, All, SendMessage},
 };
 
 pub trait Clock: PartialOrd + Clone + Send + Sync + 'static {
@@ -43,9 +45,10 @@ impl<C: Ord + Clone + Send + Sync + 'static> Clock for C {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Clocked<M, C> {
     pub clock: C,
-    pub message: M,
+    pub inner: M,
 }
 
 pub struct Replicated<E, N> {
@@ -59,7 +62,7 @@ impl<E: SendEvent<Recv<Clocked<M, u32>>>, M, N> SendEvent<Recv<M>> for Replicate
         self.seq += 1;
         self.recv_sender.send(Recv(Clocked {
             clock: self.seq,
-            message,
+            inner: message,
         }))
     }
 }
@@ -70,17 +73,22 @@ impl<E, N: SendMessage<A, M>, A, M> SendMessage<A, M> for Replicated<E, N> {
     }
 }
 
-pub struct Causal<E, CS, N, C, M, A> {
+pub struct Causal<E, CS, N, C, M> {
     clock: C,
     pending_recv: Option<VecDeque<Clocked<M, C>>>,
-    pending_send: Vec<(A, M)>,
+    // erasing address type
+    // this is definitely wrong, at least not right
+    // sadly i cannot think out any other thing that works by now
+    // even more sadly the message type is not erased completely: it still remains above
+    #[allow(clippy::type_complexity)]
+    pending_send: Vec<Box<dyn FnOnce(C, &mut N) -> anyhow::Result<()> + Send + Sync>>,
 
     recv_sender: E,
     clock_service: CS,
     net: N,
 }
 
-impl<E, CS: SendEvent<Update<C>>, N, C: Clone, M, A> Causal<E, CS, N, C, M, A> {
+impl<E, CS: SendEvent<Update<C>>, N, C: Clone, M> Causal<E, CS, N, C, M> {
     pub fn new(
         clock_zero: C,
         recv_sender: E,
@@ -104,8 +112,8 @@ impl<E, CS: SendEvent<Update<C>>, N, C: Clone, M, A> Causal<E, CS, N, C, M, A> {
     }
 }
 
-impl<E: SendEvent<Recv<Clocked<M, C>>>, CS: SendEvent<Update<C>>, N, C: Clone, M, A>
-    OnEvent<Recv<Clocked<M, C>>> for Causal<E, CS, N, C, M, A>
+impl<E: SendEvent<Recv<Clocked<M, C>>>, CS: SendEvent<Update<C>>, N, C: Clone, M>
+    OnEvent<Recv<Clocked<M, C>>> for Causal<E, CS, N, C, M>
 {
     fn on_event(
         &mut self,
@@ -126,12 +134,24 @@ impl<E: SendEvent<Recv<Clocked<M, C>>>, CS: SendEvent<Update<C>>, N, C: Clone, M
     }
 }
 
-impl<E, CS, N: SendMessage<A, Clocked<M, C>>, A, C: Clone, M> SendMessage<A, M>
-    for Causal<E, CS, N, C, M, A>
+impl<
+        E,
+        CS,
+        N: SendMessage<A, Clocked<M, C>>,
+        A: Send + Sync + 'static,
+        C: Clone,
+        M: Send + Sync + 'static,
+    > SendMessage<A, M> for Causal<E, CS, N, C, M>
 {
     fn send(&mut self, dest: A, message: M) -> anyhow::Result<()> {
         if self.pending_recv.is_some() {
-            self.pending_send.push((dest, message));
+            self.pending_send.push(Box::new(move |clock, net| {
+                let clocked = Clocked {
+                    inner: message,
+                    clock,
+                };
+                net.send(dest, clocked)
+            }));
             return Ok(());
         }
         // IR2 (a) if event a is the sending of a message m by process p_i then the message m
@@ -141,20 +161,14 @@ impl<E, CS, N: SendMessage<A, Clocked<M, C>>, A, C: Clone, M> SendMessage<A, M>
         // do so in the presence of the extra `+ 1` below
         let clocked = Clocked {
             clock: self.clock.clone(),
-            message,
+            inner: message,
         };
         self.net.send(dest, clocked)
     }
 }
 
-impl<
-        E: SendEvent<Recv<Clocked<M, C>>>,
-        M,
-        CS: SendEvent<Update<C>>,
-        N: SendMessage<A, Clocked<M, C>>,
-        A,
-        C: Clock,
-    > OnEvent<UpdateOk<C>> for Causal<E, CS, N, C, M, A>
+impl<E: SendEvent<Recv<Clocked<M, C>>>, M, CS: SendEvent<Update<C>>, N, C: Clock>
+    OnEvent<UpdateOk<C>> for Causal<E, CS, N, C, M>
 {
     fn on_event(&mut self, UpdateOk(clock): UpdateOk<C>, _: &mut impl Timer) -> anyhow::Result<()> {
         anyhow::ensure!(matches!(
@@ -175,25 +189,27 @@ impl<
         } else {
             self.pending_recv = None
         }
-        for (addr, message) in self.pending_send.drain(..) {
-            let clocked = Clocked {
-                clock: self.clock.clone(),
-                message,
-            };
-            self.net.send(addr, clocked)?
+        for send in self.pending_send.drain(..) {
+            send(self.clock.clone(), &mut self.net)?
         }
         Ok(())
     }
 }
 
-pub struct Update<C> {
-    prev: C,
-    remote: C,
+impl<E, CS, N, C, M> OnTimer for Causal<E, CS, N, C, M> {
+    fn on_timer(&mut self, _: crate::event::TimerId, _: &mut impl Timer) -> anyhow::Result<()> {
+        unreachable!()
+    }
 }
 
-pub struct UpdateOk<C>(C);
+pub struct Update<C> {
+    pub prev: C,
+    pub remote: C,
+}
 
-pub struct Lamport<E>(E, u8);
+pub struct UpdateOk<C>(pub C);
+
+pub struct Lamport<E>(pub E, pub u8);
 
 pub type LamportClock = (u32, u8); // (counter, processor id)
 
@@ -209,11 +225,12 @@ impl<E: SendEvent<UpdateOk<LamportClock>>> SendEvent<Update<LamportClock>> for L
     }
 }
 
-pub struct Request(u8);
-
-pub struct RequestOk(u8);
-
-pub struct Release(u8);
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Message {
+    Request(u8),
+    RequestOk(u8),
+    Release(u8),
+}
 
 pub struct Processor<CN, U, C> {
     id: u8,
@@ -225,13 +242,26 @@ pub struct Processor<CN, U, C> {
     upcall: U,
 }
 
+impl<CN, U, C> Processor<CN, U, C> {
+    pub fn new(id: u8, causal_net: CN, upcall: U) -> Self {
+        Self {
+            id,
+            causal_net,
+            upcall,
+            latests: Default::default(),
+            requests: Default::default(),
+            requesting: false,
+        }
+    }
+}
+
 pub mod event {
     pub struct Request;
     pub struct RequestOk;
     pub struct Release;
 }
 
-impl<CN: SendMessage<All, Request>, U, C> OnEvent<event::Request> for Processor<CN, U, C> {
+impl<CN: SendMessage<All, Message>, U, C> OnEvent<event::Request> for Processor<CN, U, C> {
     fn on_event(
         &mut self,
         event::Request: event::Request,
@@ -241,32 +271,51 @@ impl<CN: SendMessage<All, Request>, U, C> OnEvent<event::Request> for Processor<
         anyhow::ensure!(!replaced, "concurrent request");
         // in this protocol we always expect to loopback `Recv(_)` our own messages
         // the Request will be added into ourselves queue there
-        self.causal_net.send(All, Request(self.id))
+        self.causal_net.send(All, Message::Request(self.id))
     }
 }
 
-impl<CN: SendMessage<u8, RequestOk>, U: SendEvent<event::RequestOk>, C: Clock>
-    OnEvent<Recv<Clocked<Request, C>>> for Processor<CN, U, C>
+impl<CN: SendMessage<u8, Message>, U: SendEvent<event::RequestOk>, C: Clock>
+    OnEvent<Recv<Clocked<Message, C>>> for Processor<CN, U, C>
 {
     fn on_event(
         &mut self,
-        Recv(request): Recv<Clocked<Request, C>>,
+        Recv(message): Recv<Clocked<Message, C>>,
         _: &mut impl Timer,
     ) -> anyhow::Result<()> {
-        let Request(id) = request.message;
+        let id = match &message.inner {
+            Message::Request(id) | Message::RequestOk(id) | Message::Release(id) => *id,
+        };
         let Some(Ordering::Greater | Ordering::Equal) =
-            request.clock.partial_cmp(&self.latests[id as usize])
+            message.clock.partial_cmp(&self.latests[id as usize])
         else {
             return Ok(());
         };
-        self.latests[id as usize] = request.clock.clone();
-        if let Err(index) = self
-            .requests
-            .binary_search_by(|(clock, _)| request.clock.arbitrary_cmp(clock))
-        {
-            self.requests.insert(index, (request.clock, id))
-        };
-        self.causal_net.send(id, RequestOk(self.id))?;
+        self.latests[id as usize] = message.clock.clone();
+        match message.inner {
+            Message::Request(_) => {
+                if let Err(index) = self
+                    .requests
+                    .binary_search_by(|(clock, _)| message.clock.arbitrary_cmp(clock))
+                {
+                    self.requests.insert(index, (message.clock, id))
+                };
+                self.causal_net.send(id, Message::RequestOk(self.id))?;
+            }
+            Message::RequestOk(_) => {}
+            Message::Release(_) => {
+                if let Ok(index) = self
+                    .requests
+                    .binary_search_by(|(clock, _)| message.clock.arbitrary_cmp(clock))
+                {
+                    let (_, processor_id) = self.requests.remove(index);
+                    // not so sure whether faulty processors can cause this break on other processors
+                    // anyway let's go with this for now, since it should always be the case for the
+                    // evaluated path
+                    anyhow::ensure!(processor_id == id);
+                }
+            }
+        }
         if self.requesting {
             self.check_requested()?
         }
@@ -297,29 +346,7 @@ impl<CN, U: SendEvent<event::RequestOk>, C: Clock> Processor<CN, U, C> {
     }
 }
 
-impl<CN, U: SendEvent<event::RequestOk>, C: Clock> OnEvent<Recv<Clocked<RequestOk, C>>>
-    for Processor<CN, U, C>
-{
-    fn on_event(
-        &mut self,
-        Recv(request_ok): Recv<Clocked<RequestOk, C>>,
-        _: &mut impl Timer,
-    ) -> anyhow::Result<()> {
-        let RequestOk(id) = request_ok.message;
-        let Some(Ordering::Greater | Ordering::Equal) =
-            request_ok.clock.partial_cmp(&self.latests[id as usize])
-        else {
-            return Ok(());
-        };
-        self.latests[id as usize] = request_ok.clock.clone();
-        if self.requesting {
-            self.check_requested()?
-        }
-        Ok(())
-    }
-}
-
-impl<CN: SendMessage<All, Release>, U, C> OnEvent<event::Release> for Processor<CN, U, C> {
+impl<CN: SendMessage<All, Message>, U, C> OnEvent<event::Release> for Processor<CN, U, C> {
     fn on_event(
         &mut self,
         event::Release: event::Release,
@@ -329,40 +356,26 @@ impl<CN: SendMessage<All, Release>, U, C> OnEvent<event::Release> for Processor<
         anyhow::ensure!(!self.requesting, "release while requesting");
         // in this protocol we always expect to loopback `Recv(_)` our own messages
         // the Request will be added into ourselves queue there
-        self.causal_net.send(All, Release(self.id))
+        self.causal_net.send(All, Message::Release(self.id))
     }
 }
 
-impl<CN, U: SendEvent<event::RequestOk>, C: Clock> OnEvent<Recv<Clocked<Release, C>>>
-    for Processor<CN, U, C>
-{
-    fn on_event(
-        &mut self,
-        Recv(release): Recv<Clocked<Release, C>>,
-        _: &mut impl Timer,
-    ) -> anyhow::Result<()> {
-        let Release(id) = release.message;
-        let Some(Ordering::Greater | Ordering::Equal) =
-            release.clock.partial_cmp(&self.latests[id as usize])
-        else {
-            return Ok(());
-        };
-        self.latests[id as usize] = release.clock.clone();
-        if let Ok(index) = self
-            .requests
-            .binary_search_by(|(clock, _)| release.clock.arbitrary_cmp(clock))
-        {
-            let (_, processor_id) = self.requests.remove(index);
-            // not so sure whether faulty processors can cause this break on other processors
-            // anyway let's go with this for now, since it should always be the case for the
-            // evaluated path
-            anyhow::ensure!(processor_id == id);
-        };
-        if self.requesting {
-            self.check_requested()?
-        }
-        Ok(())
+impl<CN, U, C> OnTimer for Processor<CN, U, C> {
+    fn on_timer(&mut self, _: crate::event::TimerId, _: &mut impl Timer) -> anyhow::Result<()> {
+        unreachable!()
     }
+}
+
+pub type MessageNet<N, C> = crate::net::MessageNet<N, Clocked<Message, C>>;
+
+pub trait SendRecvEvent<C>: SendEvent<Recv<Clocked<Message, C>>> {}
+impl<T: SendEvent<Recv<Clocked<Message, C>>>, C> SendRecvEvent<C> for T {}
+
+pub fn on_buf<C: DeserializeOwned>(
+    buf: &[u8],
+    sender: &mut impl SendRecvEvent<C>,
+) -> anyhow::Result<()> {
+    sender.send(Recv(deserialize(buf)?))
 }
 
 // cSpell:words lamport deque upcall

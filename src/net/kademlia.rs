@@ -11,7 +11,7 @@ use crate::{
     kademlia::{PeerId, Query, QueryResult, QueryStatus, Target},
 };
 
-use super::{Addr, SendMessage, SendMessageToEach, SendMessageToEachExt as _};
+use super::{Addr, DetachSend, SendMessage, SendMessageToEach, SendMessageToEachExt as _};
 
 #[derive(Debug, Clone)]
 pub struct PeerNet<E>(pub E);
@@ -136,6 +136,18 @@ impl<M: ControlCommon> OnEvent<(PeerId, M::M)> for Control<M::N, M::P, M::M, M::
             );
         }
         Ok(())
+    }
+}
+
+impl<M: ControlCommon> OnEvent<DetachSend<PeerId, M::M>>
+    for Control<M::N, M::P, M::M, M::A, PeerId, M>
+{
+    fn on_event(
+        &mut self,
+        DetachSend(dest, message): DetachSend<PeerId, M::M>,
+        timer: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
+        OnEvent::on_event(self, (dest, message), timer)
     }
 }
 

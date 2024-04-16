@@ -20,7 +20,7 @@ use derive_where::derive_where;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::{
-    event::{BlackHole, SendEvent},
+    event::{erased::OnEvent, BlackHole, SendEvent},
     util::Payload,
     workload::Invoke,
 };
@@ -230,6 +230,26 @@ pub struct InvokeNet<C>(pub C);
 impl<C: SendEvent<Invoke<Payload>>, A, B: Buf> SendMessage<A, B> for InvokeNet<C> {
     fn send(&mut self, _: A, message: B) -> anyhow::Result<()> {
         self.0.send(Invoke(Payload(message.into())))
+    }
+}
+
+pub struct Detach<E>(pub E);
+
+pub struct DetachSend<A, M>(pub A, pub M);
+
+impl<E: SendEvent<DetachSend<A, M>>, A, M> SendMessage<A, M> for Detach<E> {
+    fn send(&mut self, dest: A, message: M) -> anyhow::Result<()> {
+        self.0.send(DetachSend(dest, message))
+    }
+}
+
+impl<N: SendMessage<A, M>, A, M> OnEvent<DetachSend<A, M>> for N {
+    fn on_event(
+        &mut self,
+        DetachSend(dest, message): DetachSend<A, M>,
+        _: &mut impl crate::event::Timer,
+    ) -> anyhow::Result<()> {
+        SendMessage::send(self, dest, message)
     }
 }
 
