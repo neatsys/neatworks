@@ -3,7 +3,7 @@
 // with COPS (SOSP'11)
 // the implementation contains the COPS variant in the paper, COPS-GT and
 // COPS-CD are not included
-// the implementation is prepared for a Byzantine fault security model.
+// the implementation is prepared for an arbitrary fault security model.
 // additional checks and proof passing take places
 // the version type `V` in this implementation does not map to the version
 // number in the original work. instead, it roughly maps to the "nearest"

@@ -223,8 +223,12 @@ impl<N: for<'a> SendMessageToEach<A, M>, A: Addr, M> SendMessage<All, M> for Ind
 #[derive(Debug)]
 pub struct InvokeNet<C>(pub C);
 
-impl<C: SendEvent<Invoke<Payload>>, B: Buf> SendMessage<All, B> for InvokeNet<C> {
-    fn send(&mut self, All: All, message: B) -> anyhow::Result<()> {
+// currently InvokeNet ignore the address argument, who will receive the message
+// is specified by the invocation consumer
+// for example, if the invocation is consumed by a replication client, then
+// every replica will receive the message, even the client can do little on this
+impl<C: SendEvent<Invoke<Payload>>, A, B: Buf> SendMessage<A, B> for InvokeNet<C> {
+    fn send(&mut self, _: A, message: B) -> anyhow::Result<()> {
         self.0.send(Invoke(Payload(message.into())))
     }
 }

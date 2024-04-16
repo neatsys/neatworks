@@ -65,6 +65,7 @@ impl<E: SendEvent<Invoke<O>>, O> OnEvent<Invoke<O>> for Queue<E, O> {
             ops.push_back(op);
             Ok(())
         } else {
+            self.ops = Some(Default::default());
             self.sender.send(Invoke(op))
         }
     }
