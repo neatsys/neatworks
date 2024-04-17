@@ -243,7 +243,7 @@ impl Gen {
     fn new(distr: SettingsDistr, n: usize, scrambled: bool) -> anyhow::Result<Self> {
         Ok(match distr {
             SettingsDistr::Constant => Self::Constant(n),
-            SettingsDistr::Uniform => Self::Uniform(Uniform::new(1, n)),
+            SettingsDistr::Uniform => Self::Uniform(Uniform::new(0, n)),
             SettingsDistr::Zipfian if scrambled => {
                 Self::ScrambledZipf(GenScrambledZipf {
                     min: 0, // only for key chooser

@@ -30,6 +30,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/mutex/start", post(mutex_start))
         .route("/mutex/stop", post(mutex_stop))
         .route("/mutex/request", post(mutex_request))
+        .route("/cops/client/start", post(cops_client_start))
+        .route("/cops/server/start", post(cops_server_start))
         .with_state(AppState {
             session: Default::default(),
         });
@@ -158,6 +160,68 @@ async fn mutex_request(State(state): State<AppState>) -> Response {
     match task.await {
         Ok(elapsed) => elapsed.into_response(),
         Err(err) => log_exit(err).into_response(),
+    }
+}
+
+async fn cops_client_start(
+    State(state): State<AppState>,
+    Json(config): Json<boson_control_messages::CopsClient>,
+) -> StatusCode {
+    if let Err(err) = async {
+        let mut session = state.session.lock().await;
+        anyhow::ensure!(session.is_none());
+        let (event_sender, _) = unbounded_channel();
+        let (_, upcall_receiver) = unbounded_channel();
+        let cancel = CancellationToken::new();
+        use boson_control_messages::CopsVariant::*;
+        let handle = match &config.variant {
+            Untrusted => todo!(),
+            Replicated(_) => tokio::spawn(boson_cops::pbft_client_session(config)),
+        };
+        *session = Some(AppSession {
+            handle,
+            cancel,
+            event_sender,
+            upcall: upcall_receiver,
+        });
+        anyhow::Ok(())
+    }
+    .await
+    {
+        log_exit(err)
+    } else {
+        StatusCode::OK
+    }
+}
+
+async fn cops_server_start(
+    State(state): State<AppState>,
+    Json(config): Json<boson_control_messages::CopsServer>,
+) -> StatusCode {
+    if let Err(err) = async {
+        let mut session = state.session.lock().await;
+        anyhow::ensure!(session.is_none());
+        let (event_sender, _) = unbounded_channel();
+        let (_, upcall_receiver) = unbounded_channel();
+        let cancel = CancellationToken::new();
+        use boson_control_messages::CopsVariant::*;
+        let handle = match &config.variant {
+            Untrusted => todo!(),
+            Replicated(_) => tokio::spawn(boson_cops::pbft_server_session(config, cancel.clone())),
+        };
+        *session = Some(AppSession {
+            handle,
+            cancel,
+            event_sender,
+            upcall: upcall_receiver,
+        });
+        anyhow::Ok(())
+    }
+    .await
+    {
+        log_exit(err)
+    } else {
+        StatusCode::OK
     }
 }
 

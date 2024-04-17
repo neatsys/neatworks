@@ -1,4 +1,7 @@
-use std::net::{IpAddr, SocketAddr};
+use std::{
+    net::{IpAddr, SocketAddr},
+    ops::Range,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +29,7 @@ pub struct MutexReplicated {
 pub struct CopsServer {
     pub addrs: Vec<SocketAddr>,
     pub id: u8,
+    pub record_count: usize,
     pub variant: CopsVariant,
 }
 
@@ -33,7 +37,10 @@ pub struct CopsServer {
 pub struct CopsClient {
     pub addrs: Vec<SocketAddr>,
     pub ip: IpAddr,
-    pub num_concurrent: usize,
+    pub num_concurrent: usize, // per instance
+    pub num_concurrent_put: usize,
+    pub record_count: usize,
+    pub put_range: Range<usize>,
     pub variant: CopsVariant,
 }
 

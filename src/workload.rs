@@ -282,9 +282,12 @@ pub mod events {
     // client support on `CloseLoop`
     // too lazy to refactor it off
     pub type InvokeOk<R = Payload> = (u32, R);
+
+    pub struct Stop;
 }
 
-pub struct Stop;
+pub trait Upcall: SendEvent<events::InvokeOk> {}
+impl<T: SendEvent<events::InvokeOk>> Upcall for T {}
 
 #[derive(Debug, Clone)]
 #[derive_where(PartialEq, Eq, Hash; W::Attach, E, SE)]
@@ -325,7 +328,7 @@ impl<W: Workload, E: SendEvent<events::Invoke<W::Op>>, SE> OnEvent<Init> for Clo
     }
 }
 
-impl<W: Workload, E: SendEvent<events::Invoke<W::Op>>, SE: SendEventOnce<Stop>>
+impl<W: Workload, E: SendEvent<events::Invoke<W::Op>>, SE: SendEventOnce<events::Stop>>
     OnEvent<events::InvokeOk<W::Result>> for CloseLoop<W, E, SE>
 {
     fn on_event(
@@ -343,7 +346,7 @@ impl<W: Workload, E: SendEvent<events::Invoke<W::Op>>, SE: SendEventOnce<Stop>>
         } else {
             let replaced = replace(&mut self.done, true);
             assert!(!replaced);
-            self.stop_sender.send(Stop)
+            self.stop_sender.send(events::Stop)
         }
     }
 }
