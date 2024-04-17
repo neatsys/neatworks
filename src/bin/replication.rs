@@ -1,6 +1,7 @@
 use std::{
     future::{pending, Future},
     iter::repeat_with,
+    mem::take,
     net::SocketAddr,
     sync::{Arc, Mutex},
     time::Duration,
@@ -237,7 +238,7 @@ async fn spawn_client_sessions<
         + Send
         + Sync
         + 'static,
-    W: Workload<Op = Payload, Result = Payload> + Into<Vec<Duration>> + Send + Sync + 'static,
+    W: Workload<Op = Payload, Result = Payload> + AsMut<Vec<Duration>> + Send + Sync + 'static,
 >(
     sessions: &mut JoinSet<anyhow::Result<()>>,
     config: ClientConfig,
@@ -293,7 +294,7 @@ where
             latencies
                 .lock()
                 .unwrap()
-                .extend(close_loop.0 .0.workload.into());
+                .extend(take(close_loop.workload.as_mut()));
             barrier.wait().await;
             Ok(())
         });

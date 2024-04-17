@@ -1,12 +1,12 @@
-use std::net::SocketAddr;
+use std::{mem::take, net::SocketAddr, time::Duration};
 
 use augustus::{
     app::{self, ycsb, App},
     crypto::{Crypto, CryptoFlavor},
     event::{
         self,
-        erased::{session::Sender, Blanket, Buffered, Session, Unify},
-        Once,
+        erased::{events::Init, session::Sender, Blanket, Buffered, Session, Unify},
+        Once, SendEvent,
     },
     net::{
         dispatch,
@@ -20,10 +20,13 @@ use augustus::{
 use boson_control_messages::{CopsClient, CopsServer, CopsVariant};
 use rand::{rngs::StdRng, thread_rng, SeedableRng};
 use rand_distr::Uniform;
-use tokio::{net::TcpListener, task::JoinSet};
+use tokio::{net::TcpListener, task::JoinSet, time::sleep};
 use tokio_util::sync::CancellationToken;
 
-pub async fn pbft_client_session(config: CopsClient) -> anyhow::Result<()> {
+pub async fn pbft_client_session(
+    config: CopsClient,
+    upcall: impl Clone + SendEvent<(f32, Duration)> + Send + Sync + 'static,
+) -> anyhow::Result<()> {
     let CopsClient {
         addrs,
         ip,
@@ -86,13 +89,30 @@ pub async fn pbft_client_session(config: CopsClient) -> anyhow::Result<()> {
             Json(workload),
         )));
 
+        let mut upcall = upcall.clone();
         sessions.spawn(async move {
             let dispatch_session = dispatch_session.run(&mut dispatch);
             let client_session = client_session.run(&mut client);
             let close_loop_session = async move {
-                //
-                close_loop_session.run(&mut close_loop).await?;
-                Ok(())
+                Sender::from(close_loop_session.sender()).send(Init)?;
+                tokio::select! {
+                    () = sleep(Duration::from_millis(5000)) => {}
+                    result = close_loop_session.run(&mut close_loop) => result?,
+                }
+                close_loop.workload.as_mut().clear();
+                tokio::select! {
+                    () = sleep(Duration::from_millis(10000)) => {}
+                    result = close_loop_session.run(&mut close_loop) => result?,
+                }
+                let latencies = take(close_loop.workload.as_mut());
+                tokio::select! {
+                    () = sleep(Duration::from_millis(5000)) => {}
+                    result = close_loop_session.run(&mut close_loop) => result?,
+                }
+                upcall.send((
+                    latencies.len() as f32 / 10.,
+                    latencies.iter().sum::<Duration>() / latencies.len().max(1) as u32,
+                ))
             };
             tokio::select! {
                 result = dispatch_session => result?,
@@ -101,6 +121,9 @@ pub async fn pbft_client_session(config: CopsClient) -> anyhow::Result<()> {
             }
             anyhow::bail!("unreachable")
         });
+    }
+    while let Some(result) = sessions.join_next().await {
+        result??
     }
     Ok(())
 }
@@ -172,4 +195,4 @@ pub async fn pbft_server_session(
     anyhow::bail!("unreachable")
 }
 
-// cSpell:words pbft
+// cSpell:words pbft upcall

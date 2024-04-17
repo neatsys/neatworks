@@ -22,10 +22,7 @@ use augustus::{
     workload::{events::InvokeOk, Queue},
 };
 use boson_control_messages::{MutexReplicated, MutexUntrusted};
-use tokio::{
-    net::TcpListener,
-    sync::mpsc::{UnboundedReceiver, UnboundedSender},
-};
+use tokio::{net::TcpListener, sync::mpsc::UnboundedReceiver};
 use tokio_util::sync::CancellationToken;
 
 pub enum Event {
@@ -36,7 +33,7 @@ pub enum Event {
 pub async fn untrusted_session(
     config: MutexUntrusted,
     mut events: UnboundedReceiver<Event>,
-    upcall: UnboundedSender<RequestOk>,
+    upcall: impl SendEvent<RequestOk> + Send + Sync + 'static,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let id = config.id;
@@ -107,7 +104,7 @@ pub async fn untrusted_session(
 pub async fn replicated_session(
     config: MutexReplicated,
     mut events: UnboundedReceiver<Event>,
-    upcall: UnboundedSender<RequestOk>,
+    upcall: impl SendEvent<RequestOk> + Send + Sync + 'static,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let id = config.id;

@@ -1,7 +1,7 @@
 mod boson_cops;
 mod boson_mutex;
 
-use std::{backtrace::BacktraceStatus, sync::Arc};
+use std::{backtrace::BacktraceStatus, sync::Arc, time::Duration};
 
 use axum::{
     extract::State,
@@ -28,10 +28,12 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/ok", get(ok))
         .route("/mutex/start", post(mutex_start))
-        .route("/mutex/stop", post(mutex_stop))
+        .route("/mutex/stop", post(stop))
         .route("/mutex/request", post(mutex_request))
-        .route("/cops/client/start", post(cops_client_start))
-        .route("/cops/server/start", post(cops_server_start))
+        .route("/cops/start-client", post(cops_start_client))
+        .route("/cops/poll-results", post(cops_poll_results))
+        .route("/cops/start-server", post(cops_start_server))
+        .route("/cops/stop-server", post(stop))
         .with_state(AppState {
             session: Default::default(),
         });
@@ -54,7 +56,13 @@ struct AppSession {
     handle: JoinHandle<anyhow::Result<()>>,
     cancel: CancellationToken,
     event_sender: UnboundedSender<boson_mutex::Event>,
-    upcall: UnboundedReceiver<augustus::lamport_mutex::events::RequestOk>,
+    upcall: UnboundedReceiver<Upcall>,
+}
+
+#[derive(derive_more::From)]
+enum Upcall {
+    RequestOk(augustus::lamport_mutex::events::RequestOk),
+    ThroughputLatency(f32, Duration),
 }
 
 fn log_exit(err: anyhow::Error) -> StatusCode {
@@ -127,7 +135,7 @@ async fn mutex_start(
     }
 }
 
-async fn mutex_stop(State(state): State<AppState>) -> StatusCode {
+async fn stop(State(state): State<AppState>) -> StatusCode {
     if let Err(err) = async {
         let mut session = state.session.lock().await;
         let Some(session) = session.take() else {
@@ -153,7 +161,8 @@ async fn mutex_request(State(state): State<AppState>) -> Response {
         let start = Instant::now();
         session.event_sender.send(boson_mutex::Event::Request)?;
         // TODO timeout
-        session.upcall.recv().await;
+        let result = session.upcall.recv().await;
+        anyhow::ensure!(matches!(result, Some(Upcall::RequestOk(_))));
         session.event_sender.send(boson_mutex::Event::Release)?;
         Ok(Json(start.elapsed()))
     };
@@ -163,7 +172,7 @@ async fn mutex_request(State(state): State<AppState>) -> Response {
     }
 }
 
-async fn cops_client_start(
+async fn cops_start_client(
     State(state): State<AppState>,
     Json(config): Json<boson_control_messages::CopsClient>,
 ) -> StatusCode {
@@ -171,12 +180,12 @@ async fn cops_client_start(
         let mut session = state.session.lock().await;
         anyhow::ensure!(session.is_none());
         let (event_sender, _) = unbounded_channel();
-        let (_, upcall_receiver) = unbounded_channel();
+        let (upcall_sender, upcall_receiver) = unbounded_channel();
         let cancel = CancellationToken::new();
         use boson_control_messages::CopsVariant::*;
         let handle = match &config.variant {
             Untrusted => todo!(),
-            Replicated(_) => tokio::spawn(boson_cops::pbft_client_session(config)),
+            Replicated(_) => tokio::spawn(boson_cops::pbft_client_session(config, upcall_sender)),
         };
         *session = Some(AppSession {
             handle,
@@ -194,7 +203,33 @@ async fn cops_client_start(
     }
 }
 
-async fn cops_server_start(
+async fn cops_poll_results(State(state): State<AppState>) -> Response {
+    let task = async {
+        let mut state_session = state.session.lock().await;
+        let Some(session) = state_session.as_mut() else {
+            anyhow::bail!("unimplemented")
+        };
+        if !session.upcall.is_closed() {
+            Ok(None)
+        } else {
+            let mut results = Vec::new();
+            while let Ok(result) = session.upcall.try_recv() {
+                let Upcall::ThroughputLatency(throughput, latency) = result else {
+                    anyhow::bail!("unimplemented")
+                };
+                results.push((throughput, latency))
+            }
+            state_session.take().unwrap().handle.await??;
+            Ok(Some(results))
+        }
+    };
+    match task.await {
+        Ok(results) => Json(results).into_response(),
+        Err(err) => log_exit(err).into_response(),
+    }
+}
+
+async fn cops_start_server(
     State(state): State<AppState>,
     Json(config): Json<boson_control_messages::CopsServer>,
 ) -> StatusCode {
@@ -225,4 +260,4 @@ async fn cops_server_start(
     }
 }
 
-// cSpell:words upcall lamport
+// cSpell:words upcall lamport pbft

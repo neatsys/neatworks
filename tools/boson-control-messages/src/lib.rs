@@ -44,13 +44,13 @@ pub struct CopsClient {
     pub variant: CopsVariant,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CopsVariant {
     Untrusted,
     Replicated(CopsReplicated),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CopsReplicated {
     pub num_faulty: usize,
 }

@@ -42,8 +42,6 @@ use rand_distr::{WeightedAliasIndex, Zeta, Zipf};
 use rustc_hash::FxHasher;
 use serde::{Deserialize, Serialize};
 
-use crate::workload;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Op {
     Read(String),
@@ -177,7 +175,7 @@ impl WorkloadSettings {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, derive_more::AsMut)]
 pub struct Workload<R> {
     rng: R,
     settings: WorkloadSettings,
@@ -192,6 +190,7 @@ pub struct Workload<R> {
 
     transaction_count: usize,
     rmw_update: Option<Op>,
+    #[as_mut]
     pub latencies: Vec<Duration>,
     start: Option<Instant>,
 }
@@ -458,12 +457,6 @@ impl<R: Rng> crate::workload::Workload for Workload<R> {
             self.latencies.push(start.elapsed())
         }
         Ok(())
-    }
-}
-
-impl<R> From<workload::Json<Workload<R>>> for Vec<Duration> {
-    fn from(value: workload::Json<Workload<R>>) -> Self {
-        value.0.latencies
     }
 }
 

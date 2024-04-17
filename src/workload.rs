@@ -61,10 +61,11 @@ impl<T: Iterator<Item = O>, O, R> Workload for Iter<T, O, R> {
 // generally speaking, there should be a concept of "transaction" that composed from one or more
 // ops, and latency is mean to be measured against transactions
 // currently the transaction concept is skipped, maybe revisit the design later
-#[derive(Debug, derive_more::Deref)]
+#[derive(Debug, derive_more::Deref, derive_more::AsMut)]
 pub struct OpLatency<W> {
     #[deref]
     inner: W,
+    #[as_mut]
     pub latencies: Vec<Duration>,
 }
 
@@ -247,8 +248,14 @@ impl<I: Iterator<Item = (O, R)>, O, R: Debug + Eq + Send + Sync + 'static> Workl
     }
 }
 
-#[derive(Debug, Clone, derive_more::Deref)]
+#[derive(Debug, Clone, derive_more::Deref, derive_more::DerefMut)]
 pub struct Json<W>(pub W);
+
+impl<W: AsMut<T>, T> AsMut<T> for Json<W> {
+    fn as_mut(&mut self) -> &mut T {
+        self.0.as_mut()
+    }
+}
 
 impl<W: Workload> Workload for Json<W>
 where
