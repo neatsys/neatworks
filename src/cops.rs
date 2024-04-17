@@ -62,7 +62,7 @@ use crate::{
 };
 
 // "key" under COPS context, "id" under Boson's logical clock context
-pub type KeyId = u32;
+pub type KeyId = u64;
 
 // `PartialOrd` for causality check: whether `self` happens after `other` in the
 // sense of causality
@@ -123,11 +123,11 @@ pub trait ClientNet<A, V>: SendMessage<A, GetOk<V>> + SendMessage<A, PutOk<V>> {
 impl<T: SendMessage<A, GetOk<V>> + SendMessage<A, PutOk<V>>, A, V> ClientNet<A, V> for T {}
 
 pub trait ServerNet<A, V>:
-    SendMessage<u8, Put<V, A>> + SendMessage<u8, Get<A>> + SendMessage<All, SyncKey<V>>
+    SendMessage<A, Put<V, A>> + SendMessage<A, Get<A>> + SendMessage<All, SyncKey<V>>
 {
 }
 impl<
-        T: SendMessage<u8, Put<V, A>> + SendMessage<u8, Get<A>> + SendMessage<All, SyncKey<V>>,
+        T: SendMessage<A, Put<V, A>> + SendMessage<A, Get<A>> + SendMessage<All, SyncKey<V>>,
         A,
         V,
     > ServerNet<A, V> for T
@@ -154,7 +154,7 @@ pub mod events {
 
 pub struct Client<N, U, V, A> {
     addr: A,
-    id: u8, // server id that send messages to
+    server_addr: A, // local server address, the one client always contacts
     deps: BTreeMap<KeyId, V>,
     working_key: Option<KeyId>,
 
@@ -165,7 +165,11 @@ pub struct Client<N, U, V, A> {
 impl<N: ServerNet<A, V>, U, V: Version, A: Addr> OnEvent<ycsb::Op> for Client<N, U, V, A> {
     fn on_event(&mut self, op: ycsb::Op, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
         let key = match &op {
-            ycsb::Op::Read(key) | ycsb::Op::Update(key, ..) => key.parse()?,
+            ycsb::Op::Read(key) | ycsb::Op::Update(key, ..) => key
+                // easy way to adapt current YCSB key format (easier than adapt on YCSB side)
+                .strip_prefix("user")
+                .ok_or(anyhow::format_err!("malformed key name: {key}"))?
+                .parse()?,
             _ => anyhow::bail!("unimplemented"),
         };
         let replaced = self.working_key.replace(key);
@@ -184,14 +188,14 @@ impl<N: ServerNet<A, V>, U, V: Version, A: Addr> OnEvent<ycsb::Op> for Client<N,
                     deps: self.deps.clone(),
                     client_addr: self.addr.clone(),
                 };
-                self.net.send(self.id, put) // TODO
+                self.net.send(self.server_addr.clone(), put)
             }
             ycsb::Op::Read(_) => {
                 let get = Get {
                     key,
                     client_addr: self.addr.clone(),
                 };
-                self.net.send(self.id, get)
+                self.net.send(self.server_addr.clone(), get)
             }
             _ => unreachable!(),
         }

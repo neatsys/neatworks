@@ -61,53 +61,6 @@ pub enum Result {
     Ok,
 }
 
-#[derive(Clone)]
-pub struct Workload<R> {
-    rng: R,
-    settings: WorkloadSettings,
-
-    insert_key_num: usize,          // `keyseqence`
-    insert_state: Arc<InsertState>, // `transactioninsertkeysequence`
-
-    field_length: Gen,
-    key_num: Gen,
-    scan_len: Gen,
-    transaction: WeightedAliasIndex<f32>,
-
-    transaction_count: usize,
-    rmw_update: Option<Op>,
-    pub latencies: Vec<Duration>,
-    start: Option<Instant>,
-}
-
-struct InsertState {
-    next_num: AtomicUsize,
-    // possibly feasible to implement with AtomicUsize as well, but too hard for me
-    inserted_nums: Mutex<(usize, HashSet<usize>)>,
-}
-
-impl InsertState {
-    fn next_num(&self) -> usize {
-        self.next_num.fetch_add(1, SeqCst)
-    }
-
-    fn next_inserted_num(&self) -> usize {
-        self.inserted_nums.lock().unwrap().0
-    }
-
-    fn ack(&self, n: usize) {
-        let (next_inserted_num, inserted_nums) = &mut *self.inserted_nums.lock().unwrap();
-        if n != *next_inserted_num {
-            inserted_nums.insert(n);
-            return;
-        }
-        while {
-            *next_inserted_num += 1;
-            inserted_nums.remove(next_inserted_num)
-        } {}
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct WorkloadSettings {
     pub record_count: usize,
@@ -155,71 +108,124 @@ impl WorkloadSettings {
     }
 
     pub fn new_a(record_count: usize) -> Self {
-        let mut settings = Self::new(record_count);
-        settings.read_proportion = 0.5;
-        settings.update_proportion = 0.5;
-        settings.scan_proportion = 0.;
-        settings.insert_proportion = 0.;
-        settings.request_distr = SettingsDistr::Zipfian;
-        settings
+        Self {
+            read_proportion: 0.5,
+            update_proportion: 0.5,
+            scan_proportion: 0.,
+            insert_proportion: 0.,
+            request_distr: SettingsDistr::Zipfian,
+            ..Self::new(record_count)
+        }
     }
 
     pub fn new_b(record_count: usize) -> Self {
-        let mut settings = Self::new(record_count);
-        settings.read_proportion = 0.95;
-        settings.update_proportion = 0.05;
-        settings.scan_proportion = 0.;
-        settings.insert_proportion = 0.;
-        settings.request_distr = SettingsDistr::Zipfian;
-        settings
+        Self {
+            read_proportion: 0.95,
+            update_proportion: 0.05,
+            scan_proportion: 0.,
+            insert_proportion: 0.,
+            request_distr: SettingsDistr::Zipfian,
+            ..Self::new(record_count)
+        }
     }
 
     pub fn new_c(record_count: usize) -> Self {
-        let mut settings = Self::new(record_count);
-        settings.read_proportion = 1.;
-        settings.update_proportion = 0.;
-        settings.scan_proportion = 0.;
-        settings.insert_proportion = 0.;
-        settings.request_distr = SettingsDistr::Zipfian;
-        settings
+        Self {
+            read_proportion: 1.,
+            update_proportion: 0.,
+            scan_proportion: 0.,
+            insert_proportion: 0.,
+            request_distr: SettingsDistr::Zipfian,
+            ..Self::new(record_count)
+        }
     }
 
     pub fn new_d(record_count: usize) -> Self {
-        let mut settings = Self::new(record_count);
-        settings.read_proportion = 0.95;
-        settings.update_proportion = 0.;
-        settings.scan_proportion = 0.;
-        settings.insert_proportion = 0.05;
-        settings.request_distr = SettingsDistr::Latest;
-        settings
+        Self {
+            read_proportion: 0.95,
+            update_proportion: 0.,
+            scan_proportion: 0.,
+            insert_proportion: 0.05,
+            request_distr: SettingsDistr::Latest,
+            ..Self::new(record_count)
+        }
     }
 
     pub fn new_e(record_count: usize) -> Self {
-        let mut settings = Self::new(record_count);
-        settings.read_proportion = 0.;
-        settings.update_proportion = 0.;
-        settings.scan_proportion = 0.95;
-        settings.insert_proportion = 0.05;
-        settings.request_distr = SettingsDistr::Zipfian;
-        settings.max_scan_length = 100;
-        settings.scan_length_distr = SettingsDistr::Uniform;
-        settings
+        Self {
+            read_proportion: 0.,
+            update_proportion: 0.,
+            scan_proportion: 0.95,
+            insert_proportion: 0.05,
+            request_distr: SettingsDistr::Zipfian,
+            max_scan_length: 100,
+            scan_length_distr: SettingsDistr::Uniform,
+            ..Self::new(record_count)
+        }
     }
 
     pub fn new_f(record_count: usize) -> Self {
-        let mut settings = Self::new(record_count);
-        settings.read_proportion = 0.5;
-        settings.update_proportion = 0.;
-        settings.scan_proportion = 0.;
-        settings.insert_proportion = 0.;
-        settings.read_modify_write_proportion = 0.5;
-        settings.request_distr = SettingsDistr::Zipfian;
-        settings
+        Self {
+            read_proportion: 0.5,
+            update_proportion: 0.,
+            scan_proportion: 0.,
+            insert_proportion: 0.,
+            read_modify_write_proportion: 0.5,
+            request_distr: SettingsDistr::Zipfian,
+            ..Self::new(record_count)
+        }
     }
 }
 
 #[derive(Clone)]
-enum Gen {
+pub struct Workload<R> {
+    rng: R,
+    settings: WorkloadSettings,
+
+    insert_key_num: usize,          // `keysequence`
+    insert_state: Arc<InsertState>, // `transactioninsertkeysequence`
+
+    field_length: Gen,
+    pub key_num: Gen,
+    scan_len: Gen,
+    transaction: WeightedAliasIndex<f32>,
+
+    transaction_count: usize,
+    rmw_update: Option<Op>,
+    pub latencies: Vec<Duration>,
+    start: Option<Instant>,
+}
+
+struct InsertState {
+    next_num: AtomicUsize,
+    // possibly feasible to implement with AtomicUsize as well, but too hard for me
+    num_inserted: Mutex<(usize, HashSet<usize>)>,
+}
+
+impl InsertState {
+    fn next_num(&self) -> usize {
+        self.next_num.fetch_add(1, SeqCst)
+    }
+
+    fn next_inserted_num(&self) -> usize {
+        self.num_inserted.lock().unwrap().0
+    }
+
+    fn ack(&self, n: usize) {
+        let (next_inserted_num, num_inserted) = &mut *self.num_inserted.lock().unwrap();
+        if n != *next_inserted_num {
+            num_inserted.insert(n);
+            return;
+        }
+        while {
+            *next_inserted_num += 1;
+            num_inserted.remove(next_inserted_num)
+        } {}
+    }
+}
+
+#[derive(Clone)]
+pub enum Gen {
     Constant(usize),
     Uniform(Uniform<usize>),
     ScrambledZipf(GenScrambledZipf),
@@ -227,7 +233,7 @@ enum Gen {
 }
 
 #[derive(Clone)]
-struct GenScrambledZipf {
+pub struct GenScrambledZipf {
     min: usize,
     item_count: usize,
     zeta: Zeta<f32>,
@@ -247,8 +253,8 @@ impl Gen {
                     // however during testing, that results in only `min` i.e. 1 is ever yielded
                     // that means only single key will every be accessed, which hardly be expected
                     // while tuning the parameter, i realize the absolute number of different values
-                    // that will be yielded is controled solely by this parameter, not by e.g. `n`
-                    // yet to investigate into this, but suspect the hopspot distribution is to
+                    // that will be yielded is controlled solely by this parameter, not by e.g. `n`
+                    // yet to investigate into this, but suspect the hotspot distribution is to
                     // solve this issue
                     zeta: Zeta::new(6.)?,
                 })
@@ -298,7 +304,7 @@ impl<R> Workload<R> {
             insert_key_num: 0,
             insert_state: Arc::new(InsertState {
                 next_num: AtomicUsize::new(settings.record_count),
-                inserted_nums: Mutex::new((settings.record_count, Default::default())),
+                num_inserted: Mutex::new((settings.record_count, Default::default())),
             }),
             field_length: Gen::new(settings.field_length_distr, settings.field_length, false)?,
             key_num: if matches!(settings.request_distr, SettingsDistr::Latest) {
@@ -399,7 +405,6 @@ impl<R: Rng> crate::workload::Workload for Workload<R> {
             if Some(self.transaction_count) == self.settings.operation_count {
                 break 'op None;
             }
-            self.start = Some(Instant::now());
             let transaction = Self::TRANSACTIONS[self.transaction.sample(&mut self.rng)];
             let field = if !matches!(transaction, Transaction::Insert | Transaction::Read) {
                 self.rng.gen_range(0..self.settings.field_count)
@@ -412,6 +417,7 @@ impl<R: Rng> crate::workload::Workload for Workload<R> {
                 self.key_num()
             };
             let key_name = self.build_key_name(key_num);
+            self.start = Some(Instant::now());
             Some(match transaction {
                 Transaction::Read => Op::Read(key_name),
                 Transaction::Update => Op::Update(key_name, field, self.build_value()),
@@ -497,3 +503,7 @@ mod tests {
         Ok(())
     }
 }
+
+// cSpell:words zipf zipfian ycsb hasher rustc nonoverlapping hotspot
+// cSpell:ignore insertstart insertcount recordcount operationcount keysequence
+// cSpell:ignore transactioninsertkeysequence

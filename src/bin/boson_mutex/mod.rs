@@ -71,6 +71,7 @@ pub async fn untrusted_session(
         lamport_mutex::MessageNet::<_, LamportClock>::new(IndexNet::new(
             dispatch::Net::from(dispatch_session.sender()),
             config.addrs,
+            // intentionally sending loopback messages as expected by processor protocol
             None,
         )),
     )?));
