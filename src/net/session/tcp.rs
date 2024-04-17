@@ -50,6 +50,7 @@ impl Tcp {
     ) {
         let remote = remote.into();
         if let Err(err) = async {
+            let mut buf = Vec::new();
             loop {
                 let len = match stream.read_u64().await {
                     Ok(len) => len as _,
@@ -57,7 +58,7 @@ impl Tcp {
                     Err(err) => Err(err)?,
                 };
                 anyhow::ensure!(len <= MAX_BUF_LEN, "invalid buffer length {len}");
-                let mut buf = vec![0; len];
+                buf.resize(len, Default::default());
                 stream.read_exact(&mut buf).await?;
                 on_buf(&buf)?
             }

@@ -14,8 +14,9 @@ use augustus::{
         SendCryptoEvent,
     },
     net::{
+        self,
         events::Recv,
-        kademlia::{Control, Multicast, PeerNet},
+        kademlia::{Control, Multicast},
         session::Udp,
         SendMessage,
     },
@@ -94,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
         bootstrapped_sender.send_once(())? // skip bootstrap on seed peer
     }
 
-    let mut peer_net = PeerNet(Sender::from(control_session.sender()));
+    let mut peer_net = net::Detach(Sender::from(control_session.sender()));
     let hello_session = spawn({
         let mut peer_net = peer_net.clone();
         async move {

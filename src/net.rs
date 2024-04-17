@@ -233,6 +233,7 @@ impl<C: SendEvent<Invoke<Payload>>, A, B: Buf> SendMessage<A, B> for InvokeNet<C
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Detach<E>(pub E);
 
 pub struct DetachSend<A, M>(pub A, pub M);

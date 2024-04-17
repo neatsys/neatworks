@@ -434,7 +434,7 @@ impl<M: PeerCommon> Peer<M::N, M::U, M::CW, M::E, M::A, M> {
 
 #[derive(Debug, Clone)]
 struct ResendFindPeer<A>(Target, PeerRecord<PublicKey, A>);
-const RESEND_FIND_PEER_DURATION: Duration = Duration::from_millis(2500);
+const RESEND_FIND_PEER_DURATION: Duration = Duration::from_millis(800);
 
 impl<M: PeerCommon> OnEvent<Signed<FindPeer<M::A>>> for Peer<M::N, M::U, M::CW, M::E, M::A, M> {
     fn on_event(

@@ -27,11 +27,7 @@ use augustus::{
         session, BlackHole, Once, SendEvent, Unify,
     },
     kademlia::{self, Buckets, PeerRecord, Query, SendCryptoEvent},
-    net::{
-        dispatch,
-        kademlia::{Control, PeerNet},
-        Dispatch,
-    },
+    net::{dispatch, kademlia::Control, Detach, Dispatch},
     util::Payload,
     worker::{Submit, Worker},
 };
@@ -329,7 +325,7 @@ async fn start_peer(
         config.chunk_k,
         config.chunk_n,
         config.chunk_m,
-        Box::new(MessageNet::<_, SocketAddr>::new(PeerNet(Sender::from(
+        Box::new(MessageNet::<_, SocketAddr>::new(Detach(Sender::from(
             kademlia_control_session.sender(),
         )))) as _,
         Box::new(bulk_sender.clone()) as _,
@@ -366,7 +362,7 @@ async fn start_peer(
     let bulk_session = bulk::session(
         ip,
         bulk_receiver,
-        MessageNet::<_, SocketAddr>::new(PeerNet(Sender::from(kademlia_control_session.sender()))),
+        MessageNet::<_, SocketAddr>::new(Detach(Sender::from(kademlia_control_session.sender()))),
         Sender::from(peer_session.sender()),
     );
     let kademlia_control_session = kademlia_control_session.run(&mut kademlia_control);
