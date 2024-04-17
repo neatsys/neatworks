@@ -1,6 +1,6 @@
 use std::{fs::write, path::Path};
 
-use boson::{index_secret, public_key, Clock};
+use boson_circuit::{index_secret, public_key, Clock};
 use plonky2::plonk::circuit_data::CircuitConfig;
 
 fn main() -> anyhow::Result<()> {

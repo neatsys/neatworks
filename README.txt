@@ -1,28 +1,11 @@
 Ultimate codebase for distributed system researching in Rust.
 
-This codebase consists of following things.
+The codebase is built around a set of simple yet powerful event driven abstractions. Message passing is used for dual purposes: for the concurrency management and as the polymorphism mechanism among state machines. And yes, each protocol is implemented into an event driven state machine that fully decoupled with IO, worker thread pool, and even itself.
 
-A universal event-driven abstraction, i.e. `SendEvent` and `OnEvent`, that unifies protocol implementations.
+The codebase aims both performance and correctness. The state machine abstraction is near zero cost and compatible with highly efficiency event loops. At the same time, extensive simulation and even model checking are able to be performed against the state machines.
 
-Wrapping layers for various libraries to deliver messages and timeouts, perform cryptographic operations, etc.
+The codebase contains selected dependencies that are verified to work well with each other, and demonstrates a best practice of constructing artifact for evaluation of distributed system academic researching.
 
-Bridge the gaps between the abstracted protocols and wrapping layers with combinators. For example, replication protocols usually work with network models that deliver structural mesasges to indexed destination. In order to support it with TCP/UDP network, we use one combinator to translate replica indexes into socket addresses, and then use another combinator to serialize messages into raw bytes.
+Finally the codebase contains plenty of implementations of previous works in a unified form, which are good baselines to compare and starting point for experimenting modifications. TODO list all implemented protocols and applications.
 
-Finally, for the cases that the boilerblate cannot be modeled into combinators, e.g. consolidating multiple `impl OnEvent`s into systems for benchmarking or testing, provide showcases for reference and templating.
-
-The codebase contains selected dependencies that are verified to work well with each other, and demonstrates best practice of constructing software for various purpose, including:
-* event loop solutions based on `tokio` and `std`
-* IO solutions based on `tokio` and `std`
-* timer service providers: `tokio` and a baseline implementation
-* `anyhow` as error solution
-* `bincode` as (de)serialization solution (with occasionally used `serde_json`)
-* `Hash`-based digest solution and `sha2` as digest library
-* `secp256k1` as cryptographic library
-* `axum`-based HTTP server as standalone, command line argument free evaluation artifact
-* `reqwest`-based control plane
-* `terraform`-based cluster/infrastracture management
-* `tracing` as logging solution
-
-The codebase is intentionally published under a restricted license, as it's intended for non-commercial use and all forkings are expected to be contributed back to upstream eventually. Besides it is inherently never production ready because e.g. breaking changes happen all the time.
-
-TODO list all implemented protocols and applications.
+The codebase is intentionally published under a restricted license, as it's intended for non-commercial use and all forking are expected to be contributed back to upstream eventually. Besides it is inherently never production ready because e.g. breaking changes happen all the time.

@@ -1,4 +1,5 @@
 pub mod app;
+pub mod boson;
 pub mod bulk;
 pub mod cops;
 pub mod crypto;

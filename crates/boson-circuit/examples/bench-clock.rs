@@ -1,4 +1,4 @@
-use boson::{index_secret, Clock};
+use boson_circuit::{index_secret, Clock};
 use plonky2::plonk::circuit_data::CircuitConfig;
 // use plonky2_maybe_rayon::rayon;
 use tracing::info;
@@ -21,7 +21,7 @@ fn main() -> anyhow::Result<()> {
             move |()| {
                 let secret = index_secret(i);
                 i += 1;
-                boson::public_key(secret)
+                boson_circuit::public_key(secret)
             }
         }),
         config,
