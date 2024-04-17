@@ -6,9 +6,8 @@ use augustus::{
     event::{erased, OnEvent, OnTimer, SendEvent, Session, Unify},
     net::{deserialize, session::Udp, All, IndexNet, InvokeNet, MessageNet, SendMessage},
     pbft,
-    util::Queue,
     worker::{Submit, Worker},
-    workload::InvokeOk,
+    workload::{events::InvokeOk, Queue},
 };
 use serde::{Deserialize, Serialize};
 use tokio::net::UdpSocket;

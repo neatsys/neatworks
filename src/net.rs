@@ -21,8 +21,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::{
     event::{erased::OnEvent, BlackHole, SendEvent},
-    util::Payload,
-    workload::Invoke,
+    workload::events::Invoke,
 };
 
 pub trait Addr:
@@ -136,7 +135,7 @@ pub mod events {
 pub struct SendAddr<E>(pub E);
 
 #[derive_where(Debug)]
-pub struct Auto<A>(#[derive_where(skip)] PhantomData<A>); // TODO better name
+pub struct Auto<A>(PhantomData<A>); // TODO better name
 
 impl<E: SendEvent<M>, M> SendMessage<SendAddr<E>, M> for Auto<SendAddr<E>> {
     fn send(&mut self, mut dest: SendAddr<E>, message: M) -> anyhow::Result<()> {
@@ -145,7 +144,7 @@ impl<E: SendEvent<M>, M> SendMessage<SendAddr<E>, M> for Auto<SendAddr<E>> {
 }
 
 #[derive_where(Debug, Clone; T)]
-pub struct MessageNet<T, M>(pub T, #[derive_where(skip)] PhantomData<M>);
+pub struct MessageNet<T, M>(T, PhantomData<M>);
 
 impl<T, M> MessageNet<T, M> {
     pub fn new(raw_net: T) -> Self {
@@ -253,6 +252,45 @@ impl<N: SendMessage<A, M>, A, M> OnEvent<DetachSend<A, M>> for N {
         SendMessage::send(self, dest, message)
     }
 }
+
+#[derive(
+    Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default, derive_more::Deref, Serialize, Deserialize,
+)]
+pub struct Payload(pub Vec<u8>);
+
+impl Debug for Payload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Ok(s) = std::str::from_utf8(&self.0) {
+            write!(f, "Payload(\"{s}\")")
+        } else {
+            write!(
+                f,
+                "Payload({}{})",
+                self.0
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .take(32)
+                    .collect::<Vec<_>>()
+                    .concat(),
+                if self.0.len() > 32 {
+                    format!(".. <len {}>", self.0.len())
+                } else {
+                    String::new()
+                }
+            )
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Request<A> {
+    pub client_id: u32,
+    pub client_addr: A,
+    pub seq: u32,
+    pub op: Payload,
+}
+
+// cSpell:words bincode deque
 
 pub mod blocking;
 pub mod dispatch;

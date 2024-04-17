@@ -10,8 +10,8 @@ use augustus::{
         SendEvent, SendEventOnce,
     },
     kademlia::{
-        Buckets, CryptoWorker, FindPeer, FindPeerOk, Peer, PeerId, PeerRecord, Query,
-        SendCryptoEvent,
+        Buckets, CryptoWorker, FindPeer, FindPeerOk, Peer, PeerId, PeerRecord, SendCryptoEvent,
+        Upcall,
     },
     net::{
         self,
@@ -69,7 +69,8 @@ async fn main() -> anyhow::Result<()> {
         peer = Peer::new(
             buckets,
             MessageNet::new(socket_net.clone()),
-            Sender::from(control_session.sender()),
+            Box::new(Sender::from(control_session.sender()))
+                as Box<dyn Upcall<SocketAddr> + Send + Sync>,
             Box::new(CryptoWorker::from(Worker::Inline(
                 crypto,
                 Sender::from(peer_session.sender()),
@@ -86,7 +87,8 @@ async fn main() -> anyhow::Result<()> {
         peer = Peer::new(
             buckets,
             MessageNet::new(socket_net.clone()),
-            Sender::from(control_session.sender()),
+            Box::new(Sender::from(control_session.sender()))
+                as Box<dyn Upcall<SocketAddr> + Send + Sync>,
             Box::new(CryptoWorker::from(Worker::Inline(
                 seed_crypto,
                 Sender::from(peer_session.sender()),
@@ -135,7 +137,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut control = Blanket(Buffered::from(Control::new(
         MessageNet::new(socket_net.clone()),
-        Box::new(Sender::from(peer_session.sender())) as Box<dyn SendEvent<Query> + Send + Sync>,
+        Sender::from(peer_session.sender()),
     )));
     let mut peer = Blanket(Buffered::from(peer));
     let peer_session = peer_session.run(&mut peer);
@@ -149,4 +151,4 @@ async fn main() -> anyhow::Result<()> {
     Err(anyhow::format_err!("unreachable"))
 }
 
-// cSpell:words kademlia bincode seedable
+// cSpell:words kademlia bincode seedable upcall

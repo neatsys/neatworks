@@ -3,6 +3,7 @@
 // maybe not the most reasonable organization but makes enough sense to me
 
 use std::{
+    collections::VecDeque,
     fmt::Debug,
     mem::replace,
     sync::{
@@ -20,7 +21,7 @@ use crate::{
         erased::{events::Init, OnEvent},
         BlackHole, OnTimer, SendEvent, SendEventOnce, Timer,
     },
-    util::Payload,
+    net::Payload,
 };
 
 pub trait Workload {
@@ -270,14 +271,18 @@ where
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Invoke<O = Payload>(pub O);
+pub mod events {
+    use crate::net::Payload;
 
-// newtype namespace may be desired after the type erasure migration
-// the `u32` field was for client id, and becomes unused after remove multiple
-// client support on `CloseLoop`
-// too lazy to refactor it off
-pub type InvokeOk<R = Payload> = (u32, R);
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    pub struct Invoke<O = Payload>(pub O);
+
+    // newtype namespace may be desired after the type erasure migration
+    // the `u32` field was for client id, and becomes unused after remove multiple
+    // client support on `CloseLoop`
+    // too lazy to refactor it off
+    pub type InvokeOk<R = Payload> = (u32, R);
+}
 
 pub struct Stop;
 
@@ -308,7 +313,7 @@ impl<W: Workload, E> CloseLoop<W, E> {
     }
 }
 
-impl<W: Workload, E: SendEvent<Invoke<W::Op>>, SE> OnEvent<Init> for CloseLoop<W, E, SE> {
+impl<W: Workload, E: SendEvent<events::Invoke<W::Op>>, SE> OnEvent<Init> for CloseLoop<W, E, SE> {
     fn on_event(&mut self, Init: Init, _: &mut impl Timer) -> anyhow::Result<()> {
         let (op, attach) = self
             .workload
@@ -316,16 +321,16 @@ impl<W: Workload, E: SendEvent<Invoke<W::Op>>, SE> OnEvent<Init> for CloseLoop<W
             .ok_or(anyhow::format_err!("not enough op"))?;
         let replaced = self.workload_attach.replace(attach);
         anyhow::ensure!(replaced.is_none(), "duplicated launching");
-        self.sender.send(Invoke(op))
+        self.sender.send(events::Invoke(op))
     }
 }
 
-impl<W: Workload, E: SendEvent<Invoke<W::Op>>, SE: SendEventOnce<Stop>> OnEvent<InvokeOk<W::Result>>
-    for CloseLoop<W, E, SE>
+impl<W: Workload, E: SendEvent<events::Invoke<W::Op>>, SE: SendEventOnce<Stop>>
+    OnEvent<events::InvokeOk<W::Result>> for CloseLoop<W, E, SE>
 {
     fn on_event(
         &mut self,
-        (_, result): InvokeOk<W::Result>,
+        (_, result): events::InvokeOk<W::Result>,
         _: &mut impl Timer,
     ) -> anyhow::Result<()> {
         let Some(attach) = self.workload_attach.take() else {
@@ -334,7 +339,7 @@ impl<W: Workload, E: SendEvent<Invoke<W::Op>>, SE: SendEventOnce<Stop>> OnEvent<
         self.workload.on_result(result, attach)?;
         if let Some((op, attach)) = self.workload.next_op()? {
             self.workload_attach.replace(attach);
-            self.sender.send(Invoke(op))
+            self.sender.send(events::Invoke(op))
         } else {
             let replaced = replace(&mut self.done, true);
             assert!(!replaced);
@@ -344,6 +349,55 @@ impl<W: Workload, E: SendEvent<Invoke<W::Op>>, SE: SendEventOnce<Stop>> OnEvent<
 }
 
 impl<W: Workload, E, SE> OnTimer for CloseLoop<W, E, SE> {
+    fn on_timer(&mut self, _: crate::event::TimerId, _: &mut impl Timer) -> anyhow::Result<()> {
+        unreachable!()
+    }
+}
+
+pub struct Queue<E, O> {
+    sender: E,
+    ops: Option<VecDeque<O>>,
+}
+
+impl<E, O> Queue<E, O> {
+    pub fn new(sender: E) -> Self {
+        Self {
+            sender,
+            ops: Default::default(),
+        }
+    }
+}
+
+impl<E: SendEvent<events::Invoke<O>>, O> OnEvent<events::Invoke<O>> for Queue<E, O> {
+    fn on_event(
+        &mut self,
+        events::Invoke(op): events::Invoke<O>,
+        _: &mut impl Timer,
+    ) -> anyhow::Result<()> {
+        if let Some(ops) = &mut self.ops {
+            ops.push_back(op);
+            Ok(())
+        } else {
+            self.ops = Some(Default::default());
+            self.sender.send(events::Invoke(op))
+        }
+    }
+}
+
+impl<E: SendEvent<events::Invoke<O>>, O, R> OnEvent<events::InvokeOk<R>> for Queue<E, O> {
+    fn on_event(&mut self, _: events::InvokeOk<R>, _: &mut impl Timer) -> anyhow::Result<()> {
+        if let Some(ops) = &mut self.ops {
+            if let Some(op) = ops.pop_front() {
+                self.sender.send(events::Invoke(op))?
+            } else {
+                self.ops = None
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<E, O> OnTimer for Queue<E, O> {
     fn on_timer(&mut self, _: crate::event::TimerId, _: &mut impl Timer) -> anyhow::Result<()> {
         unreachable!()
     }

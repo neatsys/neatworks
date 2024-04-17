@@ -16,7 +16,10 @@ use crate::{
         erased::{OnEventRichTimer as OnEvent, RichTimer as Timer},
         SendEvent, TimerId,
     },
-    kademlia::{PeerId, Query, QueryResult, QueryStatus, Target},
+    kademlia::{
+        events::{Query, QueryResult, QueryStatus},
+        PeerId, Target,
+    },
 };
 
 use super::{Addr, DetachSend, SendMessage, SendMessageToEach, SendMessageToEachExt as _};

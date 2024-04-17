@@ -263,7 +263,7 @@ impl<CN, U, C> Processor<CN, U, C> {
     }
 }
 
-pub mod event {
+pub mod events {
     pub struct Request;
     pub struct RequestOk;
     pub struct Release;
@@ -272,10 +272,10 @@ pub mod event {
 pub trait Net: SendMessage<u8, Message> + SendMessage<All, Message> {}
 impl<T: SendMessage<u8, Message> + SendMessage<All, Message>> Net for T {}
 
-impl<CN: SendMessage<All, Message>, U, C> OnEvent<event::Request> for Processor<CN, U, C> {
+impl<CN: SendMessage<All, Message>, U, C> OnEvent<events::Request> for Processor<CN, U, C> {
     fn on_event(
         &mut self,
-        event::Request: event::Request,
+        events::Request: events::Request,
         _: &mut impl Timer,
     ) -> anyhow::Result<()> {
         let replaced = replace(&mut self.requesting, true);
@@ -286,7 +286,7 @@ impl<CN: SendMessage<All, Message>, U, C> OnEvent<event::Request> for Processor<
     }
 }
 
-impl<CN: SendMessage<u8, Message>, U: SendEvent<event::RequestOk>, C: Clock>
+impl<CN: SendMessage<u8, Message>, U: SendEvent<events::RequestOk>, C: Clock>
     OnEvent<Recv<Clocked<Message, C>>> for Processor<CN, U, C>
 {
     fn on_event(
@@ -334,7 +334,7 @@ impl<CN: SendMessage<u8, Message>, U: SendEvent<event::RequestOk>, C: Clock>
     }
 }
 
-impl<CN, U: SendEvent<event::RequestOk>, C: Clock> Processor<CN, U, C> {
+impl<CN, U: SendEvent<events::RequestOk>, C: Clock> Processor<CN, U, C> {
     fn check_requested(&mut self) -> anyhow::Result<()> {
         // self Request, requesting == true
         // all others Request are Release, while loopback Request still not received
@@ -351,16 +351,16 @@ impl<CN, U: SendEvent<event::RequestOk>, C: Clock> Processor<CN, U, C> {
         {
             let replaced = replace(&mut self.requesting, false);
             anyhow::ensure!(replaced);
-            self.upcall.send(event::RequestOk)?
+            self.upcall.send(events::RequestOk)?
         }
         Ok(())
     }
 }
 
-impl<CN: SendMessage<All, Message>, U, C> OnEvent<event::Release> for Processor<CN, U, C> {
+impl<CN: SendMessage<All, Message>, U, C> OnEvent<events::Release> for Processor<CN, U, C> {
     fn on_event(
         &mut self,
-        event::Release: event::Release,
+        events::Release: events::Release,
         _: &mut impl Timer,
     ) -> anyhow::Result<()> {
         // consider further check whether we have requested

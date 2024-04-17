@@ -26,9 +26,8 @@ use augustus::{
         },
         session, BlackHole, Once, SendEvent, Unify,
     },
-    kademlia::{self, Buckets, PeerRecord, Query, SendCryptoEvent},
-    net::{dispatch, kademlia::Control, Detach, Dispatch},
-    util::Payload,
+    kademlia::{self, Buckets, PeerRecord, SendCryptoEvent},
+    net::{dispatch, kademlia::Control, Detach, Dispatch, Payload},
     worker::{Submit, Worker},
 };
 use axum::{
@@ -304,7 +303,8 @@ async fn start_peer(
             Box::new(MessageNet::new(dispatch::Net::from(
                 dispatch_control_session.sender(),
             ))) as Box<dyn kademlia::Net<SocketAddr> + Send + Sync>,
-            Sender::from(kademlia_control_session.sender()),
+            Box::new(Sender::from(kademlia_control_session.sender()))
+                as Box<dyn kademlia::Upcall<SocketAddr> + Send + Sync>,
             Box::new(kademlia::CryptoWorker::from(Worker::Inline(
                 crypto.clone(),
                 Sender::from(kademlia_session.sender()),
@@ -315,8 +315,7 @@ async fn start_peer(
     let mut kademlia_control = Blanket(Buffered::from(Control::new(
         Box::new(dispatch::Net::from(dispatch_control_session.sender()))
             as Box<dyn augustus::net::kademlia::Net<SocketAddr, bytes::Bytes> + Send + Sync>,
-        Box::new(Sender::from(kademlia_session.sender()))
-            as Box<dyn SendEvent<Query> + Send + Sync>,
+        Sender::from(kademlia_session.sender()),
     )));
     let mut peer = Blanket(Buffered::from(Peer::new(
         peer_id,

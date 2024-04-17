@@ -18,11 +18,14 @@ use augustus::{
         session::SessionTimer,
         OnEventUniversal, OnTimerUniversal, SendEvent,
     },
-    net::{session::Udp, IndexNet},
+    net::{session::Udp, IndexNet, Payload},
     pbft, unreplicated,
-    util::Payload,
     worker::{spawn_backend, Submit},
-    workload::{self, CloseLoop, Invoke, InvokeOk, Iter, OpLatency, Workload},
+    workload::{
+        self,
+        events::{Invoke, InvokeOk},
+        CloseLoop, Iter, OpLatency, Workload,
+    },
 };
 use axum::{
     extract::State,

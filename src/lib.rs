@@ -9,7 +9,6 @@ pub mod net;
 pub mod pbft;
 pub mod search;
 pub mod unreplicated;
-pub mod util;
 pub mod worker;
 pub mod workload;
 

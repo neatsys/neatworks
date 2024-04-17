@@ -17,8 +17,7 @@ use augustus::{
         SendEvent,
     },
     kademlia::{self, FindPeer, FindPeerOk, PeerId, Target},
-    net::{deserialize, events::Recv, kademlia::Multicast, Addr, SendMessage},
-    util::Payload,
+    net::{deserialize, events::Recv, kademlia::Multicast, Addr, Payload, SendMessage},
     worker::Submit,
 };
 
@@ -822,7 +821,7 @@ pub fn on_buf<A: Addr>(
 pub mod fs {
     use std::{fmt::Debug, path::Path};
 
-    use augustus::{event::SendEvent, util::Payload};
+    use augustus::{event::SendEvent, net::Payload};
     use tokio::{
         fs::{create_dir, read, remove_dir_all, write},
         sync::mpsc::UnboundedReceiver,

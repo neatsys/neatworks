@@ -52,7 +52,7 @@ struct AppSession {
     handle: JoinHandle<anyhow::Result<()>>,
     cancel: CancellationToken,
     event_sender: UnboundedSender<boson_mutex::Event>,
-    upcall: UnboundedReceiver<augustus::lamport_mutex::event::RequestOk>,
+    upcall: UnboundedReceiver<augustus::lamport_mutex::events::RequestOk>,
 }
 
 fn log_exit(err: anyhow::Error) -> StatusCode {

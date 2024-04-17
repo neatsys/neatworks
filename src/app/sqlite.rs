@@ -1,6 +1,5 @@
 use std::sync::Mutex;
 
-use bincode::Options;
 use rusqlite::{params_from_iter, Connection, OptionalExtension as _};
 
 use super::{
@@ -33,7 +32,7 @@ impl Sqlite {
 
 impl App for Sqlite {
     fn execute(&mut self, op: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let result = match bincode::options().deserialize(op)? {
+        let result = match serde_json::from_slice(op)? {
             Op::Read(key) => {
                 if let Some(values) = self
                     .connection
@@ -129,6 +128,6 @@ impl App for Sqlite {
                 }
             }
         };
-        Ok(bincode::options().serialize(&result)?)
+        Ok(serde_json::to_vec(&result)?)
     }
 }

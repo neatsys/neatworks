@@ -8,7 +8,9 @@ use augustus::{
         erased::{session::Sender, Blanket, Buffered, Session, Unify},
         Once, SendEvent,
     },
-    lamport_mutex::{self, event::RequestOk, Causal, Lamport, LamportClock, Processor, Replicated},
+    lamport_mutex::{
+        self, events::RequestOk, Causal, Lamport, LamportClock, Processor, Replicated,
+    },
     net::{
         deserialize, dispatch,
         events::Recv,
@@ -16,9 +18,8 @@ use augustus::{
         Detach, Dispatch, IndexNet, InvokeNet,
     },
     pbft,
-    util::Queue,
     worker::{Submit, Worker},
-    workload::InvokeOk,
+    workload::{events::InvokeOk, Queue},
 };
 use boson_control_messages::{MutexReplicated, MutexUntrusted};
 use tokio::{
@@ -79,8 +80,8 @@ pub async fn untrusted_session(
         async move {
             while let Some(event) = events.recv().await {
                 match event {
-                    Event::Request => sender.send(lamport_mutex::event::Request)?,
-                    Event::Release => sender.send(lamport_mutex::event::Release)?,
+                    Event::Request => sender.send(lamport_mutex::events::Request)?,
+                    Event::Release => sender.send(lamport_mutex::events::Release)?,
                 }
             }
             anyhow::Ok(())
@@ -188,8 +189,8 @@ pub async fn replicated_session(
         async move {
             while let Some(event) = events.recv().await {
                 match event {
-                    Event::Request => sender.send(lamport_mutex::event::Request)?,
-                    Event::Release => sender.send(lamport_mutex::event::Release)?,
+                    Event::Request => sender.send(lamport_mutex::events::Request)?,
+                    Event::Release => sender.send(lamport_mutex::events::Release)?,
                 }
             }
             anyhow::Ok(())

@@ -13,10 +13,9 @@ use crate::{
         erased::{OnEventRichTimer as OnEvent, RichTimer as Timer, TimerState},
         SendEvent,
     },
-    net::{deserialize, events::Recv, Addr, All, MessageNet, SendMessage},
-    util::{Payload, Request},
+    net::{deserialize, events::Recv, Addr, All, MessageNet, Payload, Request, SendMessage},
     worker::{Submit, Work},
-    workload::{Invoke, InvokeOk},
+    workload::events::{Invoke, InvokeOk},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

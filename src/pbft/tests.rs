@@ -27,11 +27,13 @@ use crate::{
         erased::{events::Init, OnEvent as _, OnEventRichTimer, RichTimer},
         linear, SendEvent, TimerId, Transient, UnreachableTimer,
     },
-    net::{events::Recv, IndexNet, IterAddr, SendMessage},
+    net::{events::Recv, IndexNet, IterAddr, Payload, SendMessage},
     pbft::CLIENT_RESEND_INTERVAL,
-    util::Payload,
     worker::Worker,
-    workload::{Check, CloseLoop, Invoke, InvokeOk, Iter, Json, Workload},
+    workload::{
+        events::{Invoke, InvokeOk},
+        Check, CloseLoop, Iter, Json, Workload,
+    },
 };
 
 use super::{

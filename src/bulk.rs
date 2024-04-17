@@ -73,13 +73,7 @@ pub struct Accept<N> {
 pub enum Event<A, M, N> {
     Offer(Offer<A, M>),
     Accept(Accept<N>),
-    RecvServe(Serve<M>),
-}
-
-impl<A, M, N> From<Recv<Serve<M>>> for Event<A, M, N> {
-    fn from(Recv(value): Recv<Serve<M>>) -> Self {
-        Self::RecvServe(value)
-    }
+    RecvServe(Recv<Serve<M>>),
 }
 
 #[derive(Debug, derive_more::Deref)]
@@ -213,7 +207,7 @@ pub async fn session<A, M, N: Send + 'static>(
             Select::JoinNextCancel(id) => {
                 pending_accept.remove(&id);
             }
-            Select::Recv(Event::RecvServe(Serve(message, serve_addr, id))) => {
+            Select::Recv(Event::RecvServe(Recv(Serve(message, serve_addr, id)))) => {
                 upcall.send(RecvOffer {
                     inner: message,
                     serve_internal: Some((serve_addr, id)),

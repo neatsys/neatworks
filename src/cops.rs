@@ -46,7 +46,7 @@
 // of each key
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     mem::take,
 };
 
@@ -136,17 +136,21 @@ impl<
 
 // events with version service
 // version service expects at most one outstanding `Update<_>` per `id`
+pub mod events {
+    use super::KeyId;
 
-pub struct Update<V> {
-    pub id: KeyId,
-    pub prev: V, // `version_deps`
-    pub deps: Vec<V>,
-}
+    pub struct Update<V> {
+        pub id: KeyId,
+        pub prev: V, // `version_deps`
+        pub deps: Vec<V>,
+    }
 
-pub struct UpdateOk<V> {
-    pub id: KeyId,
-    pub version_deps: V,
+    pub struct UpdateOk<V> {
+        pub id: KeyId,
+        pub version_deps: V,
+    }
 }
+// client events are ycsb::Op and ycsb::Result
 
 pub struct Client<N, U, V, A> {
     addr: A,
@@ -238,7 +242,7 @@ impl<N, U: SendEvent<ycsb::Result>, V: Version, A> OnEvent<Recv<GetOk<V>>> for C
 }
 
 pub struct Server<N, CN, VS, V, A, _M = (N, CN, VS, V, A)> {
-    store: BTreeMap<KeyId, KeyState<V, A>>,
+    store: HashMap<KeyId, KeyState<V, A>>,
     version_zero: V,
     pending_sync_keys: Vec<SyncKey<V>>,
     net: N,
@@ -271,7 +275,7 @@ impl<N, CN, VS, V: Clone, A: Clone> Server<N, CN, VS, V, A> {
 pub trait ServerCommon {
     type N: ServerNet<Self::A, Self::V>;
     type CN: ClientNet<Self::A, Self::V>;
-    type VS: SendEvent<Update<Self::V>>;
+    type VS: SendEvent<events::Update<Self::V>>;
     type V: Version;
     type A: Addr;
 }
@@ -279,7 +283,7 @@ impl<N, CN, VS, V, A> ServerCommon for (N, CN, VS, V, A)
 where
     N: ServerNet<A, V>,
     CN: ClientNet<A, V>,
-    VS: SendEvent<Update<V>>,
+    VS: SendEvent<events::Update<V>>,
     V: Version,
     A: Addr,
 {
@@ -337,7 +341,7 @@ impl<M: ServerCommon> OnEvent<Recv<Put<M::V, M::A>>> for Server<M::N, M::CN, M::
         });
         state.pending_puts.push_back(put.clone());
         if state.pending_puts.len() == 1 {
-            let update = Update {
+            let update = events::Update {
                 id: put.key,
                 prev: state.version_deps.clone(),
                 deps: put.deps.into_values().collect(),
@@ -413,10 +417,12 @@ impl<M: ServerCommon> OnEvent<Recv<SyncKey<M::V>>> for Server<M::N, M::CN, M::VS
     }
 }
 
-impl<M: ServerCommon> OnEvent<UpdateOk<M::V>> for Server<M::N, M::CN, M::VS, M::V, M::A, M> {
+impl<M: ServerCommon> OnEvent<events::UpdateOk<M::V>>
+    for Server<M::N, M::CN, M::VS, M::V, M::A, M>
+{
     fn on_event(
         &mut self,
-        update_ok: UpdateOk<M::V>,
+        update_ok: events::UpdateOk<M::V>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let Some(state) = self.store.get_mut(&update_ok.id) else {
@@ -446,7 +452,7 @@ impl<M: ServerCommon> OnEvent<UpdateOk<M::V>> for Server<M::N, M::CN, M::VS, M::
         };
         self.net.send(All, sync_key)?;
         if let Some(pending_put) = state.pending_puts.front() {
-            let update = Update {
+            let update = events::Update {
                 id: update_ok.id,
                 prev: update_ok.version_deps,
                 deps: pending_put.deps.values().cloned().collect(),
@@ -458,7 +464,7 @@ impl<M: ServerCommon> OnEvent<UpdateOk<M::V>> for Server<M::N, M::CN, M::VS, M::
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct DefaultVersion(BTreeMap<KeyId, u32>);
+pub struct DefaultVersion(HashMap<KeyId, u32>);
 
 impl DefaultVersion {
     pub fn new() -> Self {
@@ -505,20 +511,16 @@ impl DepOrd for DefaultVersion {
 
 pub struct DefaultVersionService<E>(E);
 
-impl<E: SendEvent<UpdateOk<DefaultVersion>>> OnEvent<Update<DefaultVersion>>
+impl<E: SendEvent<events::UpdateOk<DefaultVersion>>> SendEvent<events::Update<DefaultVersion>>
     for DefaultVersionService<E>
 {
-    fn on_event(
-        &mut self,
-        update: Update<DefaultVersion>,
-        _: &mut impl Timer<Self>,
-    ) -> anyhow::Result<()> {
+    fn send(&mut self, update: events::Update<DefaultVersion>) -> anyhow::Result<()> {
         let mut version_deps = update
             .deps
             .into_iter()
             .fold(update.prev, |version, dep| version.merge(&dep));
         *version_deps.0.entry(update.id).or_default() += 1;
-        let update_ok = UpdateOk {
+        let update_ok = events::UpdateOk {
             id: update.id,
             version_deps,
         };

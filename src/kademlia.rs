@@ -245,32 +245,40 @@ impl<
 {
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct Query(pub Target, pub NonZeroUsize);
+pub mod events {
+    use std::num::NonZeroUsize;
 
-#[derive(Debug)]
-pub struct QueryResult<A> {
-    pub status: QueryStatus,
-    pub target: Target,
-    // every peer here has been contacted just now, so they are probably reachable for a while
-    pub closest: Vec<PeerRecord<PublicKey, A>>,
+    use crate::crypto::peer::PublicKey;
+
+    use super::{PeerRecord, Target};
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct Query(pub Target, pub NonZeroUsize);
+
+    #[derive(Debug)]
+    pub struct QueryResult<A> {
+        pub status: QueryStatus,
+        pub target: Target,
+        // every peer here has been contacted just now, so they are probably reachable for a while
+        pub closest: Vec<PeerRecord<PublicKey, A>>,
+    }
+
+    #[derive(Debug)]
+    pub enum QueryStatus {
+        Progress,
+        // termination condition is satisfied
+        // there should be `count` peers in `closest`, and any peer that is closer to any of the peers
+        // in `closest` is either contacted (and thus in `closest`) or unreachable
+        Converge,
+        // termination condition is not satisfied, but no further progress is expected to happen
+        // this can because of the total number of discovered peers is less than `count`, otherwise i'm
+        // not sure
+        Halted,
+    }
 }
 
-#[derive(Debug)]
-pub enum QueryStatus {
-    Progress,
-    // termination condition is satisfied
-    // there should be `count` peers in `closest`, and any peer that is closer to any of the peers
-    // in `closest` is either contacted (and thus in `closest`) or unreachable
-    Converge,
-    // termination condition is not satisfied, but no further progress is expected to happen
-    // this can because of the total number of discovered peers is less than `count`, otherwise i'm
-    // not sure
-    Halted,
-}
-
-pub trait Upcall<A>: SendEvent<QueryResult<A>> {}
-impl<T: SendEvent<QueryResult<A>>, A> Upcall<A> for T {}
+pub trait Upcall<A>: SendEvent<events::QueryResult<A>> {}
+impl<T: SendEvent<events::QueryResult<A>>, A> Upcall<A> for T {}
 
 pub trait SendCryptoEvent<A>:
     SendEvent<Signed<FindPeer<A>>>
@@ -400,10 +408,10 @@ impl<M: PeerCommon> Peer<M::N, M::U, M::CW, M::E, M::A, M> {
 
 // TODO periodically refresh buckets
 
-impl<M: PeerCommon> OnEvent<Query> for Peer<M::N, M::U, M::CW, M::E, M::A, M> {
+impl<M: PeerCommon> OnEvent<events::Query> for Peer<M::N, M::U, M::CW, M::E, M::A, M> {
     fn on_event(
         &mut self,
-        Query(target, count): Query,
+        events::Query(target, count): events::Query,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(
@@ -633,6 +641,7 @@ impl<M: PeerCommon> OnEvent<Verified<FindPeerOk<M::A>>> for Peer<M::N, M::U, M::
             .take(state.find_peer.count.into())
             .cloned()
             .collect();
+        use events::QueryStatus::*;
         let status = 'upcall: {
             let count = state
                 .records
@@ -644,7 +653,7 @@ impl<M: PeerCommon> OnEvent<Verified<FindPeerOk<M::A>>> for Peer<M::N, M::U, M::
                 for resend_timer in state.contacting.into_values() {
                     timer.unset(resend_timer)?
                 }
-                break 'upcall QueryStatus::Converge;
+                break 'upcall Converge;
             }
             let mut addrs = Vec::new();
             while state.contacting.len() < NUM_CONCURRENCY {
@@ -666,34 +675,34 @@ impl<M: PeerCommon> OnEvent<Verified<FindPeerOk<M::A>>> for Peer<M::N, M::U, M::
             }
             if state.contacting.is_empty() {
                 self.query_states.remove(&target);
-                break 'upcall QueryStatus::Halted;
+                break 'upcall Halted;
             }
             if !addrs.is_empty() {
                 self.net
                     .send_to_each(addrs.into_iter(), state.find_peer.clone())?
             }
-            QueryStatus::Progress
+            Progress
         };
         // println!("target {} status {status:?}", H256(target));
         if self.on_bootstrap.is_none() {
             if !self.refresh_targets.contains(&target) {
-                self.upcall.send(QueryResult {
+                self.upcall.send(events::QueryResult {
                     status,
                     target,
                     closest,
                 })?
             } else {
                 // TODO log warning on halted refreshing
-                if matches!(status, QueryStatus::Converge | QueryStatus::Halted) {
+                if matches!(status, Converge | Halted) {
                     self.refresh_targets.remove(&target);
                 }
             }
             return Ok(());
         }
         match status {
-            QueryStatus::Converge => {}
-            QueryStatus::Progress => return Ok(()),
-            QueryStatus::Halted => {} // log warn/return error?
+            Converge => {}
+            Progress => return Ok(()),
+            Halted => {} // log warn/return error?
         }
         if self.refresh_targets.is_empty() {
             assert_eq!(target, self.record.id);

@@ -28,60 +28,6 @@ impl<T: ?Sized + SendEvent<M>, M> SendEvent<M> for Box<T> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct BlackHole; // for testing
-
-impl<M> SendEvent<M> for BlackHole {
-    fn send(&mut self, _: M) -> anyhow::Result<()> {
-        Ok(())
-    }
-}
-
-pub trait SendEventOnce<M> {
-    fn send_once(self, event: M) -> anyhow::Result<()>;
-}
-
-impl<M> SendEventOnce<M> for BlackHole {
-    fn send_once(self, _: M) -> anyhow::Result<()> {
-        Ok(())
-    }
-}
-
-impl<T: SendEventOnce<M>, M> SendEvent<M> for Option<T> {
-    fn send(&mut self, event: M) -> anyhow::Result<()> {
-        if let Some(emit) = self.take() {
-            emit.send_once(event)
-        } else {
-            Err(anyhow::format_err!("can only send once"))
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Once<E>(pub E);
-
-impl<T: SendEvent<M>, M> SendEventOnce<M> for Once<T> {
-    fn send_once(mut self, event: M) -> anyhow::Result<()> {
-        self.0.send(event)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, derive_more::Deref, derive_more::DerefMut)]
-pub struct Transient<M>(Vec<M>);
-
-impl<M> Default for Transient<M> {
-    fn default() -> Self {
-        Self(Default::default())
-    }
-}
-
-impl<N: Into<M>, M> SendEvent<N> for Transient<M> {
-    fn send(&mut self, event: N) -> anyhow::Result<()> {
-        self.0.push(event.into());
-        Ok(())
-    }
-}
-
 // pub type TimerId = u32;
 // intentionally switch to a non-Copy newtype to mitigate use after free, that
 // is, calling `unset` will consume the TimerId so one timer cannot be unset
@@ -105,18 +51,6 @@ pub trait Timer {
     fn set(&mut self, period: Duration) -> anyhow::Result<TimerId>;
 
     fn unset(&mut self, timer_id: TimerId) -> anyhow::Result<()>;
-}
-
-pub struct UnreachableTimer;
-
-impl Timer for UnreachableTimer {
-    fn set(&mut self, _: Duration) -> anyhow::Result<TimerId> {
-        unreachable!()
-    }
-
-    fn unset(&mut self, _: TimerId) -> anyhow::Result<()> {
-        unreachable!()
-    }
 }
 
 pub trait OnEvent {
@@ -250,6 +184,74 @@ impl<S: OnTimer, T: Timer> OnTimerUniversal<T> for Unify<S> {
 
 pub use session::Session;
 
+// utility types and combinator
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BlackHole; // for testing
+
+impl<M> SendEvent<M> for BlackHole {
+    fn send(&mut self, _: M) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+pub trait SendEventOnce<M> {
+    fn send_once(self, event: M) -> anyhow::Result<()>;
+}
+
+impl<M> SendEventOnce<M> for BlackHole {
+    fn send_once(self, _: M) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+impl<T: SendEventOnce<M>, M> SendEvent<M> for Option<T> {
+    fn send(&mut self, event: M) -> anyhow::Result<()> {
+        if let Some(emit) = self.take() {
+            emit.send_once(event)
+        } else {
+            Err(anyhow::format_err!("can only send once"))
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Once<E>(pub E);
+
+impl<T: SendEvent<M>, M> SendEventOnce<M> for Once<T> {
+    fn send_once(mut self, event: M) -> anyhow::Result<()> {
+        self.0.send(event)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, derive_more::Deref, derive_more::DerefMut)]
+pub struct Transient<M>(Vec<M>);
+
+impl<M> Default for Transient<M> {
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
+
+impl<N: Into<M>, M> SendEvent<N> for Transient<M> {
+    fn send(&mut self, event: N) -> anyhow::Result<()> {
+        self.0.push(event.into());
+        Ok(())
+    }
+}
+
+pub struct UnreachableTimer;
+
+impl Timer for UnreachableTimer {
+    fn set(&mut self, _: Duration) -> anyhow::Result<TimerId> {
+        anyhow::bail!("unreachable")
+    }
+
+    fn unset(&mut self, _: TimerId) -> anyhow::Result<()> {
+        anyhow::bail!("unreachable")
+    }
+}
+
 // alternative interface that performs type erasure on event types
 pub mod erased {
     use std::{collections::HashMap, fmt::Debug, time::Duration};
@@ -274,15 +276,6 @@ pub mod erased {
 
     pub trait OnEvent<M> {
         fn on_event(&mut self, event: M, timer: &mut impl Timer) -> anyhow::Result<()>;
-    }
-
-    pub struct Inline<'a, S, T>(pub &'a mut S, pub &'a mut T);
-
-    // we probably cannot have `impl SendEvent<impl Into<M>>`
-    impl<S: OnEvent<M>, M, T: Timer> SendEvent<M> for Inline<'_, S, T> {
-        fn send(&mut self, event: M) -> anyhow::Result<()> {
-            self.0.on_event(event, self.1)
-        }
     }
 
     #[derive(derive_more::Deref, derive_more::DerefMut)]
@@ -450,6 +443,49 @@ pub mod erased {
         }
     }
 
+    pub use session::Session;
+
+    pub mod events {
+        #[derive(Debug)]
+        pub struct Init;
+    }
+
+    pub mod session {
+        use crate::event::session::SessionTimer;
+
+        use super::Erasure;
+
+        // some historical snippet when `Timer` was still implemented by `Session<_>` itself
+        // #[derive(derive_more::From)]
+        // pub struct Event<S>(super::Event<S, crate::event::Session<Self>>);
+
+        pub type Event<S> = super::Event<S, SessionTimer>;
+        pub type Session<S> = crate::event::Session<Event<S>>;
+        pub type Sender<S> = Erasure<crate::event::session::Sender<Event<S>>, S, SessionTimer>;
+
+        pub type Buffered<S> = super::Buffered<S, SessionTimer>;
+    }
+
+    pub mod blocking {
+        use crate::event::ordered::Timer;
+
+        use super::Erasure;
+
+        pub type Event<S> = super::Event<S, Timer>;
+        pub type Sender<S> = Erasure<crate::event::blocking::Sender<Event<S>>, S, Timer>;
+
+        pub type Buffered<S> = super::Buffered<S, Timer>;
+    }
+
+    pub struct Inline<'a, S, T>(pub &'a mut S, pub &'a mut T);
+
+    // we probably cannot have `impl SendEvent<impl Into<M>>`
+    impl<S: OnEvent<M>, M, T: Timer> SendEvent<M> for Inline<'_, S, T> {
+        fn send(&mut self, event: M) -> anyhow::Result<()> {
+            self.0.on_event(event, self.1)
+        }
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct TimerState<M>(Option<(M, TimerId)>, Duration);
 
@@ -516,40 +552,6 @@ pub mod erased {
                 Ok(None)
             }
         }
-    }
-
-    pub use session::Session;
-
-    pub mod events {
-        #[derive(Debug)]
-        pub struct Init;
-    }
-
-    pub mod session {
-        use crate::event::session::SessionTimer;
-
-        use super::Erasure;
-
-        // some historical snippet when `Timer` was still implemented by `Session<_>` itself
-        // #[derive(derive_more::From)]
-        // pub struct Event<S>(super::Event<S, crate::event::Session<Self>>);
-
-        pub type Event<S> = super::Event<S, SessionTimer>;
-        pub type Session<S> = crate::event::Session<Event<S>>;
-        pub type Sender<S> = Erasure<crate::event::session::Sender<Event<S>>, S, SessionTimer>;
-
-        pub type Buffered<S> = super::Buffered<S, SessionTimer>;
-    }
-
-    pub mod blocking {
-        use crate::event::ordered::Timer;
-
-        use super::Erasure;
-
-        pub type Event<S> = super::Event<S, Timer>;
-        pub type Sender<S> = Erasure<crate::event::blocking::Sender<Event<S>>, S, Timer>;
-
-        pub type Buffered<S> = super::Buffered<S, Timer>;
     }
 }
 
