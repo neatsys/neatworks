@@ -120,7 +120,8 @@ async fn cops_session(client: reqwest::Client) -> anyhow::Result<()> {
         .collect::<Vec<_>>();
     let mut watchdog_sessions = JoinSet::new();
     use boson_control_messages::CopsVariant::*;
-    let variant = Replicated(boson_control_messages::CopsReplicated { num_faulty: 0 });
+    // let variant = Replicated(boson_control_messages::CopsReplicated { num_faulty: 0 });
+    let variant = Untrusted;
     println!("Start servers");
     for (i, url) in urls.iter().enumerate() {
         let config = boson_control_messages::CopsServer {

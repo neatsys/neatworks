@@ -51,6 +51,7 @@ use std::{
 };
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use tracing::debug;
 
 use crate::{
     app::ycsb,
@@ -303,8 +304,8 @@ impl<N, CN, VS, V: Clone, A: Clone> Replica<N, CN, VS, V, A> {
             .strip_prefix("user")
             .ok_or(anyhow::format_err!("unimplemented"))?
             .parse()?;
+        anyhow::ensure!(value.len() == 1, "unimplemented");
         let value = value.remove(0);
-        anyhow::ensure!(value.is_empty(), "unimplemented");
         let state = KeyState {
             value,
             version_deps: self.version_zero.clone(),
@@ -418,6 +419,35 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::VS, M::V, M::A, M> {
         }
         true
     }
+
+    fn apply_sync(&mut self, sync_key: SyncKey<M::V>) -> anyhow::Result<()> {
+        if let Some(state) = self.store.get_mut(&sync_key.key) {
+            anyhow::ensure!(
+                state.pending_puts.is_empty(),
+                "conflicting Put across servers"
+            );
+            if !matches!(
+                sync_key.version_deps.partial_cmp(&state.version_deps),
+                Some(Ordering::Greater)
+            ) {
+                //
+                return Ok(());
+            }
+            state.value = sync_key.value;
+            state.version_deps = sync_key.version_deps
+        } else {
+            self.store.insert(
+                sync_key.key,
+                KeyState {
+                    value: sync_key.value,
+                    version_deps: sync_key.version_deps,
+                    pending_puts: Default::default(),
+                },
+            );
+        }
+        debug!("synced key {}", sync_key.key);
+        Ok(())
+    }
 }
 
 impl<M: ReplicaCommon> OnEvent<Recv<SyncKey<M::V>>> for Replica<M::N, M::CN, M::VS, M::V, M::A, M> {
@@ -430,35 +460,13 @@ impl<M: ReplicaCommon> OnEvent<Recv<SyncKey<M::V>>> for Replica<M::N, M::CN, M::
             self.pending_sync_keys.push(sync_key);
             return Ok(());
         }
+        self.apply_sync(sync_key)?;
         for sync_key in take(&mut self.pending_sync_keys) {
             if !self.can_sync(&sync_key) {
                 self.pending_sync_keys.push(sync_key);
                 continue;
             }
-            if let Some(state) = self.store.get_mut(&sync_key.key) {
-                anyhow::ensure!(
-                    state.pending_puts.is_empty(),
-                    "conflicting Put across servers"
-                );
-                if !matches!(
-                    sync_key.version_deps.partial_cmp(&state.version_deps),
-                    Some(Ordering::Greater)
-                ) {
-                    //
-                    continue;
-                }
-                state.value = sync_key.value;
-                state.version_deps = sync_key.version_deps
-            } else {
-                self.store.insert(
-                    sync_key.key,
-                    KeyState {
-                        value: sync_key.value,
-                        version_deps: sync_key.version_deps,
-                        pending_puts: Default::default(),
-                    },
-                );
-            }
+            self.apply_sync(sync_key)?
         }
         Ok(())
     }
@@ -597,11 +605,17 @@ impl PartialOrd for DefaultVersion {
 
 impl DepOrd for DefaultVersion {
     fn dep_cmp(&self, other: &Self, id: KeyId) -> Ordering {
-        self.0
-            .get(&id)
-            .copied()
-            .unwrap_or_default()
-            .cmp(&other.0[&id])
+        match (self.0.get(&id), other.0.get(&id)) {
+            // handy sanity check
+            (Some(0), _) | (_, Some(0)) => {
+                unimplemented!("invalid dependency compare: {self:?} vs {other:?} @ {id}")
+            }
+            (None, Some(_)) => Ordering::Less,
+            (Some(_), None) => Ordering::Greater,
+            // this can happen on the startup insertion
+            (None, None) => Ordering::Equal,
+            (Some(n), Some(m)) => n.cmp(m),
+        }
     }
 
     fn deps(&self) -> impl Iterator<Item = KeyId> + '_ {

@@ -30,14 +30,14 @@ fn create_workload<R>(
     record_count: usize,
     put_range: Range<usize>,
 ) -> anyhow::Result<ycsb::Workload<R>> {
-    let mut workload = ycsb::Workload::new(
-        rng,
-        if do_put {
-            ycsb::WorkloadSettings::new_a
-        } else {
-            ycsb::WorkloadSettings::new_c
-        }(record_count),
-    )?;
+    let mut settings = if do_put {
+        ycsb::WorkloadSettings::new_a
+    } else {
+        ycsb::WorkloadSettings::new_c
+    }(record_count);
+    settings.request_distr = ycsb::SettingsDistr::Uniform;
+    settings.field_count = 1;
+    let mut workload = ycsb::Workload::new(rng, settings)?;
     if do_put {
         workload.key_num = ycsb::Gen::Uniform(Uniform::from(put_range))
     }
@@ -161,8 +161,7 @@ pub async fn pbft_server_session(
     let num_faulty = config.num_faulty;
     let mut app = app::BTreeMap::new();
     {
-        let mut workload =
-            ycsb::Workload::new(thread_rng(), ycsb::WorkloadSettings::new(record_count))?;
+        let mut workload = create_workload(thread_rng(), false, record_count, 0..1)?;
         let mut workload = Json(Iter::<_, _, ()>::from(workload.startup_ops()));
         while let Some((op, ())) = workload.next_op()? {
             app.execute(&op)?;
@@ -299,7 +298,9 @@ pub async fn untrusted_client_session(
             anyhow::bail!("unreachable")
         });
     }
-
+    while let Some(result) = sessions.join_next().await {
+        result??
+    }
     Ok(())
 }
 
@@ -344,8 +345,7 @@ pub async fn untrusted_server_session(
         ),
     ));
     {
-        let mut workload =
-            ycsb::Workload::new(thread_rng(), ycsb::WorkloadSettings::new(record_count))?;
+        let mut workload = create_workload(thread_rng(), false, record_count, 0..1)?;
         let mut workload = Iter::<_, _, ()>::from(workload.startup_ops());
         while let Some((op, ())) = workload.next_op()? {
             replica.startup_insert(op)?

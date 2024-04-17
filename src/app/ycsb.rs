@@ -367,7 +367,9 @@ impl<R: Rng> Workload<R> {
     fn startup_insert(&mut self) -> Op {
         let key = self.build_key_name(self.insert_key_num);
         self.insert_key_num += 1;
-        let value = vec![self.build_value(); self.settings.field_count];
+        let value = (0..self.settings.field_count)
+            .map(|_| self.build_value())
+            .collect();
         Op::Insert(key, value)
     }
 
