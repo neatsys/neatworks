@@ -184,7 +184,7 @@ async fn cops_start_client(
         let cancel = CancellationToken::new();
         use boson_control_messages::CopsVariant::*;
         let handle = match &config.variant {
-            Untrusted => todo!(),
+            Untrusted => tokio::spawn(boson_cops::untrusted_client_session(config, upcall_sender)),
             Replicated(_) => tokio::spawn(boson_cops::pbft_client_session(config, upcall_sender)),
         };
         *session = Some(AppSession {
@@ -241,7 +241,7 @@ async fn cops_start_server(
         let cancel = CancellationToken::new();
         use boson_control_messages::CopsVariant::*;
         let handle = match &config.variant {
-            Untrusted => todo!(),
+            Untrusted => tokio::spawn(boson_cops::untrusted_server_session(config, cancel.clone())),
             Replicated(_) => tokio::spawn(boson_cops::pbft_server_session(config, cancel.clone())),
         };
         *session = Some(AppSession {

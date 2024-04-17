@@ -37,10 +37,11 @@ pub struct CopsServer {
 pub struct CopsClient {
     pub addrs: Vec<SocketAddr>,
     pub ip: IpAddr,
+    pub index: usize,          // of `addrs` to contact
     pub num_concurrent: usize, // per instance
     pub num_concurrent_put: usize,
     pub record_count: usize,
-    pub put_range: Range<usize>,
+    pub put_range: Range<usize>, // probably redundant to `record_count` and `index`?
     pub variant: CopsVariant,
 }
 

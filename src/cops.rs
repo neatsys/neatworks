@@ -50,7 +50,7 @@ use std::{
     mem::take,
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::{
     app::ycsb,
@@ -58,7 +58,8 @@ use crate::{
         erased::{OnEventRichTimer as OnEvent, RichTimer as Timer},
         SendEvent,
     },
-    net::{events::Recv, Addr, All, SendMessage},
+    net::{deserialize, events::Recv, Addr, All, MessageNet, SendMessage},
+    workload::events::{Invoke, InvokeOk},
 };
 
 // "key" under COPS context, "id" under Boson's logical clock context
@@ -119,20 +120,14 @@ pub struct SyncKey<V> {
     version_deps: V,
 }
 
-pub trait ClientNet<A, V>: SendMessage<A, GetOk<V>> + SendMessage<A, PutOk<V>> {}
-impl<T: SendMessage<A, GetOk<V>> + SendMessage<A, PutOk<V>>, A, V> ClientNet<A, V> for T {}
+pub trait ClientNet<A, V>: SendMessage<A, Put<V, A>> + SendMessage<A, Get<A>> {}
+impl<T: SendMessage<A, Put<V, A>> + SendMessage<A, Get<A>>, A, V> ClientNet<A, V> for T {}
 
-pub trait ServerNet<A, V>:
-    SendMessage<A, Put<V, A>> + SendMessage<A, Get<A>> + SendMessage<All, SyncKey<V>>
-{
-}
-impl<
-        T: SendMessage<A, Put<V, A>> + SendMessage<A, Get<A>> + SendMessage<All, SyncKey<V>>,
-        A,
-        V,
-    > ServerNet<A, V> for T
-{
-}
+pub trait ToClientNet<A, V>: SendMessage<A, GetOk<V>> + SendMessage<A, PutOk<V>> {}
+impl<T: SendMessage<A, GetOk<V>> + SendMessage<A, PutOk<V>>, A, V> ToClientNet<A, V> for T {}
+
+pub trait ReplicaNet<A, V>: SendMessage<All, SyncKey<V>> {}
+impl<T: SendMessage<All, SyncKey<V>>, A, V> ReplicaNet<A, V> for T {}
 
 // events with version service
 // version service expects at most one outstanding `Update<_>` per `id`
@@ -150,11 +145,14 @@ pub mod events {
         pub version_deps: V,
     }
 }
-// client events are ycsb::Op and ycsb::Result
+// client events are Invoke<ycsb::Op> and InvokeOk<ycsb::Result>
+
+pub trait Upcall: SendEvent<InvokeOk<ycsb::Result>> {}
+impl<T: SendEvent<InvokeOk<ycsb::Result>>> Upcall for T {}
 
 pub struct Client<N, U, V, A> {
     addr: A,
-    server_addr: A, // local server address, the one client always contacts
+    replica_addr: A, // local replica address, the one client always contacts
     deps: BTreeMap<KeyId, V>,
     working_key: Option<KeyId>,
 
@@ -162,8 +160,25 @@ pub struct Client<N, U, V, A> {
     upcall: U,
 }
 
-impl<N: ServerNet<A, V>, U, V: Version, A: Addr> OnEvent<ycsb::Op> for Client<N, U, V, A> {
-    fn on_event(&mut self, op: ycsb::Op, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
+impl<N, U, V, A> Client<N, U, V, A> {
+    pub fn new(addr: A, replica_addr: A, net: N, upcall: U) -> Self {
+        Self {
+            addr,
+            replica_addr,
+            net,
+            upcall,
+            deps: Default::default(),
+            working_key: None,
+        }
+    }
+}
+
+impl<N: ClientNet<A, V>, U, V: Version, A: Addr> OnEvent<Invoke<ycsb::Op>> for Client<N, U, V, A> {
+    fn on_event(
+        &mut self,
+        Invoke(op): Invoke<ycsb::Op>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
         let key = match &op {
             ycsb::Op::Read(key) | ycsb::Op::Update(key, ..) => key
                 // easy way to adapt current YCSB key format (easier than adapt on YCSB side)
@@ -188,21 +203,23 @@ impl<N: ServerNet<A, V>, U, V: Version, A: Addr> OnEvent<ycsb::Op> for Client<N,
                     deps: self.deps.clone(),
                     client_addr: self.addr.clone(),
                 };
-                self.net.send(self.server_addr.clone(), put)
+                self.net.send(self.replica_addr.clone(), put)
             }
             ycsb::Op::Read(_) => {
                 let get = Get {
                     key,
                     client_addr: self.addr.clone(),
                 };
-                self.net.send(self.server_addr.clone(), get)
+                self.net.send(self.replica_addr.clone(), get)
             }
             _ => unreachable!(),
         }
     }
 }
 
-impl<N, U: SendEvent<ycsb::Result>, V: Version, A> OnEvent<Recv<PutOk<V>>> for Client<N, U, V, A> {
+impl<N, U: SendEvent<InvokeOk<ycsb::Result>>, V: Version, A> OnEvent<Recv<PutOk<V>>>
+    for Client<N, U, V, A>
+{
     fn on_event(
         &mut self,
         Recv(put_ok): Recv<PutOk<V>>,
@@ -220,11 +237,13 @@ impl<N, U: SendEvent<ycsb::Result>, V: Version, A> OnEvent<Recv<PutOk<V>>> for C
             return Ok(());
         }
         self.deps = [(key, put_ok.version_deps)].into();
-        self.upcall.send(ycsb::Result::Ok)
+        self.upcall.send((Default::default(), ycsb::Result::Ok)) // careful
     }
 }
 
-impl<N, U: SendEvent<ycsb::Result>, V: Version, A> OnEvent<Recv<GetOk<V>>> for Client<N, U, V, A> {
+impl<N, U: SendEvent<InvokeOk<ycsb::Result>>, V: Version, A> OnEvent<Recv<GetOk<V>>>
+    for Client<N, U, V, A>
+{
     fn on_event(
         &mut self,
         Recv(get_ok): Recv<GetOk<V>>,
@@ -241,11 +260,12 @@ impl<N, U: SendEvent<ycsb::Result>, V: Version, A> OnEvent<Recv<GetOk<V>>> for C
             return Ok(());
         }
         self.deps.insert(key, get_ok.version_deps);
-        self.upcall.send(ycsb::Result::ReadOk(vec![get_ok.value]))
+        self.upcall
+            .send((Default::default(), ycsb::Result::ReadOk(vec![get_ok.value])))
     }
 }
 
-pub struct Server<N, CN, VS, V, A, _M = (N, CN, VS, V, A)> {
+pub struct Replica<N, CN, VS, V, A, _M = (N, CN, VS, V, A)> {
     store: HashMap<KeyId, KeyState<V, A>>,
     version_zero: V,
     pending_sync_keys: Vec<SyncKey<V>>,
@@ -262,7 +282,7 @@ struct KeyState<V, A> {
     pending_puts: VecDeque<Put<V, A>>,
 }
 
-impl<N, CN, VS, V: Clone, A: Clone> Server<N, CN, VS, V, A> {
+impl<N, CN, VS, V: Clone, A: Clone> Replica<N, CN, VS, V, A> {
     pub fn new(version_zero: V, net: N, client_net: CN, version_service: VS) -> Self {
         Self {
             net,
@@ -274,19 +294,39 @@ impl<N, CN, VS, V: Clone, A: Clone> Server<N, CN, VS, V, A> {
             _m: Default::default(),
         }
     }
+
+    pub fn startup_insert(&mut self, op: ycsb::Op) -> anyhow::Result<()> {
+        let ycsb::Op::Insert(key, mut value) = op else {
+            anyhow::bail!("unimplemented")
+        };
+        let key = key
+            .strip_prefix("user")
+            .ok_or(anyhow::format_err!("unimplemented"))?
+            .parse()?;
+        let value = value.remove(0);
+        anyhow::ensure!(value.is_empty(), "unimplemented");
+        let state = KeyState {
+            value,
+            version_deps: self.version_zero.clone(),
+            pending_puts: Default::default(),
+        };
+        let replaced = self.store.insert(key, state);
+        anyhow::ensure!(replaced.is_none(), "duplicated startup insertion");
+        Ok(())
+    }
 }
 
-pub trait ServerCommon {
-    type N: ServerNet<Self::A, Self::V>;
-    type CN: ClientNet<Self::A, Self::V>;
+pub trait ReplicaCommon {
+    type N: ReplicaNet<Self::A, Self::V>;
+    type CN: ToClientNet<Self::A, Self::V>;
     type VS: SendEvent<events::Update<Self::V>>;
     type V: Version;
     type A: Addr;
 }
-impl<N, CN, VS, V, A> ServerCommon for (N, CN, VS, V, A)
+impl<N, CN, VS, V, A> ReplicaCommon for (N, CN, VS, V, A)
 where
-    N: ServerNet<A, V>,
-    CN: ClientNet<A, V>,
+    N: ReplicaNet<A, V>,
+    CN: ToClientNet<A, V>,
     VS: SendEvent<events::Update<V>>,
     V: Version,
     A: Addr,
@@ -298,7 +338,7 @@ where
     type A = A;
 }
 
-impl<M: ServerCommon> OnEvent<Recv<Get<M::A>>> for Server<M::N, M::CN, M::VS, M::V, M::A, M> {
+impl<M: ReplicaCommon> OnEvent<Recv<Get<M::A>>> for Replica<M::N, M::CN, M::VS, M::V, M::A, M> {
     fn on_event(
         &mut self,
         Recv(get): Recv<Get<M::A>>,
@@ -311,16 +351,19 @@ impl<M: ServerCommon> OnEvent<Recv<Get<M::A>>> for Server<M::N, M::CN, M::VS, M:
             }
         } else {
             // reasonable default?
-            GetOk {
-                value: Default::default(),
-                version_deps: self.version_zero.clone(),
-            }
+            // GetOk {
+            //     value: Default::default(),
+            //     version_deps: self.version_zero.clone(),
+            // }
+            anyhow::bail!("missing state for key {}", get.key)
         };
         self.client_net.send(get.client_addr, get_ok)
     }
 }
 
-impl<M: ServerCommon> OnEvent<Recv<Put<M::V, M::A>>> for Server<M::N, M::CN, M::VS, M::V, M::A, M> {
+impl<M: ReplicaCommon> OnEvent<Recv<Put<M::V, M::A>>>
+    for Replica<M::N, M::CN, M::VS, M::V, M::A, M>
+{
     fn on_event(
         &mut self,
         Recv(put): Recv<Put<M::V, M::A>>,
@@ -356,7 +399,7 @@ impl<M: ServerCommon> OnEvent<Recv<Put<M::V, M::A>>> for Server<M::N, M::CN, M::
     }
 }
 
-impl<M: ServerCommon> Server<M::N, M::CN, M::VS, M::V, M::A, M> {
+impl<M: ReplicaCommon> Replica<M::N, M::CN, M::VS, M::V, M::A, M> {
     fn can_sync(&self, sync_key: &SyncKey<M::V>) -> bool {
         for id in sync_key.version_deps.deps() {
             if id == sync_key.key {
@@ -377,7 +420,7 @@ impl<M: ServerCommon> Server<M::N, M::CN, M::VS, M::V, M::A, M> {
     }
 }
 
-impl<M: ServerCommon> OnEvent<Recv<SyncKey<M::V>>> for Server<M::N, M::CN, M::VS, M::V, M::A, M> {
+impl<M: ReplicaCommon> OnEvent<Recv<SyncKey<M::V>>> for Replica<M::N, M::CN, M::VS, M::V, M::A, M> {
     fn on_event(
         &mut self,
         Recv(sync_key): Recv<SyncKey<M::V>>,
@@ -421,8 +464,8 @@ impl<M: ServerCommon> OnEvent<Recv<SyncKey<M::V>>> for Server<M::N, M::CN, M::VS
     }
 }
 
-impl<M: ServerCommon> OnEvent<events::UpdateOk<M::V>>
-    for Server<M::N, M::CN, M::VS, M::V, M::A, M>
+impl<M: ReplicaCommon> OnEvent<events::UpdateOk<M::V>>
+    for Replica<M::N, M::CN, M::VS, M::V, M::A, M>
 {
     fn on_event(
         &mut self,
@@ -467,8 +510,61 @@ impl<M: ServerCommon> OnEvent<events::UpdateOk<M::V>>
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct DefaultVersion(HashMap<KeyId, u32>);
+#[derive(Debug, Clone, Serialize, Deserialize, derive_more::From)]
+pub enum ToClientMessage<V> {
+    PutOk(PutOk<V>),
+    GetOk(GetOk<V>),
+}
+
+pub type ToClientMessageNet<N, V> = MessageNet<N, ToClientMessage<V>>;
+
+#[derive(Debug, Clone, Serialize, Deserialize, derive_more::From)]
+pub enum ToReplicaMessage<V, A> {
+    Put(Put<V, A>),
+    Get(Get<A>),
+    SyncKey(SyncKey<V>),
+}
+
+pub type ToReplicaMessageNet<N, V, A> = MessageNet<N, ToReplicaMessage<V, A>>;
+
+pub trait SendClientRecvEvent<V>: SendEvent<Recv<PutOk<V>>> + SendEvent<Recv<GetOk<V>>> {}
+impl<T: SendEvent<Recv<PutOk<V>>> + SendEvent<Recv<GetOk<V>>>, V> SendClientRecvEvent<V> for T {}
+
+pub fn to_client_on_buf<V: DeserializeOwned>(
+    buf: &[u8],
+    sender: &mut impl SendClientRecvEvent<V>,
+) -> anyhow::Result<()> {
+    match deserialize(buf)? {
+        ToClientMessage::PutOk(message) => sender.send(Recv(message)),
+        ToClientMessage::GetOk(message) => sender.send(Recv(message)),
+    }
+}
+
+pub trait SendReplicaRecvEvent<V, A>:
+    SendEvent<Recv<Put<V, A>>> + SendEvent<Recv<Get<A>>> + SendEvent<Recv<SyncKey<V>>>
+{
+}
+impl<
+        T: SendEvent<Recv<Put<V, A>>> + SendEvent<Recv<Get<A>>> + SendEvent<Recv<SyncKey<V>>>,
+        V,
+        A,
+    > SendReplicaRecvEvent<V, A> for T
+{
+}
+
+pub fn to_replica_on_buf<V: DeserializeOwned, A: DeserializeOwned>(
+    buf: &[u8],
+    sender: &mut impl SendReplicaRecvEvent<V, A>,
+) -> anyhow::Result<()> {
+    match deserialize(buf)? {
+        ToReplicaMessage::Put(message) => sender.send(Recv(message)),
+        ToReplicaMessage::Get(message) => sender.send(Recv(message)),
+        ToReplicaMessage::SyncKey(message) => sender.send(Recv(message)),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub struct DefaultVersion(BTreeMap<KeyId, u32>);
 
 impl DefaultVersion {
     pub fn new() -> Self {
@@ -513,7 +609,8 @@ impl DepOrd for DefaultVersion {
     }
 }
 
-pub struct DefaultVersionService<E>(E);
+#[derive(Debug)]
+pub struct DefaultVersionService<E>(pub E);
 
 impl<E: SendEvent<events::UpdateOk<DefaultVersion>>> SendEvent<events::Update<DefaultVersion>>
     for DefaultVersionService<E>

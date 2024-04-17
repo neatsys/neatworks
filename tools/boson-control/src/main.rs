@@ -145,6 +145,7 @@ async fn cops_session(client: reqwest::Client) -> anyhow::Result<()> {
         let config = boson_control_messages::CopsClient {
             addrs: addrs.clone(),
             ip: client_ips[i],
+            index: i,
             num_concurrent: 1,
             num_concurrent_put: 1,
             record_count: 1000,
