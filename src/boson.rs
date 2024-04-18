@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     cops::{self, DefaultVersion, DepOrd},
     crypto::{Crypto, Verifiable},
-    event::{erased::OnEvent, SendEvent},
+    event::{erased::OnEvent, OnTimer, SendEvent},
     lamport_mutex,
     net::{events::Recv, Addr, All, SendMessage},
     worker::Submit,
@@ -175,7 +175,17 @@ impl<E: SendEvent<cops::events::UpdateOk<QuorumClock>>> SendEvent<(u64, QuorumCl
 pub struct QuorumServer<CW, N> {
     id: usize,
     crypto_worker: CW,
-    _n: std::marker::PhantomData<N>,
+    _m: std::marker::PhantomData<N>,
+}
+
+impl<CW, N> QuorumServer<CW, N> {
+    pub fn new(id: usize, crypto_worker: CW) -> Self {
+        Self {
+            id,
+            crypto_worker,
+            _m: Default::default(),
+        }
+    }
 }
 
 impl<CW: Submit<Crypto, N>, N: SendMessage<A, Verifiable<AnnounceOk>>, A: Addr>
@@ -201,10 +211,31 @@ impl<CW: Submit<Crypto, N>, N: SendMessage<A, Verifiable<AnnounceOk>>, A: Addr>
     }
 }
 
+impl<CW, N> OnTimer for QuorumServer<CW, N> {
+    fn on_timer(
+        &mut self,
+        _: crate::event::TimerId,
+        _: &mut impl crate::event::Timer,
+    ) -> anyhow::Result<()> {
+        unreachable!()
+    }
+}
+
+#[derive_where(Debug, Clone; CW)]
 pub struct VerifyQuorumClock<CW, E> {
     num_faulty: usize,
     crypto_worker: CW,
     _m: std::marker::PhantomData<E>,
+}
+
+impl<CW, E> VerifyQuorumClock<CW, E> {
+    pub fn new(num_faulty: usize, crypto_worker: CW) -> Self {
+        Self {
+            num_faulty,
+            crypto_worker,
+            _m: Default::default(),
+        }
+    }
 }
 
 impl<CW: Submit<Crypto, E>, E: SendEvent<Recv<Announce<A>>>, A: Addr> SendEvent<Recv<Announce<A>>>

@@ -164,7 +164,7 @@ pub enum CryptoFlavor {
 impl Crypto {
     pub fn new_hardcoded(
         n: usize,
-        replica_id: impl Into<usize>,
+        index: impl Into<usize>,
         flavor: CryptoFlavor,
     ) -> anyhow::Result<Self> {
         let secret_keys = (0..n).map(|id| {
@@ -178,7 +178,7 @@ impl Crypto {
                 public_keys: (0..n)
                     .map(|i| PublicKey::Plain(format!("replica-{i:03}")))
                     .collect(),
-                provider: CryptoProvider::Insecure(format!("replica-{:03}", replica_id.into())),
+                provider: CryptoProvider::Insecure(format!("replica-{:03}", index.into())),
             },
             CryptoFlavor::Secp256k1 => {
                 let secret_keys = secret_keys
@@ -191,7 +191,7 @@ impl Crypto {
                         .map(|secret_key| PublicKey::Secp256k1(secret_key.public_key(&secp)))
                         .collect(),
                     provider: CryptoProvider::Secp256k1(Secp256k1Crypto {
-                        secret_key: secret_keys[replica_id.into()],
+                        secret_key: secret_keys[index.into()],
                         secp,
                     }),
                 }
@@ -210,7 +210,7 @@ impl Crypto {
                         .map(|keypair| PublicKey::Schnorrkel(keypair.public))
                         .collect(),
                     provider: CryptoProvider::Schnorrkel(Box::new(peer::Crypto {
-                        keypair: secret_keys.remove(replica_id.into()),
+                        keypair: secret_keys.remove(index.into()),
                         context: schnorrkel::signing_context(b"default"),
                     })),
                 }

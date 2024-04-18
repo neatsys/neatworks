@@ -26,6 +26,13 @@ pub struct MutexReplicated {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct MutexQuorum {
+    pub addrs: Vec<SocketAddr>,
+    pub id: u8,
+    pub quorum: Quorum,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CopsServer {
     pub addrs: Vec<SocketAddr>,
     pub id: u8,
@@ -49,9 +56,22 @@ pub struct CopsClient {
 pub enum CopsVariant {
     Untrusted,
     Replicated(CopsReplicated),
+    Quorum(Quorum),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CopsReplicated {
     pub num_faulty: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Quorum {
+    pub addrs: Vec<SocketAddr>,
+    pub num_faulty: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QuorumServer {
+    pub quorum: Quorum,
+    pub index: usize,
 }

@@ -1,5 +1,6 @@
 mod boson_cops;
 mod boson_mutex;
+mod boson_quorum;
 
 use std::{backtrace::BacktraceStatus, sync::Arc, time::Duration};
 
@@ -34,6 +35,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/cops/poll-results", post(cops_poll_results))
         .route("/cops/start-server", post(cops_start_server))
         .route("/cops/stop-server", post(stop))
+        .route("/start-quorum", post(start_quorum))
         .with_state(AppState {
             session: Default::default(),
         });
@@ -186,6 +188,7 @@ async fn cops_start_client(
         let handle = match &config.variant {
             Untrusted => tokio::spawn(boson_cops::untrusted_client_session(config, upcall_sender)),
             Replicated(_) => tokio::spawn(boson_cops::pbft_client_session(config, upcall_sender)),
+            Quorum(_) => todo!(),
         };
         *session = Some(AppSession {
             handle,
@@ -243,7 +246,35 @@ async fn cops_start_server(
         let handle = match &config.variant {
             Untrusted => tokio::spawn(boson_cops::untrusted_server_session(config, cancel.clone())),
             Replicated(_) => tokio::spawn(boson_cops::pbft_server_session(config, cancel.clone())),
+            Quorum(_) => todo!(),
         };
+        *session = Some(AppSession {
+            handle,
+            cancel,
+            event_sender,
+            upcall: upcall_receiver,
+        });
+        anyhow::Ok(())
+    }
+    .await
+    {
+        log_exit(err)
+    } else {
+        StatusCode::OK
+    }
+}
+
+async fn start_quorum(
+    State(state): State<AppState>,
+    Json(config): Json<boson_control_messages::QuorumServer>,
+) -> StatusCode {
+    if let Err(err) = async {
+        let mut session = state.session.lock().await;
+        anyhow::ensure!(session.is_none());
+        let (event_sender, _) = unbounded_channel();
+        let (_, upcall_receiver) = unbounded_channel();
+        let cancel = CancellationToken::new();
+        let handle = tokio::spawn(boson_quorum::session(config, cancel.clone()));
         *session = Some(AppSession {
             handle,
             cancel,
