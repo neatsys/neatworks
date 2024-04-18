@@ -94,13 +94,13 @@ pub trait DepOrd {
 pub struct Put<V, A> {
     key: KeyId,
     value: String,
-    deps: BTreeMap<KeyId, V>,
+    pub deps: BTreeMap<KeyId, V>,
     client_addr: A,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct PutOk<V> {
-    version_deps: V,
+    pub version_deps: V,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash)]
@@ -112,14 +112,14 @@ pub struct Get<A> {
 #[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct GetOk<V> {
     value: String,
-    version_deps: V,
+    pub version_deps: V,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct SyncKey<V> {
     key: KeyId,
     value: String,
-    version_deps: V,
+    pub version_deps: V,
 }
 
 pub trait ClientNet<A, V>: SendMessage<A, Put<V, A>> + SendMessage<A, Get<A>> {}
@@ -611,6 +611,12 @@ impl DefaultVersion {
         }
         Self(merged)
     }
+
+    pub fn update<'a>(&'a self, others: impl Iterator<Item = &'a Self>, id: u64) -> Self {
+        let mut updated = others.fold(self.clone(), |version, dep| version.merge(dep));
+        *updated.0.entry(id).or_default() += 1;
+        updated
+    }
 }
 
 impl PartialOrd for DefaultVersion {
@@ -652,14 +658,9 @@ impl<E: SendEvent<events::UpdateOk<DefaultVersion>>> SendEvent<events::Update<De
     for DefaultVersionService<E>
 {
     fn send(&mut self, update: events::Update<DefaultVersion>) -> anyhow::Result<()> {
-        let mut version_deps = update
-            .deps
-            .into_iter()
-            .fold(update.prev, |version, dep| version.merge(&dep));
-        *version_deps.0.entry(update.id).or_default() += 1;
         let update_ok = events::UpdateOk {
             id: update.id,
-            version_deps,
+            version_deps: update.prev.update(update.deps.iter(), update.id),
         };
         self.0.send(update_ok)
     }

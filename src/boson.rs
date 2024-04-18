@@ -8,14 +8,16 @@ use crate::{
     crypto::{Crypto, Verifiable},
     event::{erased::OnEvent, SendEvent},
     lamport_mutex,
-    net::{events::Recv, All, SendMessage},
+    net::{events::Recv, Addr, All, SendMessage},
+    worker::Submit,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Announce {
+pub struct Announce<A> {
     prev: QuorumClock,
     merged: Vec<QuorumClock>,
     id: u64,
+    addr: A,
 }
 
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]
@@ -59,17 +61,8 @@ impl QuorumClock {
     }
 }
 
-impl From<cops::events::Update<QuorumClock>> for Announce {
-    fn from(value: cops::events::Update<QuorumClock>) -> Self {
-        Self {
-            prev: value.prev,
-            merged: value.deps,
-            id: value.id,
-        }
-    }
-}
-
-pub struct QuorumClient<U, N> {
+pub struct QuorumClient<U, N, A> {
+    addr: A,
     num_faulty: usize,
     working_announces: HashMap<u64, WorkingAnnounce>,
     upcall: U,
@@ -81,33 +74,37 @@ struct WorkingAnnounce {
     replies: HashMap<usize, Verifiable<AnnounceOk>>,
 }
 
-// technically should define two dedicated events for interaction with client
-// user, but reusing `Announce` and `(u64, QuorumClock)` seems to be ok
+struct SubmitAnnounce(QuorumClock, Vec<QuorumClock>, u64);
 
-impl<U, N: SendMessage<All, Announce>> OnEvent<Announce> for QuorumClient<U, N> {
+impl<U, N: SendMessage<All, Announce<A>>, A: Clone> OnEvent<SubmitAnnounce>
+    for QuorumClient<U, N, A>
+{
     fn on_event(
         &mut self,
-        announce: Announce,
+        SubmitAnnounce(prev, merged, id): SubmitAnnounce,
         _: &mut impl crate::event::Timer,
     ) -> anyhow::Result<()> {
         let replaced = self.working_announces.insert(
-            announce.id,
+            id,
             WorkingAnnounce {
-                plain: announce.prev.plain.clone(),
+                plain: prev.plain.clone(),
                 replies: Default::default(),
             },
         );
-        anyhow::ensure!(
-            replaced.is_none(),
-            "concurrent announce on id {}",
-            announce.id
-        );
+        anyhow::ensure!(replaced.is_none(), "concurrent announce on id {id}");
+        let announce = Announce {
+            prev,
+            merged,
+            id,
+            addr: self.addr.clone(),
+        };
         self.net.send(All, announce)
     }
 }
 
-impl<U: SendEvent<(u64, QuorumClock)>, N> OnEvent<Recv<Verifiable<AnnounceOk>>>
-    for QuorumClient<U, N>
+// feel lazy to define event type for replying
+impl<U: SendEvent<(u64, QuorumClock)>, N, A> OnEvent<Recv<Verifiable<AnnounceOk>>>
+    for QuorumClient<U, N, A>
 {
     fn on_event(
         &mut self,
@@ -138,14 +135,12 @@ impl<U: SendEvent<(u64, QuorumClock)>, N> OnEvent<Recv<Verifiable<AnnounceOk>>>
 
 pub struct Lamport<E>(pub E, pub u64);
 
-impl<E: SendEvent<Announce>> SendEvent<lamport_mutex::events::Update<QuorumClock>> for Lamport<E> {
+impl<E: SendEvent<SubmitAnnounce>> SendEvent<lamport_mutex::events::Update<QuorumClock>>
+    for Lamport<E>
+{
     fn send(&mut self, update: lamport_mutex::Update<QuorumClock>) -> anyhow::Result<()> {
-        let announce = Announce {
-            prev: update.prev,
-            merged: vec![update.remote],
-            id: self.1,
-        };
-        self.0.send(announce)
+        self.0
+            .send(SubmitAnnounce(update.prev, vec![update.remote], self.1))
     }
 }
 
@@ -160,14 +155,10 @@ impl<E: SendEvent<lamport_mutex::events::UpdateOk<QuorumClock>>> SendEvent<(u64,
 
 pub struct Cops<E>(pub E);
 
-impl<E: SendEvent<Announce>> SendEvent<cops::events::Update<QuorumClock>> for Cops<E> {
+impl<E: SendEvent<SubmitAnnounce>> SendEvent<cops::events::Update<QuorumClock>> for Cops<E> {
     fn send(&mut self, update: cops::events::Update<QuorumClock>) -> anyhow::Result<()> {
-        let announce = Announce {
-            prev: update.prev,
-            merged: update.deps,
-            id: update.id,
-        };
-        self.0.send(announce)
+        self.0
+            .send(SubmitAnnounce(update.prev, update.deps, update.id))
     }
 }
 
@@ -178,6 +169,136 @@ impl<E: SendEvent<cops::events::UpdateOk<QuorumClock>>> SendEvent<(u64, QuorumCl
             version_deps: clock,
         };
         self.0.send(update_ok)
+    }
+}
+
+pub struct QuorumServer<CW, N> {
+    id: usize,
+    crypto_worker: CW,
+    _n: std::marker::PhantomData<N>,
+}
+
+impl<CW: Submit<Crypto, N>, N: SendMessage<A, Verifiable<AnnounceOk>>, A: Addr>
+    OnEvent<Recv<Announce<A>>> for QuorumServer<CW, N>
+{
+    fn on_event(
+        &mut self,
+        Recv(announce): Recv<Announce<A>>,
+        _: &mut impl crate::event::Timer,
+    ) -> anyhow::Result<()> {
+        let plain = announce.prev.plain.update(
+            announce.merged.iter().map(|clock| &clock.plain),
+            announce.id,
+        );
+        let announce_ok = AnnounceOk {
+            plain,
+            id: announce.id,
+            signer_id: self.id,
+        };
+        self.crypto_worker.submit(Box::new(move |crypto, net| {
+            net.send(announce.addr, crypto.sign(announce_ok))
+        }))
+    }
+}
+
+pub struct VerifyQuorumClock<CW, E> {
+    num_faulty: usize,
+    crypto_worker: CW,
+    _m: std::marker::PhantomData<E>,
+}
+
+impl<CW: Submit<Crypto, E>, E: SendEvent<Recv<Announce<A>>>, A: Addr> SendEvent<Recv<Announce<A>>>
+    for VerifyQuorumClock<CW, E>
+{
+    fn send(&mut self, Recv(announce): Recv<Announce<A>>) -> anyhow::Result<()> {
+        let num_faulty = self.num_faulty;
+        self.crypto_worker.submit(Box::new(move |crypto, sender| {
+            if announce.prev.verify(num_faulty, crypto).is_ok()
+                && announce
+                    .merged
+                    .iter()
+                    .all(|clock| clock.verify(num_faulty, crypto).is_ok())
+            {
+                sender.send(Recv(announce))
+            } else {
+                Ok(())
+            }
+        }))
+    }
+}
+
+impl<
+        CW: Submit<Crypto, E>,
+        E: SendEvent<Recv<lamport_mutex::Clocked<M, QuorumClock>>>,
+        M: Send + Sync + 'static,
+    > SendEvent<Recv<lamport_mutex::Clocked<M, QuorumClock>>> for VerifyQuorumClock<CW, E>
+{
+    fn send(
+        &mut self,
+        Recv(clocked): Recv<lamport_mutex::Clocked<M, QuorumClock>>,
+    ) -> anyhow::Result<()> {
+        let num_faulty = self.num_faulty;
+        self.crypto_worker.submit(Box::new(move |crypto, sender| {
+            if clocked.clock.verify(num_faulty, crypto).is_ok() {
+                sender.send(Recv(clocked))
+            } else {
+                Ok(())
+            }
+        }))
+    }
+}
+
+impl<CW: Submit<Crypto, E>, E: SendEvent<Recv<cops::ToClientMessage<QuorumClock>>>>
+    SendEvent<Recv<cops::ToClientMessage<QuorumClock>>> for VerifyQuorumClock<CW, E>
+{
+    fn send(
+        &mut self,
+        Recv(message): Recv<cops::ToClientMessage<QuorumClock>>,
+    ) -> anyhow::Result<()> {
+        let num_faulty = self.num_faulty;
+        self.crypto_worker.submit(Box::new(move |crypto, sender| {
+            if match &message {
+                cops::ToClientMessage::PutOk(message) => &message.version_deps,
+                cops::ToClientMessage::GetOk(message) => &message.version_deps,
+            }
+            .verify(num_faulty, crypto)
+            .is_ok()
+            {
+                sender.send(Recv(message))
+            } else {
+                Ok(())
+            }
+        }))
+    }
+}
+
+impl<
+        CW: Submit<Crypto, E>,
+        E: SendEvent<Recv<cops::ToReplicaMessage<QuorumClock, A>>>,
+        A: Addr,
+    > SendEvent<Recv<cops::ToReplicaMessage<QuorumClock, A>>> for VerifyQuorumClock<CW, E>
+{
+    fn send(
+        &mut self,
+        Recv(message): Recv<cops::ToReplicaMessage<QuorumClock, A>>,
+    ) -> anyhow::Result<()> {
+        let num_faulty = self.num_faulty;
+        self.crypto_worker.submit(Box::new(move |crypto, sender| {
+            if match &message {
+                cops::ToReplicaMessage::Get(_) => true,
+                cops::ToReplicaMessage::Put(message) => message
+                    .deps
+                    .values()
+                    .all(|clock| clock.verify(num_faulty, crypto).is_ok()),
+                cops::ToReplicaMessage::SyncKey(message) => {
+                    message.version_deps.verify(num_faulty, crypto).is_ok()
+                }
+            } {
+                sender.send(Recv(message))
+            } else {
+                Ok(())
+            }
+        }))
     }
 }
 
