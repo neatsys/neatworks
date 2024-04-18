@@ -112,16 +112,35 @@ async fn cops_session(client: reqwest::Client) -> anyhow::Result<()> {
     let client_urls = (0..2)
         .map(|i| format!("http://127.0.0.{}:3000", i + 101))
         .collect::<Vec<_>>();
+    let clock_urls = (0..2)
+        .map(|i| format!("http://127.0.1.{}:3000", i + 1))
+        .collect::<Vec<_>>();
     let addrs = (0..2)
         .map(|i| SocketAddr::from(([127, 0, 0, i + 1], 4000)))
+        .collect::<Vec<_>>();
+    let clock_addrs = (0..2)
+        .map(|i| SocketAddr::from(([127, 0, 0, i + 1], 5000)))
         .collect::<Vec<_>>();
     let client_ips = (0..2)
         .map(|_| IpAddr::from([127, 0, 0, 101]))
         .collect::<Vec<_>>();
     let mut watchdog_sessions = JoinSet::new();
+    println!("Start clock services");
+    let quorum = boson_control_messages::Quorum {
+        addrs: clock_addrs.clone(),
+        num_faulty: 1,
+    };
+    for (i, url) in clock_urls.iter().enumerate() {
+        let config = boson_control_messages::QuorumServer {
+            quorum: quorum.clone(),
+            index: i,
+        };
+        watchdog_sessions.spawn(start_quorum_session(client.clone(), url.clone(), config));
+    }
     use boson_control_messages::CopsVariant::*;
     // let variant = Replicated(boson_control_messages::CopsReplicated { num_faulty: 0 });
     let variant = Untrusted;
+    // let variant = Quorum(quorum);
     println!("Start servers");
     for (i, url) in urls.iter().enumerate() {
         let config = boson_control_messages::CopsServer {
@@ -170,6 +189,9 @@ async fn cops_session(client: reqwest::Client) -> anyhow::Result<()> {
     let mut stop_sessions = JoinSet::new();
     for url in urls {
         stop_sessions.spawn(cops_stop_server_session(client.clone(), url));
+    }
+    for url in clock_urls {
+        stop_sessions.spawn(stop_quorum_session(client.clone(), url));
     }
     while let Some(result) = stop_sessions.join_next().await {
         result??
@@ -232,6 +254,36 @@ async fn cops_client_session(
             break Ok(());
         }
     }
+}
+
+async fn start_quorum_session(
+    client: reqwest::Client,
+    url: String,
+    config: boson_control_messages::QuorumServer,
+) -> anyhow::Result<()> {
+    client
+        .post(format!("{url}/start-quorum"))
+        .json(&config)
+        .send()
+        .await?
+        .error_for_status()?;
+    loop {
+        sleep(Duration::from_millis(1000)).await;
+        client
+            .get(format!("{url}/ok"))
+            .send()
+            .await?
+            .error_for_status()?;
+    }
+}
+
+async fn stop_quorum_session(client: reqwest::Client, url: String) -> anyhow::Result<()> {
+    client
+        .post(format!("{url}/stop-quorum"))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
 }
 
 // cSpell:words reqwest

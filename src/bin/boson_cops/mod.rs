@@ -17,7 +17,7 @@ use augustus::{
         Dispatch, IndexNet,
     },
     pbft,
-    worker::{spawn_backend, Submit, Worker},
+    worker::{spawn_backend, Submit},
     workload::{CloseLoop, Iter, Json, Upcall, Workload},
 };
 use boson_control_messages::{CopsClient, CopsServer, CopsVariant};
@@ -161,6 +161,7 @@ pub async fn pbft_server_session(
     let addr = addrs[id as usize];
     let num_replica = addrs.len();
     let num_faulty = config.num_faulty;
+    let crypto = Crypto::new_hardcoded(num_replica, id, CryptoFlavor::Schnorrkel)?;
     let mut app = app::BTreeMap::new();
     {
         let mut workload = create_workload(thread_rng(), false, record_count, 0..1)?;
@@ -173,6 +174,7 @@ pub async fn pbft_server_session(
     let tcp_listener = TcpListener::bind(addr).await?;
     let mut dispatch_session = event::Session::new();
     let mut replica_session = Session::new();
+    let (crypto_worker, mut crypto_executor) = spawn_backend();
 
     let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
         Tcp::new(addr)?,
@@ -191,19 +193,19 @@ pub async fn pbft_server_session(
             id as usize,
         )),
         pbft::ToClientMessageNet::new(dispatch::Net::from(dispatch_session.sender())),
-        Box::new(pbft::CryptoWorker::from(Worker::Inline(
-            Crypto::new_hardcoded(num_replica, id, CryptoFlavor::Schnorrkel)?,
-            Sender::from(replica_session.sender()),
-        ))) as Box<dyn Submit<Crypto, dyn pbft::SendCryptoEvent<SocketAddr>> + Send + Sync>,
+        Box::new(pbft::CryptoWorker::from(crypto_worker))
+            as Box<dyn Submit<Crypto, dyn pbft::SendCryptoEvent<SocketAddr>> + Send + Sync>,
         num_replica,
         num_faulty,
     )));
 
+    let crypto_session = crypto_executor.run(crypto, Sender::from(replica_session.sender()));
     let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
     let dispatch_session = dispatch_session.run(&mut dispatch);
     let replica_session = replica_session.run(&mut replica);
     tokio::select! {
         () = cancel.cancelled() => return Ok(()),
+        result = crypto_session => result?,
         result = tcp_accept_session => result?,
         result = dispatch_session => result?,
         result = replica_session => result?,

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use derive_where::derive_where;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, warn};
 
 use crate::{
     cops::{self, DefaultVersion, DepOrd},
@@ -70,7 +71,7 @@ pub struct QuorumClient<U, N, A> {
 }
 
 struct WorkingAnnounce {
-    plain: DefaultVersion,
+    prev_plain: DefaultVersion,
     replies: HashMap<usize, Verifiable<AnnounceOk>>,
 }
 
@@ -99,7 +100,7 @@ impl<U, N: SendMessage<All, Announce<A>>, A: Clone> OnEvent<SubmitAnnounce>
         let replaced = self.working_announces.insert(
             id,
             WorkingAnnounce {
-                plain: prev.plain.clone(),
+                prev_plain: prev.plain.clone(),
                 replies: Default::default(),
             },
         );
@@ -126,7 +127,12 @@ impl<U: SendEvent<(u64, QuorumClock)>, N, A> OnEvent<Recv<Verifiable<AnnounceOk>
         let Some(working_state) = self.working_announces.get_mut(&announce_ok.id) else {
             return Ok(());
         };
-        if working_state.plain != announce_ok.plain {
+        // sufficient rule out?
+        if announce_ok
+            .plain
+            .dep_cmp(&working_state.prev_plain, announce_ok.id)
+            .is_le()
+        {
             return Ok(());
         }
         working_state
@@ -227,6 +233,7 @@ impl<CW: Submit<Crypto, N>, N: SendMessage<A, Verifiable<AnnounceOk>>, A: Addr>
             id: announce.id,
             signer_id: self.id,
         };
+        debug!("signing {announce_ok:?}");
         self.crypto_worker.submit(Box::new(move |crypto, net| {
             net.send(announce.addr, crypto.sign(announce_ok))
         }))
@@ -273,6 +280,7 @@ impl<CW: Submit<Crypto, E>, E: SendEvent<Recv<M>>, M: VerifyClock> SendEvent<Rec
             if message.verify_clock(num_faulty, crypto).is_ok() {
                 sender.send(Recv(message))
             } else {
+                warn!("clock verification failed");
                 Ok(())
             }
         }))

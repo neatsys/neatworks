@@ -411,7 +411,7 @@ impl<N, CN, CW, S, A, M> Replica<N, CN, CW, S, A, M> {
         (self.log.len() as u32).max(1)
     }
 
-    const NUM_CONCURRENT_PRE_PREPARE: u32 = 1;
+    const NUM_CONCURRENT_PRE_PREPARE: u32 = 8;
 }
 
 pub trait ReplicaCommon {
@@ -586,6 +586,8 @@ impl<M: ReplicaCommon> OnEvent<Recv<(Verifiable<PrePrepare>, Vec<Request<M::A>>)
         // prepares and commits) in order to mitigate performance degradation caused by faulty
         // proposals
         // omitted since (again) that's only on slow path
+
+        // TODO should reject op number over high watermark here
         let replica_id = pre_prepare.view_num as usize % self.num_replica;
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
             if (requests.sha256() == pre_prepare.digest
@@ -968,7 +970,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
             {
                 self.close_batch()?
             }
-        } else if commit.op_num - Self::NUM_CONCURRENT_PRE_PREPARE > self.commit_num {
+        } else if commit.op_num > self.commit_num + Self::NUM_CONCURRENT_PRE_PREPARE {
             anyhow::bail!("state transfer")
         }
         Ok(())
