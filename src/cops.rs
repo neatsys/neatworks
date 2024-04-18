@@ -48,6 +48,7 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, HashMap, VecDeque},
     mem::take,
+    time::Duration,
 };
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -57,7 +58,7 @@ use crate::{
     app::ycsb,
     event::{
         erased::{OnEventRichTimer as OnEvent, RichTimer as Timer},
-        SendEvent,
+        SendEvent, TimerId,
     },
     net::{deserialize, events::Recv, Addr, All, MessageNet, SendMessage},
     workload::events::{Invoke, InvokeOk},
@@ -155,7 +156,7 @@ pub struct Client<N, U, V, A> {
     addr: A,
     replica_addr: A, // local replica address, the one client always contacts
     deps: BTreeMap<KeyId, V>,
-    working_key: Option<KeyId>,
+    working_key: Option<(KeyId, TimerId)>,
 
     net: N,
     upcall: U,
@@ -174,11 +175,18 @@ impl<N, U, V, A> Client<N, U, V, A> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct InvokeTimeout;
+
+impl InvokeTimeout {
+    const AFTER: Duration = Duration::from_millis(800);
+}
+
 impl<N: ClientNet<A, V>, U, V: Version, A: Addr> OnEvent<Invoke<ycsb::Op>> for Client<N, U, V, A> {
     fn on_event(
         &mut self,
         Invoke(op): Invoke<ycsb::Op>,
-        _: &mut impl Timer<Self>,
+        timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let key = match &op {
             ycsb::Op::Read(key) | ycsb::Op::Update(key, ..) => key
@@ -188,7 +196,9 @@ impl<N: ClientNet<A, V>, U, V: Version, A: Addr> OnEvent<Invoke<ycsb::Op>> for C
                 .parse()?,
             _ => anyhow::bail!("unimplemented"),
         };
-        let replaced = self.working_key.replace(key);
+        let replaced = self
+            .working_key
+            .replace((key, timer.set(InvokeTimeout::AFTER, InvokeTimeout)?));
         // Put/Put concurrent is forbid by original work as well
         // Put/Get concurrent is allowed there, but may incur some difficulties when checking the
         // validity of PutOk/GetOk (not sure)
@@ -224,9 +234,9 @@ impl<N, U: SendEvent<InvokeOk<ycsb::Result>>, V: Version, A> OnEvent<Recv<PutOk<
     fn on_event(
         &mut self,
         Recv(put_ok): Recv<PutOk<V>>,
-        _: &mut impl Timer<Self>,
+        timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        let Some(key) = self.working_key.take() else {
+        let Some((key, timer_id)) = self.working_key.take() else {
             anyhow::bail!("missing working key")
         };
         if !self.deps.values().all(|dep| {
@@ -238,6 +248,7 @@ impl<N, U: SendEvent<InvokeOk<ycsb::Result>>, V: Version, A> OnEvent<Recv<PutOk<
             return Ok(());
         }
         self.deps = [(key, put_ok.version_deps)].into();
+        timer.unset(timer_id)?;
         self.upcall.send((Default::default(), ycsb::Result::Ok)) // careful
     }
 }
@@ -248,9 +259,9 @@ impl<N, U: SendEvent<InvokeOk<ycsb::Result>>, V: Version, A> OnEvent<Recv<GetOk<
     fn on_event(
         &mut self,
         Recv(get_ok): Recv<GetOk<V>>,
-        _: &mut impl Timer<Self>,
+        timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        let Some(key) = self.working_key.take() else {
+        let Some((key, timer_id)) = self.working_key.take() else {
             anyhow::bail!("missing working key")
         };
         if !self
@@ -261,8 +272,19 @@ impl<N, U: SendEvent<InvokeOk<ycsb::Result>>, V: Version, A> OnEvent<Recv<GetOk<
             return Ok(());
         }
         self.deps.insert(key, get_ok.version_deps);
+        timer.unset(timer_id)?;
         self.upcall
             .send((Default::default(), ycsb::Result::ReadOk(vec![get_ok.value])))
+    }
+}
+
+impl<N, U, V, A> OnEvent<InvokeTimeout> for Client<N, U, V, A> {
+    fn on_event(
+        &mut self,
+        InvokeTimeout: InvokeTimeout,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("client timeout while working on {:?}", self.working_key)
     }
 }
 

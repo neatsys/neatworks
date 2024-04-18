@@ -264,6 +264,8 @@ impl<CN, U, C> Processor<CN, U, C> {
 }
 
 pub mod events {
+    pub use super::{Update, UpdateOk};
+
     pub struct Request;
     pub struct RequestOk;
     pub struct Release;
