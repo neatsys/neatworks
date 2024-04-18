@@ -279,7 +279,8 @@ impl Crypto {
         Ok(())
     }
 
-    pub fn verify_batched<I: Clone + Into<usize>, M: DigestHash>(
+    // TODO deduplicate with the `peer::Crypto` version
+    pub fn verify_batch<I: Clone + Into<usize>, M: DigestHash>(
         &self,
         indexes: &[I],
         signed: &[Verifiable<M>],
@@ -315,6 +316,7 @@ impl Crypto {
 pub mod peer {
     use std::{fmt::Debug, hash::Hash};
 
+    use derive_where::derive_where;
     use rand::{CryptoRng, RngCore};
     use schnorrkel::{context::SigningContext, Keypair};
     use serde::{Deserialize, Serialize};
@@ -356,17 +358,11 @@ pub mod peer {
     }
 
     #[derive(Clone)]
+    #[derive_where(Debug)]
     pub struct Crypto {
         pub keypair: Keypair,
+        #[derive_where(skip)]
         pub context: SigningContext,
-    }
-
-    impl Debug for Crypto {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("Crypto")
-                .field("keypair", &self.keypair)
-                .finish_non_exhaustive()
-        }
     }
 
     impl Crypto {
@@ -411,6 +407,23 @@ pub mod peer {
                 .verify(self.context.hash256(state), signature)
                 .map_err(anyhow::Error::msg)
         }
+
+        pub fn verify_batch<M: DigestHash>(
+            &self,
+            public_keys: &[PublicKey],
+            signed: &[Verifiable<M>],
+        ) -> anyhow::Result<()> {
+            let mut transcripts = Vec::new();
+            let mut signatures = Vec::new();
+            for verifiable in signed {
+                let mut state = Sha256::new();
+                DigestHash::hash(&verifiable.inner, &mut state);
+                transcripts.push(self.context.hash256(state));
+                signatures.push(verifiable.signature.0);
+            }
+            schnorrkel::verify_batch(transcripts, &signatures, public_keys, true)
+                .map_err(anyhow::Error::msg)
+        }
     }
 }
 
@@ -442,7 +455,7 @@ mod tests {
             .iter()
             .map(|crypto| crypto.sign(message))
             .collect::<Vec<_>>();
-        crypto[0].verify_batched(&[0usize, 1, 2, 3], &verifiable)
+        crypto[0].verify_batch(&[0usize, 1, 2, 3], &verifiable)
     }
 }
 

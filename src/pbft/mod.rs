@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, fmt::Debug, time::Duration};
 
 use derive_where::derive_where;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::{
     app::App,
@@ -322,6 +323,7 @@ struct LogEntry<A> {
     prepares: Quorum<Prepare>,
     commits: Quorum<Commit>,
     progress: TimerState<ProgressPrepared>,
+    state_transfer: TimerState<StateTransfer>,
 }
 
 impl<A> Default for LogEntry<A> {
@@ -332,6 +334,7 @@ impl<A> Default for LogEntry<A> {
             prepares: Default::default(),
             commits: Default::default(),
             progress: TimerState::new(CLIENT_RESEND_INTERVAL / 5),
+            state_transfer: TimerState::new(Duration::from_millis(500)),
         }
     }
 }
@@ -893,6 +896,9 @@ impl<M: ReplicaCommon> OnEvent<Verified<Commit>> for Replica<M::N, M::CN, M::CW,
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct StateTransfer(u32);
+
 impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     fn insert_commit(
         &mut self,
@@ -939,6 +945,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
             }
             self.commit_num += 1;
             // println!("[{}] Execute {}", self.id, self.commit_num);
+            log_entry.state_transfer.ensure_unset(timer)?;
 
             for request in &log_entry.requests {
                 // println!("Execute {request:?}");
@@ -970,10 +977,27 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
             {
                 self.close_batch()?
             }
-        } else if commit.op_num > self.commit_num + Self::NUM_CONCURRENT_PRE_PREPARE {
-            anyhow::bail!("state transfer")
+        } else if commit.op_num > self.commit_num {
+            for op_num in self.commit_num + 1..=commit.op_num {
+                self.log[op_num as usize]
+                    .state_transfer
+                    .ensure_set(StateTransfer(op_num), timer)?
+            }
         }
         Ok(())
+    }
+}
+
+impl<M: ReplicaCommon> OnEvent<StateTransfer> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+    fn on_event(
+        &mut self,
+        StateTransfer(op_num): StateTransfer,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()>
+    where
+        Self: Sized,
+    {
+        anyhow::bail!("{:?} timeout", StateTransfer(op_num))
     }
 }
 
@@ -1005,6 +1029,7 @@ impl<M: ReplicaCommon> OnEvent<DoViewChange> for Replica<M::N, M::CN, M::CW, M::
     where
         Self: Sized,
     {
+        warn!("[{}] do view change for view {view_num}", self.id);
         assert!(view_num >= self.view_num);
         self.view_num = view_num;
         let DoViewChange(also_view_num) = self.do_view_change.unset(timer)?;

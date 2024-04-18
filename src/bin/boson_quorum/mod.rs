@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use augustus::{
     boson::{self, QuorumServer},
-    crypto::{Crypto, CryptoFlavor, Verifiable},
+    crypto::peer::{Crypto, Verifiable},
     event::{
         self,
         erased::{session::Sender, Blanket, Session, Unify},
@@ -16,6 +16,7 @@ use augustus::{
     },
     worker::spawn_backend,
 };
+use rand::thread_rng;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -24,11 +25,7 @@ pub async fn session(
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let addr = config.quorum.addrs[config.index];
-    let crypto = Crypto::new_hardcoded(
-        config.quorum.addrs.len(),
-        config.index,
-        CryptoFlavor::Schnorrkel,
-    )?;
+    let crypto = Crypto::new_random(&mut thread_rng());
     let tcp_listener = TcpListener::bind(addr).await?;
 
     let mut dispatch_session = event::Session::new();
@@ -41,11 +38,18 @@ pub async fn session(
         {
             let mut sender =
                 boson::VerifyQuorumClock::new(config.quorum.num_faulty, recv_crypto_worker);
-            move |buf: &_| sender.send(Recv(deserialize::<boson::Announce<SocketAddr>>(buf)?))
+            move |buf: &_| {
+                sender.send(Recv(
+                    deserialize::<Verifiable<boson::Announce<SocketAddr>>>(buf)?,
+                ))
+            }
         },
         Once(dispatch_session.sender()),
     )?));
-    let mut server = Blanket(Unify(QuorumServer::new(config.index, send_crypto_worker)));
+    let mut server = Blanket(Unify(QuorumServer::new(
+        crypto.public_key(),
+        send_crypto_worker,
+    )));
 
     let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
     let recv_crypto_session =

@@ -4,7 +4,6 @@ use augustus::{
     app::{self, ycsb, App},
     boson::{self, QuorumClient, QuorumClock, VerifyQuorumClock},
     cops::{self, DefaultVersion, DefaultVersionService},
-    crypto::{Crypto, CryptoFlavor, Verifiable},
     event::{
         self,
         erased::{events::Init, session::Sender, Blanket, Buffered, Session, Unify},
@@ -149,6 +148,8 @@ pub async fn pbft_server_session(
     config: CopsServer,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
+    use augustus::crypto::{Crypto, CryptoFlavor};
+
     let CopsServer {
         addrs,
         id,
@@ -372,6 +373,8 @@ pub async fn quorum_client_session(
     config: CopsClient,
     upcall: impl Clone + SendEvent<(f32, Duration)> + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
+    use augustus::crypto::peer::Crypto;
+
     let CopsClient {
         addrs,
         ip,
@@ -388,7 +391,7 @@ pub async fn quorum_client_session(
     let replica_addr = addrs[index];
     // client don't sign clocks, only verify, so index could be arbitrary
     // still not good practice though
-    let crypto = Crypto::new_hardcoded(config.addrs.len(), 0usize, CryptoFlavor::Schnorrkel)?;
+    let crypto = Crypto::new_random(&mut thread_rng());
 
     let mut sessions = JoinSet::new();
     for index in 0..num_concurrent {
@@ -474,6 +477,8 @@ pub async fn quorum_server_session(
     config: CopsServer,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
+    use augustus::crypto::peer::{Crypto, Verifiable};
+
     let CopsServer {
         addrs,
         id,
@@ -485,7 +490,7 @@ pub async fn quorum_server_session(
     };
     let addr = addrs[id as usize];
     // replica also don't sign any clock
-    let crypto = Crypto::new_hardcoded(config.addrs.len(), 0usize, CryptoFlavor::Schnorrkel)?;
+    let crypto = Crypto::new_random(&mut thread_rng());
 
     let tcp_listener = TcpListener::bind(addr).await?;
     let clock_tcp_listener = TcpListener::bind((addr.ip(), 0)).await?;
@@ -496,6 +501,7 @@ pub async fn quorum_server_session(
     let mut replica_session = Session::new();
     let mut clock_session = Session::new();
     let (client_crypto_worker, mut client_crypto_executor) = spawn_backend();
+    let (crypto_worker, mut crypto_executor) = spawn_backend();
 
     let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
         Tcp::new(addr)?,
@@ -534,23 +540,33 @@ pub async fn quorum_server_session(
     }
     let mut clock = Blanket(Unify(QuorumClient::new(
         clock_addr,
+        crypto.public_key(),
         config.num_faulty,
+        Box::new(boson::quorum_client::CryptoWorker::from(crypto_worker))
+            as Box<
+                dyn Submit<Crypto, dyn boson::quorum_client::SendCryptoEvent<SocketAddr>>
+                    + Send
+                    + Sync,
+            >,
         boson::Cops(Box::new(Sender::from(replica_session.sender()))
             as Box<
                 dyn SendEvent<cops::events::UpdateOk<QuorumClock>> + Send + Sync,
             >),
-        augustus::net::MessageNet::<_, boson::Announce<SocketAddr>>::new(IndexNet::new(
-            dispatch::Net::from(clock_dispatch_session.sender()),
-            config.addrs,
-            None,
-        )),
+        augustus::net::MessageNet::<_, Verifiable<boson::Announce<SocketAddr>>>::new(
+            IndexNet::new(
+                dispatch::Net::from(clock_dispatch_session.sender()),
+                config.addrs,
+                None,
+            ),
+        ),
     )));
 
     let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
     let clock_tcp_accept_session =
         tcp::accept_session(clock_tcp_listener, clock_dispatch_session.sender());
     let client_crypto_session =
-        client_crypto_executor.run(crypto, Sender::from(replica_session.sender()));
+        client_crypto_executor.run(crypto.clone(), Sender::from(replica_session.sender()));
+    let crypto_session = crypto_executor.run(crypto, Sender::from(clock_session.sender()));
     let dispatch_session = dispatch_session.run(&mut dispatch);
     let clock_dispatch_session = clock_dispatch_session.run(&mut clock_dispatch);
     let replica_session = replica_session.run(&mut replica);
@@ -560,6 +576,7 @@ pub async fn quorum_server_session(
         result = tcp_accept_session => result?,
         result = clock_tcp_accept_session => result?,
         result = client_crypto_session => result?,
+        result = crypto_session => result?,
         result = dispatch_session => result?,
         result = clock_dispatch_session => result?,
         result = clock_session => result?,

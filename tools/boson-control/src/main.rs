@@ -139,8 +139,8 @@ async fn cops_session(client: reqwest::Client) -> anyhow::Result<()> {
     }
     use boson_control_messages::CopsVariant::*;
     // let variant = Replicated(boson_control_messages::CopsReplicated { num_faulty: 0 });
-    let variant = Untrusted;
-    // let variant = Quorum(quorum);
+    // let variant = Untrusted;
+    let variant = Quorum(quorum);
     println!("Start servers");
     for (i, url) in urls.iter().enumerate() {
         let config = boson_control_messages::CopsServer {
@@ -166,7 +166,7 @@ async fn cops_session(client: reqwest::Client) -> anyhow::Result<()> {
             addrs: addrs.clone(),
             ip: client_ips[i],
             index: i,
-            num_concurrent: 1,
+            num_concurrent: 10,
             num_concurrent_put: 1,
             record_count: 1000,
             put_range: 500 * i..500 * (i + 1),

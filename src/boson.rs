@@ -6,29 +6,33 @@ use tracing::{debug, warn};
 
 use crate::{
     cops::{self, DefaultVersion, DepOrd},
-    crypto::{Crypto, Verifiable},
+    crypto::peer::{
+        events::{Signed, Verified},
+        Crypto, PublicKey, Verifiable,
+    },
     event::{erased::OnEvent, OnTimer, SendEvent},
     lamport_mutex,
     net::{events::Recv, Addr, All, SendMessage},
     worker::Submit,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
 pub struct Announce<A> {
     prev: QuorumClock,
     merged: Vec<QuorumClock>,
     id: u64,
     addr: A,
+    key: PublicKey,
 }
 
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]
 pub struct AnnounceOk {
     plain: DefaultVersion,
     id: u64,
-    signer_id: usize,
+    key: PublicKey,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, Default, Serialize, Deserialize)]
 #[derive_where(PartialOrd, PartialEq)]
 pub struct QuorumClock {
     plain: DefaultVersion, // redundant, just for easier use
@@ -53,35 +57,90 @@ impl QuorumClock {
             return Ok(());
         }
         anyhow::ensure!(self.cert.len() > num_faulty);
-        let indexes = self
+        let keys = self
             .cert
             .iter()
-            .map(|verifiable| verifiable.signer_id)
+            .map(|verifiable| verifiable.key)
             .collect::<Vec<_>>();
-        crypto.verify_batched(&indexes, &self.cert)
+        crypto.verify_batch(&keys, &self.cert)
     }
 }
 
-pub struct QuorumClient<U, N, A> {
+pub mod quorum_client {
+    use crate::{
+        crypto::peer::{
+            events::{Signed, Verified},
+            Crypto,
+        },
+        event::SendEvent,
+        net::Addr,
+        worker::Submit,
+    };
+
+    use super::{Announce, AnnounceOk};
+
+    pub struct CryptoWorker<W, E>(W, std::marker::PhantomData<E>);
+
+    impl<W, E> From<W> for CryptoWorker<W, E> {
+        fn from(value: W) -> Self {
+            Self(value, Default::default())
+        }
+    }
+
+    pub trait SendCryptoEvent<A>:
+        SendEvent<Signed<Announce<A>>> + SendEvent<Verified<AnnounceOk>>
+    {
+    }
+    impl<T: SendEvent<Signed<Announce<A>>> + SendEvent<Verified<AnnounceOk>>, A> SendCryptoEvent<A>
+        for T
+    {
+    }
+
+    impl<W: Submit<Crypto, E>, E: SendCryptoEvent<A> + 'static, A: Addr>
+        Submit<Crypto, dyn SendCryptoEvent<A>> for CryptoWorker<W, E>
+    {
+        fn submit(
+            &mut self,
+            work: crate::worker::Work<Crypto, dyn SendCryptoEvent<A>>,
+        ) -> anyhow::Result<()> {
+            self.0
+                .submit(Box::new(move |crypto, sender| work(crypto, sender)))
+        }
+    }
+}
+
+pub struct QuorumClient<CW, U, N, A> {
     addr: A,
+    key: PublicKey,
     num_faulty: usize,
     working_announces: HashMap<u64, WorkingAnnounce>,
+    crypto_worker: CW,
     upcall: U,
     net: N,
 }
 
 struct WorkingAnnounce {
     prev_plain: DefaultVersion,
-    replies: HashMap<usize, Verifiable<AnnounceOk>>,
+    replies: HashMap<PublicKey, Verifiable<AnnounceOk>>,
+    pending: Option<Vec<Verifiable<AnnounceOk>>>,
 }
 
-impl<U, N, A> QuorumClient<U, N, A> {
-    pub fn new(addr: A, num_faulty: usize, upcall: U, net: N) -> Self {
+impl<CW, U, N, A> QuorumClient<CW, U, N, A> {
+    pub fn new(
+        addr: A,
+        key: PublicKey,
+        num_faulty: usize,
+        crypto_worker: CW,
+        upcall: U,
+        net: N,
+    ) -> Self {
         Self {
             addr,
+            key,
             num_faulty,
             upcall,
             net,
+            crypto_worker,
             working_announces: Default::default(),
         }
     }
@@ -89,8 +148,8 @@ impl<U, N, A> QuorumClient<U, N, A> {
 
 struct SubmitAnnounce(QuorumClock, Vec<QuorumClock>, u64);
 
-impl<U, N: SendMessage<All, Announce<A>>, A: Clone> OnEvent<SubmitAnnounce>
-    for QuorumClient<U, N, A>
+impl<CW: Submit<Crypto, dyn quorum_client::SendCryptoEvent<A>>, U, N, A: Addr>
+    OnEvent<SubmitAnnounce> for QuorumClient<CW, U, N, A>
 {
     fn on_event(
         &mut self,
@@ -102,6 +161,7 @@ impl<U, N: SendMessage<All, Announce<A>>, A: Clone> OnEvent<SubmitAnnounce>
             WorkingAnnounce {
                 prev_plain: prev.plain.clone(),
                 replies: Default::default(),
+                pending: None,
             },
         );
         anyhow::ensure!(replaced.is_none(), "concurrent announce on id {id}");
@@ -110,14 +170,33 @@ impl<U, N: SendMessage<All, Announce<A>>, A: Clone> OnEvent<SubmitAnnounce>
             merged,
             id,
             addr: self.addr.clone(),
+            key: self.key,
         };
+        self.crypto_worker.submit(Box::new(move |crypto, sender| {
+            sender.send(Signed(crypto.sign(announce)))
+        }))
+    }
+}
+
+impl<CW, U, N: SendMessage<All, Verifiable<Announce<A>>>, A> OnEvent<Signed<Announce<A>>>
+    for QuorumClient<CW, U, N, A>
+{
+    fn on_event(
+        &mut self,
+        Signed(announce): Signed<Announce<A>>,
+        _: &mut impl crate::event::Timer,
+    ) -> anyhow::Result<()> {
         self.net.send(All, announce)
     }
 }
 
 // feel lazy to define event type for replying
-impl<U: SendEvent<(u64, QuorumClock)>, N, A> OnEvent<Recv<Verifiable<AnnounceOk>>>
-    for QuorumClient<U, N, A>
+impl<
+        CW: Submit<Crypto, dyn quorum_client::SendCryptoEvent<A>>,
+        U: SendEvent<(u64, QuorumClock)>,
+        N,
+        A,
+    > OnEvent<Recv<Verifiable<AnnounceOk>>> for QuorumClient<CW, U, N, A>
 {
     fn on_event(
         &mut self,
@@ -135,9 +214,43 @@ impl<U: SendEvent<(u64, QuorumClock)>, N, A> OnEvent<Recv<Verifiable<AnnounceOk>
         {
             return Ok(());
         }
+        if let Some(pending) = &mut working_state.pending {
+            pending.push(announce_ok);
+            return Ok(());
+        }
+        working_state.pending = Some(Default::default());
+        self.crypto_worker.submit(Box::new(move |crypto, sender| {
+            if crypto.verify(&announce_ok.key, &announce_ok).is_ok() {
+                sender.send(Verified(announce_ok))
+            } else {
+                Ok(())
+            }
+        }))
+    }
+}
+
+impl<
+        CW: Submit<Crypto, dyn quorum_client::SendCryptoEvent<A>>,
+        U: SendEvent<(u64, QuorumClock)>,
+        N,
+        A,
+    > OnEvent<Verified<AnnounceOk>> for QuorumClient<CW, U, N, A>
+{
+    fn on_event(
+        &mut self,
+        Verified(announce_ok): Verified<AnnounceOk>,
+        _: &mut impl crate::event::Timer,
+    ) -> anyhow::Result<()> {
+        let Some(working_state) = self.working_announces.get_mut(&announce_ok.id) else {
+            anyhow::bail!("missing working state")
+        };
+        anyhow::ensure!(announce_ok
+            .plain
+            .dep_cmp(&working_state.prev_plain, announce_ok.id)
+            .is_gt());
         working_state
             .replies
-            .insert(announce_ok.signer_id, announce_ok.clone());
+            .insert(announce_ok.key, announce_ok.clone());
         if working_state.replies.len() > self.num_faulty {
             let working_state = self.working_announces.remove(&announce_ok.id).unwrap();
             let announce_ok = announce_ok.into_inner();
@@ -146,12 +259,27 @@ impl<U: SendEvent<(u64, QuorumClock)>, N, A> OnEvent<Recv<Verifiable<AnnounceOk>
                 cert: working_state.replies.into_values().collect(),
             };
             self.upcall.send((announce_ok.id, clock))?
+        } else {
+            let Some(pending) = &mut working_state.pending else {
+                anyhow::bail!("missing pending queue")
+            };
+            if let Some(announce_ok) = pending.pop() {
+                self.crypto_worker.submit(Box::new(move |crypto, sender| {
+                    if crypto.verify(&announce_ok.key, &announce_ok).is_ok() {
+                        sender.send(Verified(announce_ok))
+                    } else {
+                        Ok(())
+                    }
+                }))?
+            } else {
+                working_state.pending = None
+            }
         }
         Ok(())
     }
 }
 
-impl<U, N, A> OnTimer for QuorumClient<U, N, A> {
+impl<CW, U, N, A> OnTimer for QuorumClient<CW, U, N, A> {
     fn on_timer(
         &mut self,
         _: crate::event::TimerId,
@@ -201,15 +329,15 @@ impl<E: SendEvent<cops::events::UpdateOk<QuorumClock>>> SendEvent<(u64, QuorumCl
 }
 
 pub struct QuorumServer<CW, N> {
-    id: usize,
+    key: PublicKey,
     crypto_worker: CW,
     _m: std::marker::PhantomData<N>,
 }
 
 impl<CW, N> QuorumServer<CW, N> {
-    pub fn new(id: usize, crypto_worker: CW) -> Self {
+    pub fn new(key: PublicKey, crypto_worker: CW) -> Self {
         Self {
-            id,
+            key,
             crypto_worker,
             _m: Default::default(),
         }
@@ -217,13 +345,14 @@ impl<CW, N> QuorumServer<CW, N> {
 }
 
 impl<CW: Submit<Crypto, N>, N: SendMessage<A, Verifiable<AnnounceOk>>, A: Addr>
-    OnEvent<Recv<Announce<A>>> for QuorumServer<CW, N>
+    OnEvent<Recv<Verifiable<Announce<A>>>> for QuorumServer<CW, N>
 {
     fn on_event(
         &mut self,
-        Recv(announce): Recv<Announce<A>>,
+        Recv(announce): Recv<Verifiable<Announce<A>>>,
         _: &mut impl crate::event::Timer,
     ) -> anyhow::Result<()> {
+        // TODO check announcer permission
         let plain = announce.prev.plain.update(
             announce.merged.iter().map(|clock| &clock.plain),
             announce.id,
@@ -231,11 +360,11 @@ impl<CW: Submit<Crypto, N>, N: SendMessage<A, Verifiable<AnnounceOk>>, A: Addr>
         let announce_ok = AnnounceOk {
             plain,
             id: announce.id,
-            signer_id: self.id,
+            key: self.key,
         };
         debug!("signing {announce_ok:?}");
         self.crypto_worker.submit(Box::new(move |crypto, net| {
-            net.send(announce.addr, crypto.sign(announce_ok))
+            net.send(announce.into_inner().addr, crypto.sign(announce_ok))
         }))
     }
 }
@@ -287,8 +416,9 @@ impl<CW: Submit<Crypto, E>, E: SendEvent<Recv<M>>, M: VerifyClock> SendEvent<Rec
     }
 }
 
-impl<A: Addr> VerifyClock for Announce<A> {
+impl<A: Addr> VerifyClock for Verifiable<Announce<A>> {
     fn verify_clock(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()> {
+        crypto.verify(&self.key, self)?;
         self.prev.verify(num_faulty, crypto)?;
         for clock in &self.merged {
             clock.verify(num_faulty, crypto)?
