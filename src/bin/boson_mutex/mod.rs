@@ -53,7 +53,7 @@ pub async fn untrusted_session(
         },
         Once(dispatch_session.sender()),
     )?));
-    let mut processor = Blanket(Unify(Processor::new(
+    let mut processor = Blanket(Unify(Processor::<_, _, _>::new(
         id,
         config.addrs.len(),
         |id| (0u32, id),
@@ -176,7 +176,7 @@ pub async fn replicated_session(
         num_faulty,
     )));
     let mut queue = Blanket(Unify(Queue::new(Sender::from(client_session.sender()))));
-    let mut processor = Blanket(Unify(Processor::new(
+    let mut processor = Blanket(Unify(Processor::<_, _, _>::new(
         id,
         num_replica,
         |_| 0u32,
@@ -263,7 +263,7 @@ pub async fn quorum_session(
         },
         Once(dispatch_session.sender()),
     )?));
-    let mut processor = Blanket(Unify(Processor::new(
+    let mut processor = Blanket(Unify(Processor::<_, _, _, true>::new(
         id,
         config.addrs.len(),
         |_| QuorumClock::default(),

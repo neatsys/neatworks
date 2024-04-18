@@ -241,7 +241,8 @@ pub enum Message {
     Release(u8),
 }
 
-pub struct Processor<CN, U, C> {
+// `V` for verifiable
+pub struct Processor<CN, U, C, const V: bool = false> {
     id: u8,
     latests: Vec<C>,
     requests: Vec<(C, u8)>,
@@ -251,7 +252,7 @@ pub struct Processor<CN, U, C> {
     upcall: U,
 }
 
-impl<CN, U, C> Processor<CN, U, C> {
+impl<CN, U, C, const V: bool> Processor<CN, U, C, V> {
     pub fn new(
         id: u8,
         num_processor: usize,
@@ -281,7 +282,9 @@ pub mod events {
 pub trait Net: SendMessage<u8, Message> + SendMessage<All, Message> {}
 impl<T: SendMessage<u8, Message> + SendMessage<All, Message>> Net for T {}
 
-impl<CN: SendMessage<All, Message>, U, C> OnEvent<events::Request> for Processor<CN, U, C> {
+impl<CN: SendMessage<All, Message>, U, C, const V: bool> OnEvent<events::Request>
+    for Processor<CN, U, C, V>
+{
     fn on_event(
         &mut self,
         events::Request: events::Request,
@@ -295,8 +298,12 @@ impl<CN: SendMessage<All, Message>, U, C> OnEvent<events::Request> for Processor
     }
 }
 
-impl<CN: SendMessage<u8, Message>, U: SendEvent<events::RequestOk>, C: Clock>
-    OnEvent<Recv<Clocked<Message, C>>> for Processor<CN, U, C>
+impl<
+        CN: SendMessage<u8, Message> + SendMessage<All, Message>,
+        U: SendEvent<events::RequestOk>,
+        C: Clock,
+        const V: bool,
+    > OnEvent<Recv<Clocked<Message, C>>> for Processor<CN, U, C, V>
 {
     fn on_event(
         &mut self,
@@ -320,7 +327,11 @@ impl<CN: SendMessage<u8, Message>, U: SendEvent<events::RequestOk>, C: Clock>
                 {
                     self.requests.insert(index, (message.clock, id))
                 };
-                self.causal_net.send(id, Message::RequestOk(self.id))?;
+                if V {
+                    self.causal_net.send(All, Message::RequestOk(self.id))?;
+                } else {
+                    self.causal_net.send(id, Message::RequestOk(self.id))?;
+                }
             }
             Message::RequestOk(_) => {}
             Message::Release(_) => {
@@ -343,7 +354,7 @@ impl<CN: SendMessage<u8, Message>, U: SendEvent<events::RequestOk>, C: Clock>
     }
 }
 
-impl<CN, U: SendEvent<events::RequestOk>, C: Clock> Processor<CN, U, C> {
+impl<CN, U: SendEvent<events::RequestOk>, C: Clock, const V: bool> Processor<CN, U, C, V> {
     fn check_requested(&mut self) -> anyhow::Result<()> {
         // self Request, requesting == true
         // all others Request are Release, while loopback Request still not received
@@ -366,7 +377,9 @@ impl<CN, U: SendEvent<events::RequestOk>, C: Clock> Processor<CN, U, C> {
     }
 }
 
-impl<CN: SendMessage<All, Message>, U, C> OnEvent<events::Release> for Processor<CN, U, C> {
+impl<CN: SendMessage<All, Message>, U, C, const V: bool> OnEvent<events::Release>
+    for Processor<CN, U, C, V>
+{
     fn on_event(
         &mut self,
         events::Release: events::Release,
@@ -380,7 +393,7 @@ impl<CN: SendMessage<All, Message>, U, C> OnEvent<events::Release> for Processor
     }
 }
 
-impl<CN, U, C> OnTimer for Processor<CN, U, C> {
+impl<CN, U, C, const V: bool> OnTimer for Processor<CN, U, C, V> {
     fn on_timer(&mut self, _: crate::event::TimerId, _: &mut impl Timer) -> anyhow::Result<()> {
         unreachable!()
     }
