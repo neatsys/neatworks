@@ -74,6 +74,18 @@ struct WorkingAnnounce {
     replies: HashMap<usize, Verifiable<AnnounceOk>>,
 }
 
+impl<U, N, A> QuorumClient<U, N, A> {
+    pub fn new(addr: A, num_faulty: usize, upcall: U, net: N) -> Self {
+        Self {
+            addr,
+            num_faulty,
+            upcall,
+            net,
+            working_announces: Default::default(),
+        }
+    }
+}
+
 struct SubmitAnnounce(QuorumClock, Vec<QuorumClock>, u64);
 
 impl<U, N: SendMessage<All, Announce<A>>, A: Clone> OnEvent<SubmitAnnounce>
@@ -130,6 +142,16 @@ impl<U: SendEvent<(u64, QuorumClock)>, N, A> OnEvent<Recv<Verifiable<AnnounceOk>
             self.upcall.send((announce_ok.id, clock))?
         }
         Ok(())
+    }
+}
+
+impl<U, N, A> OnTimer for QuorumClient<U, N, A> {
+    fn on_timer(
+        &mut self,
+        _: crate::event::TimerId,
+        _: &mut impl crate::event::Timer,
+    ) -> anyhow::Result<()> {
+        unreachable!()
     }
 }
 
@@ -238,63 +260,17 @@ impl<CW, E> VerifyQuorumClock<CW, E> {
     }
 }
 
-impl<CW: Submit<Crypto, E>, E: SendEvent<Recv<Announce<A>>>, A: Addr> SendEvent<Recv<Announce<A>>>
+trait VerifyClock: Send + Sync + 'static {
+    fn verify_clock(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()>;
+}
+
+impl<CW: Submit<Crypto, E>, E: SendEvent<Recv<M>>, M: VerifyClock> SendEvent<Recv<M>>
     for VerifyQuorumClock<CW, E>
 {
-    fn send(&mut self, Recv(announce): Recv<Announce<A>>) -> anyhow::Result<()> {
+    fn send(&mut self, Recv(message): Recv<M>) -> anyhow::Result<()> {
         let num_faulty = self.num_faulty;
         self.crypto_worker.submit(Box::new(move |crypto, sender| {
-            if announce.prev.verify(num_faulty, crypto).is_ok()
-                && announce
-                    .merged
-                    .iter()
-                    .all(|clock| clock.verify(num_faulty, crypto).is_ok())
-            {
-                sender.send(Recv(announce))
-            } else {
-                Ok(())
-            }
-        }))
-    }
-}
-
-impl<
-        CW: Submit<Crypto, E>,
-        E: SendEvent<Recv<lamport_mutex::Clocked<M, QuorumClock>>>,
-        M: Send + Sync + 'static,
-    > SendEvent<Recv<lamport_mutex::Clocked<M, QuorumClock>>> for VerifyQuorumClock<CW, E>
-{
-    fn send(
-        &mut self,
-        Recv(clocked): Recv<lamport_mutex::Clocked<M, QuorumClock>>,
-    ) -> anyhow::Result<()> {
-        let num_faulty = self.num_faulty;
-        self.crypto_worker.submit(Box::new(move |crypto, sender| {
-            if clocked.clock.verify(num_faulty, crypto).is_ok() {
-                sender.send(Recv(clocked))
-            } else {
-                Ok(())
-            }
-        }))
-    }
-}
-
-impl<CW: Submit<Crypto, E>, E: SendEvent<Recv<cops::ToClientMessage<QuorumClock>>>>
-    SendEvent<Recv<cops::ToClientMessage<QuorumClock>>> for VerifyQuorumClock<CW, E>
-{
-    fn send(
-        &mut self,
-        Recv(message): Recv<cops::ToClientMessage<QuorumClock>>,
-    ) -> anyhow::Result<()> {
-        let num_faulty = self.num_faulty;
-        self.crypto_worker.submit(Box::new(move |crypto, sender| {
-            if match &message {
-                cops::ToClientMessage::PutOk(message) => &message.version_deps,
-                cops::ToClientMessage::GetOk(message) => &message.version_deps,
-            }
-            .verify(num_faulty, crypto)
-            .is_ok()
-            {
+            if message.verify_clock(num_faulty, crypto).is_ok() {
                 sender.send(Recv(message))
             } else {
                 Ok(())
@@ -303,33 +279,52 @@ impl<CW: Submit<Crypto, E>, E: SendEvent<Recv<cops::ToClientMessage<QuorumClock>
     }
 }
 
-impl<
-        CW: Submit<Crypto, E>,
-        E: SendEvent<Recv<cops::ToReplicaMessage<QuorumClock, A>>>,
-        A: Addr,
-    > SendEvent<Recv<cops::ToReplicaMessage<QuorumClock, A>>> for VerifyQuorumClock<CW, E>
-{
-    fn send(
-        &mut self,
-        Recv(message): Recv<cops::ToReplicaMessage<QuorumClock, A>>,
-    ) -> anyhow::Result<()> {
-        let num_faulty = self.num_faulty;
-        self.crypto_worker.submit(Box::new(move |crypto, sender| {
-            if match &message {
-                cops::ToReplicaMessage::Get(_) => true,
-                cops::ToReplicaMessage::Put(message) => message
-                    .deps
-                    .values()
-                    .all(|clock| clock.verify(num_faulty, crypto).is_ok()),
-                cops::ToReplicaMessage::SyncKey(message) => {
-                    message.version_deps.verify(num_faulty, crypto).is_ok()
-                }
-            } {
-                sender.send(Recv(message))
-            } else {
-                Ok(())
-            }
-        }))
+impl<A: Addr> VerifyClock for Announce<A> {
+    fn verify_clock(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()> {
+        self.prev.verify(num_faulty, crypto)?;
+        for clock in &self.merged {
+            clock.verify(num_faulty, crypto)?
+        }
+        Ok(())
+    }
+}
+
+impl<M: Send + Sync + 'static> VerifyClock for lamport_mutex::Clocked<M, QuorumClock> {
+    fn verify_clock(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()> {
+        self.clock.verify(num_faulty, crypto)
+    }
+}
+
+impl VerifyClock for cops::PutOk<QuorumClock> {
+    fn verify_clock(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()> {
+        self.version_deps.verify(num_faulty, crypto)
+    }
+}
+
+impl VerifyClock for cops::GetOk<QuorumClock> {
+    fn verify_clock(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()> {
+        self.version_deps.verify(num_faulty, crypto)
+    }
+}
+
+impl<A: Addr> VerifyClock for cops::Put<QuorumClock, A> {
+    fn verify_clock(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()> {
+        for clock in self.deps.values() {
+            clock.verify(num_faulty, crypto)?
+        }
+        Ok(())
+    }
+}
+
+impl<A: Addr> VerifyClock for cops::Get<A> {
+    fn verify_clock(&self, _: usize, _: &Crypto) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+impl VerifyClock for cops::SyncKey<QuorumClock> {
+    fn verify_clock(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()> {
+        self.version_deps.verify(num_faulty, crypto)
     }
 }
 

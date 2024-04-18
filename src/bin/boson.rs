@@ -36,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/cops/start-server", post(cops_start_server))
         .route("/cops/stop-server", post(stop))
         .route("/start-quorum", post(start_quorum))
+        .route("/stop-quorum", post(stop))
         .with_state(AppState {
             session: Default::default(),
         });
@@ -188,7 +189,7 @@ async fn cops_start_client(
         let handle = match &config.variant {
             Untrusted => tokio::spawn(boson_cops::untrusted_client_session(config, upcall_sender)),
             Replicated(_) => tokio::spawn(boson_cops::pbft_client_session(config, upcall_sender)),
-            Quorum(_) => todo!(),
+            Quorum(_) => tokio::spawn(boson_cops::quorum_client_session(config, upcall_sender)),
         };
         *session = Some(AppSession {
             handle,
@@ -246,7 +247,7 @@ async fn cops_start_server(
         let handle = match &config.variant {
             Untrusted => tokio::spawn(boson_cops::untrusted_server_session(config, cancel.clone())),
             Replicated(_) => tokio::spawn(boson_cops::pbft_server_session(config, cancel.clone())),
-            Quorum(_) => todo!(),
+            Quorum(_) => tokio::spawn(boson_cops::quorum_server_session(config, cancel.clone())),
         };
         *session = Some(AppSession {
             handle,
