@@ -162,12 +162,12 @@ pub enum CryptoFlavor {
 }
 
 impl Crypto {
-    pub fn new_hardcoded_replication(
-        num_replica: usize,
+    pub fn new_hardcoded(
+        n: usize,
         replica_id: impl Into<usize>,
         flavor: CryptoFlavor,
     ) -> anyhow::Result<Self> {
-        let secret_keys = (0..num_replica).map(|id| {
+        let secret_keys = (0..n).map(|id| {
             let mut k = [0; 32];
             let k1 = format!("replica-{id}");
             k[..k1.as_bytes().len()].copy_from_slice(k1.as_bytes());
@@ -175,7 +175,7 @@ impl Crypto {
         });
         let crypto = match flavor {
             CryptoFlavor::Plain => Self {
-                public_keys: (0..num_replica)
+                public_keys: (0..n)
                     .map(|i| PublicKey::Plain(format!("replica-{i:03}")))
                     .collect(),
                 provider: CryptoProvider::Insecure(format!("replica-{:03}", replica_id.into())),
@@ -278,6 +278,38 @@ impl Crypto {
         }
         Ok(())
     }
+
+    pub fn verify_batched<I: Clone + Into<usize>, M: DigestHash>(
+        &self,
+        indexes: &[I],
+        signed: &[Verifiable<M>],
+    ) -> anyhow::Result<()> {
+        let CryptoProvider::Schnorrkel(crypto) = &self.provider else {
+            anyhow::bail!("unimplemented") // TODO fallback to verify one by one?
+        };
+        let mut transcripts = Vec::new();
+        let mut signatures = Vec::new();
+        let mut public_keys = Vec::new();
+        for (index, verifiable) in indexes.iter().zip(signed) {
+            let (
+                PublicKey::Schnorrkel(public_key),
+                Signature::Schnorrkel(peer::Signature(signature)),
+            ) = (
+                &self.public_keys[index.clone().into()],
+                &verifiable.signature,
+            )
+            else {
+                anyhow::bail!("unimplemented")
+            };
+            let mut state = Sha256::new();
+            DigestHash::hash(&verifiable.inner, &mut state);
+            transcripts.push(crypto.context.hash256(state));
+            signatures.push(*signature);
+            public_keys.push(*public_key)
+        }
+        schnorrkel::verify_batch(transcripts, &signatures, &public_keys, true)
+            .map_err(anyhow::Error::msg)
+    }
 }
 
 pub mod peer {
@@ -291,7 +323,7 @@ pub mod peer {
     use super::DigestHash;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-    pub struct Signature(schnorrkel::Signature);
+    pub struct Signature(pub schnorrkel::Signature);
 
     impl Ord for Signature {
         fn cmp(&self, other: &Self) -> std::cmp::Ordering {
@@ -398,6 +430,19 @@ mod tests {
             bs: b"hello".to_vec(),
         };
         assert_ne!(foo.sha256(), Default::default());
+    }
+
+    #[test]
+    fn verify_batched() -> anyhow::Result<()> {
+        let message = "hello";
+        let crypto = (0..4usize)
+            .map(|i| Crypto::new_hardcoded(4, i, CryptoFlavor::Schnorrkel))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let verifiable = crypto
+            .iter()
+            .map(|crypto| crypto.sign(message))
+            .collect::<Vec<_>>();
+        crypto[0].verify_batched(&[0usize, 1, 2, 3], &verifiable)
     }
 }
 

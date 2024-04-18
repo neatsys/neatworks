@@ -190,7 +190,7 @@ pub async fn pbft_server_session(
         )),
         pbft::ToClientMessageNet::new(dispatch::Net::from(dispatch_session.sender())),
         Box::new(pbft::CryptoWorker::from(Worker::Inline(
-            Crypto::new_hardcoded_replication(num_replica, id, CryptoFlavor::Schnorrkel)?,
+            Crypto::new_hardcoded(num_replica, id, CryptoFlavor::Schnorrkel)?,
             Sender::from(replica_session.sender()),
         ))) as Box<dyn Submit<Crypto, dyn pbft::SendCryptoEvent<SocketAddr>> + Send + Sync>,
         num_replica,

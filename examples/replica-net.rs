@@ -102,7 +102,7 @@ async fn ping_pong_session<const PING: bool>(index: usize) -> anyhow::Result<()>
         pbft::ToReplicaMessageNet::new(IndexNet::new(replica_udp.clone(), replica_addrs, index)),
         pbft::ToClientMessageNet::new(replica_udp.clone()),
         Box::new(pbft::CryptoWorker::from(Worker::Inline(
-            Crypto::new_hardcoded_replication(2, index, CryptoFlavor::Plain)?,
+            Crypto::new_hardcoded(2, index, CryptoFlavor::Plain)?,
             erased::session::Sender::from(replica_session.sender()),
         ))) as Box<dyn Submit<Crypto, dyn pbft::SendCryptoEvent<SocketAddr>> + Send + Sync>,
         2,

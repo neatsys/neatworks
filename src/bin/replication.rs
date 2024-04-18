@@ -353,7 +353,7 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
         );
         let net = Udp(socket.into());
 
-        let crypto = Crypto::new_hardcoded_replication(
+        let crypto = Crypto::new_hardcoded(
             config.num_replica,
             config.replica_id,
             CryptoFlavor::Schnorrkel,

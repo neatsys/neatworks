@@ -221,7 +221,7 @@ impl<W: Workload, const CHECK: bool> State<W, AllowAll, CHECK> {
                         IndexNet::new(Transient::default(), addrs.clone(), i),
                         Transient::default(),
                         CryptoWorker::from(Worker::Inline(
-                            Crypto::new_hardcoded_replication(num_replica, i, Plain)
+                            Crypto::new_hardcoded(num_replica, i, Plain)
                                 .expect("plain crypto always can be created"),
                             Transient::default(),
                         )),
