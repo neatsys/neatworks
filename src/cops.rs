@@ -617,6 +617,10 @@ impl DefaultVersion {
         *updated.0.entry(id).or_default() += 1;
         updated
     }
+
+    pub fn sum(&self) -> u32 {
+        self.0.values().copied().sum()
+    }
 }
 
 impl PartialOrd for DefaultVersion {

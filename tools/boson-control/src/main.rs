@@ -22,26 +22,45 @@ async fn mutex_session(client: reqwest::Client) -> anyhow::Result<()> {
     let urls = (0..2)
         .map(|i| format!("http://127.0.0.{}:3000", i + 1))
         .collect::<Vec<_>>();
+    let clock_urls = (0..2)
+        .map(|i| format!("http://127.0.1.{}:3000", i + 1))
+        .collect::<Vec<_>>();
+
     let addrs = (0..2)
         .map(|i| SocketAddr::from(([127, 0, 0, i + 1], 4000)))
         .collect::<Vec<_>>();
-    let client_addrs = (0..2)
+    let clock_addrs = (0..2)
         .map(|i| SocketAddr::from(([127, 0, 0, i + 1], 5000)))
         .collect::<Vec<_>>();
 
     let mut watchdog_sessions = JoinSet::new();
+    let quorum = boson_control_messages::Quorum {
+        addrs: clock_addrs,
+        num_faulty: 1,
+    };
+    for (i, url) in clock_urls.iter().enumerate() {
+        let config = boson_control_messages::QuorumServer {
+            quorum: quorum.clone(),
+            index: i,
+        };
+        watchdog_sessions.spawn(start_quorum_session(client.clone(), url.clone(), config));
+    }
     for (index, url) in urls.iter().enumerate() {
-        let config =
+        let config = 
             // boson_control_messages::Mutex::Untrusted(boson_control_messages::MutexUntrusted {
             //     addrs: addrs.clone(),
             //     id: index as _,
             // });
             boson_control_messages::Mutex::Replicated(boson_control_messages::MutexReplicated {
                 addrs: addrs.clone(),
-                client_addrs: client_addrs.clone(),
                 id: index as _,
                 num_faulty: 0,
             });
+            // boson_control_messages::Mutex::Quorum(boson_control_messages::MutexQuorum {
+            //     addrs: addrs.clone(),
+            //     id: index as _,
+            //     quorum: quorum.clone(),
+            // });
 
         watchdog_sessions.spawn(mutex_start_session(client.clone(), url.clone(), config));
     }
@@ -56,6 +75,9 @@ async fn mutex_session(client: reqwest::Client) -> anyhow::Result<()> {
     let mut stop_sessions = JoinSet::new();
     for url in urls {
         stop_sessions.spawn(mutex_stop_session(client.clone(), url));
+    }
+    for url in clock_urls {
+        stop_sessions.spawn(stop_quorum_session(client.clone(), url));
     }
     while let Some(result) = stop_sessions.join_next().await {
         result??

@@ -121,6 +121,12 @@ async fn mutex_start(
                 upcall_sender,
                 cancel.clone(),
             )),
+            Quorum(config) => tokio::spawn(boson_mutex::quorum_session(
+                config,
+                event_receiver,
+                upcall_sender,
+                cancel.clone(),
+            )),
         };
         *session = Some(AppSession {
             handle,

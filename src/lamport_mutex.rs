@@ -22,6 +22,7 @@
 use std::{cmp::Ordering, collections::VecDeque, mem::replace};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use tracing::debug;
 
 use crate::{
     event::{erased::OnEvent, OnTimer, SendEvent, Timer},
@@ -122,7 +123,9 @@ impl<E: SendEvent<Recv<Clocked<M, C>>>, CS: SendEvent<Update<C>>, N, C: Clone, M
         Recv(clocked): Recv<Clocked<M, C>>,
         _: &mut impl Timer,
     ) -> anyhow::Result<()> {
+        debug!("recv clocked");
         if let Some(pending_recv) = &mut self.pending_recv {
+            debug!("recv clocked pending");
             pending_recv.push_back(clocked);
             return Ok(());
         }
@@ -132,6 +135,7 @@ impl<E: SendEvent<Recv<Clocked<M, C>>>, CS: SendEvent<Update<C>>, N, C: Clone, M
             remote: clocked.clock.clone(),
         };
         self.clock_service.send(update)?;
+        debug!("forward recv clocked");
         self.recv_sender.send(Recv(clocked))
     }
 }
@@ -165,6 +169,7 @@ impl<
             clock: self.clock.clone(),
             inner: message,
         };
+        debug!("send clocked");
         self.net.send(dest, clocked)
     }
 }
@@ -182,6 +187,7 @@ impl<E: SendEvent<Recv<Clocked<M, C>>>, M, CS: SendEvent<Update<C>>, N, C: Clock
             anyhow::bail!("missing pending recv queue")
         };
         if let Some(clocked) = pending_recv.pop_front() {
+            debug!("pended recv clocked popped");
             let update = Update {
                 prev: self.clock.clone(),
                 remote: clocked.clock.clone(),
@@ -189,6 +195,7 @@ impl<E: SendEvent<Recv<Clocked<M, C>>>, M, CS: SendEvent<Update<C>>, N, C: Clock
             self.clock_service.send(update)?;
             self.recv_sender.send(Recv(clocked))?
         } else {
+            debug!("pended recv clock cleared");
             self.pending_recv = None
         }
         for send in self.pending_send.drain(..) {

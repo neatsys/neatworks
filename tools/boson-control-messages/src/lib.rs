@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub enum Mutex {
     Untrusted(MutexUntrusted),
     Replicated(MutexReplicated),
+    Quorum(MutexQuorum),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -20,7 +21,6 @@ pub struct MutexUntrusted {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MutexReplicated {
     pub addrs: Vec<SocketAddr>,
-    pub client_addrs: Vec<SocketAddr>,
     pub id: u8,
     pub num_faulty: usize,
 }

@@ -50,6 +50,12 @@ impl DepOrd for QuorumClock {
     }
 }
 
+impl lamport_mutex::Clock for QuorumClock {
+    fn arbitrary_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.plain.sum().cmp(&other.plain.sum())
+    }
+}
+
 impl QuorumClock {
     pub fn verify(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()> {
         if self.plain == DefaultVersion::default() {

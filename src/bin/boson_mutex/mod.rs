@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use augustus::{
     app,
-    crypto::{Crypto, CryptoFlavor},
+    boson::{self, QuorumClient, QuorumClock, VerifyQuorumClock},
     event::{
         self,
         erased::{session::Sender, Blanket, Buffered, Session, Unify},
@@ -18,10 +18,11 @@ use augustus::{
         Detach, Dispatch, IndexNet, InvokeNet,
     },
     pbft,
-    worker::{Submit, Worker},
+    worker::{spawn_backend, Submit, Worker},
     workload::{events::InvokeOk, Queue},
 };
-use boson_control_messages::{MutexReplicated, MutexUntrusted};
+use boson_control_messages::{MutexQuorum, MutexReplicated, MutexUntrusted};
+use rand::thread_rng;
 use tokio::{net::TcpListener, sync::mpsc::UnboundedReceiver};
 use tokio_util::sync::CancellationToken;
 
@@ -39,7 +40,7 @@ pub async fn untrusted_session(
     let id = config.id;
     let addr = config.addrs[id as usize];
 
-    let tcp_listener = TcpListener::bind(config.addrs[config.id as usize]).await?;
+    let tcp_listener = TcpListener::bind(addr).await?;
     let mut dispatch_session = event::Session::new();
     let mut processor_session = Session::new();
     let mut causal_net_session = Session::new();
@@ -107,15 +108,18 @@ pub async fn replicated_session(
     upcall: impl SendEvent<RequestOk> + Send + Sync + 'static,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
+    use augustus::crypto::{Crypto, CryptoFlavor};
+
     let id = config.id;
-    let client_addr = config.client_addrs[config.id as usize];
     let addr = config.addrs[config.id as usize];
     let num_replica = config.addrs.len();
     let num_faulty = config.num_faulty;
     let addrs = config.addrs;
 
-    let client_tcp_listener = TcpListener::bind(client_addr).await?;
+    let client_tcp_listener = TcpListener::bind(SocketAddr::from((addr.ip(), 0))).await?;
+    let client_addr = client_tcp_listener.local_addr()?;
     let tcp_listener = TcpListener::bind(addr).await?;
+
     let mut client_dispatch_session = event::Session::new();
     let mut client_session = Session::new();
     let mut dispatch_session = event::Session::new();
@@ -215,6 +219,129 @@ pub async fn replicated_session(
         result = replica_session => result?,
         result = queue_session => result?,
         result = processor_session => result?,
+    }
+    anyhow::bail!("unreachable")
+}
+
+pub async fn quorum_session(
+    config: MutexQuorum,
+    mut events: UnboundedReceiver<Event>,
+    upcall: impl SendEvent<RequestOk> + Send + Sync + 'static,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
+    use augustus::crypto::peer::{Crypto, Verifiable};
+
+    let id = config.id;
+    let addr = config.addrs[id as usize];
+    let crypto = Crypto::new_random(&mut thread_rng());
+
+    let tcp_listener = TcpListener::bind(addr).await?;
+    let clock_tcp_listener = TcpListener::bind(SocketAddr::from((addr.ip(), 0))).await?;
+    let clock_addr = clock_tcp_listener.local_addr()?;
+
+    let mut dispatch_session = event::Session::new();
+    let mut clock_dispatch_session = event::Session::new();
+    let mut processor_session = Session::new();
+    let mut causal_net_session = Session::new();
+    let mut clock_session = Session::new();
+    let (recv_crypto_worker, mut recv_crypto_executor) = spawn_backend();
+    let (crypto_worker, mut crypto_executor) = spawn_backend();
+
+    let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
+        Tcp::new(addr)?,
+        {
+            let mut sender = VerifyQuorumClock::new(config.quorum.num_faulty, recv_crypto_worker);
+            move |buf: &_| lamport_mutex::on_buf(buf, &mut sender)
+        },
+        Once(dispatch_session.sender()),
+    )?));
+    let mut clock_dispatch = event::Unify(event::Buffered::from(Dispatch::new(
+        Tcp::new(clock_addr)?,
+        {
+            let mut sender = Sender::from(clock_session.sender());
+            move |buf: &_| sender.send(Recv(deserialize::<Verifiable<boson::AnnounceOk>>(buf)?))
+        },
+        Once(dispatch_session.sender()),
+    )?));
+    let mut processor = Blanket(Unify(Processor::new(
+        id,
+        config.addrs.len(),
+        |_| QuorumClock::default(),
+        Detach(Sender::from(causal_net_session.sender())),
+        upcall,
+    )));
+    let mut causal_net = Blanket(Unify(Causal::new(
+        QuorumClock::default(),
+        Box::new(Sender::from(processor_session.sender()))
+            as Box<dyn lamport_mutex::SendRecvEvent<QuorumClock> + Send + Sync>,
+        boson::Lamport(Sender::from(clock_session.sender()), id as _),
+        lamport_mutex::MessageNet::<_, QuorumClock>::new(IndexNet::new(
+            dispatch::Net::from(dispatch_session.sender()),
+            config.addrs,
+            // intentionally sending loopback messages as expected by processor protocol
+            None,
+        )),
+    )?));
+    let mut clock = Blanket(Unify(QuorumClient::new(
+        clock_addr,
+        crypto.public_key(),
+        config.quorum.num_faulty,
+        Box::new(boson::quorum_client::CryptoWorker::from(crypto_worker))
+            as Box<
+                dyn Submit<Crypto, dyn boson::quorum_client::SendCryptoEvent<SocketAddr>>
+                    + Send
+                    + Sync,
+            >,
+        boson::Lamport(
+            Box::new(Sender::from(causal_net_session.sender()))
+                as Box<dyn SendEvent<lamport_mutex::events::UpdateOk<QuorumClock>> + Send + Sync>,
+            id as _,
+        ),
+        augustus::net::MessageNet::<_, Verifiable<boson::Announce<SocketAddr>>>::new(
+            IndexNet::new(
+                dispatch::Net::from(clock_dispatch_session.sender()),
+                config.quorum.addrs,
+                None,
+            ),
+        ),
+    )));
+
+    let event_session = {
+        let mut sender = Sender::from(processor_session.sender());
+        async move {
+            while let Some(event) = events.recv().await {
+                match event {
+                    Event::Request => sender.send(lamport_mutex::events::Request)?,
+                    Event::Release => sender.send(lamport_mutex::events::Release)?,
+                }
+            }
+            anyhow::Ok(())
+        }
+    };
+    let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
+    let clock_tcp_accept_session =
+        tcp::accept_session(clock_tcp_listener, clock_dispatch_session.sender());
+    let recv_crypto_session =
+        recv_crypto_executor.run(crypto.clone(), Sender::from(causal_net_session.sender()));
+    let crypto_session = crypto_executor.run(crypto, Sender::from(clock_session.sender()));
+    let dispatch_session = dispatch_session.run(&mut dispatch);
+    let clock_dispatch_session = clock_dispatch_session.run(&mut clock_dispatch);
+    let processor_session = processor_session.run(&mut processor);
+    let causal_net_session = causal_net_session.run(&mut causal_net);
+    let clock_session = clock_session.run(&mut clock);
+
+    tokio::select! {
+        () = cancel.cancelled() => return Ok(()),
+        result = event_session => result?,
+        result = tcp_accept_session => result?,
+        result = clock_tcp_accept_session => result?,
+        result = dispatch_session => result?,
+        result = clock_dispatch_session => result?,
+        result = processor_session => result?,
+        result = causal_net_session => result?,
+        result = recv_crypto_session => result?,
+        result = crypto_session => result?,
+        result = clock_session => result?,
     }
     anyhow::bail!("unreachable")
 }
