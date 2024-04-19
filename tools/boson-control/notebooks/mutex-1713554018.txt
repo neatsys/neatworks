@@ -1,0 +1,9 @@
+One,Replicated,10,1.334588
+One,Replicated,10,1.3348945
+One,Replicated,10,1.3349154
+One,Replicated,10,1.3348218
+One,Replicated,10,1.3348765
+One,Replicated,10,1.3350557
+One,Replicated,10,1.3348452
+One,Replicated,10,1.3350674
+One,Replicated,10,1.3346936

@@ -1,0 +1,9 @@
+One,Quorum,75,0.3401048
+One,Quorum,75,0.3440311
+One,Quorum,75,0.34056643
+One,Quorum,75,0.33992583
+One,Quorum,75,0.34057164
+One,Quorum,75,0.33913147
+One,Quorum,75,0.3394393
+One,Quorum,75,0.3396292
+One,Quorum,75,0.3406146

@@ -3,15 +3,15 @@ use std::{collections::HashMap, net::IpAddr};
 use serde::Deserialize;
 use tokio::process::Command;
 
-#[derive(Deserialize)]
-struct TerraformOutput {
-    instances: TerraformOutputInstances,
-}
+// #[derive(Deserialize)]
+// struct TerraformOutput {
+//     instances: TerraformOutputInstances,
+// }
 
-#[derive(Deserialize)]
-struct TerraformOutputInstances {
-    value: Vec<TerraformOutputInstance>,
-}
+// #[derive(Deserialize)]
+// struct TerraformOutputInstances {
+//     value: Vec<TerraformOutputInstance>,
+// }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TerraformOutputInstance {
@@ -22,13 +22,31 @@ pub struct TerraformOutputInstance {
 
 pub async fn terraform_instances() -> anyhow::Result<Vec<TerraformOutputInstance>> {
     let output = Command::new("terraform")
-        .args(["-chdir=tools/boson-control/terraform", "output", "--json"])
+        .args([
+            "-chdir=tools/boson-control/terraform",
+            "output",
+            "-json",
+            "instances",
+        ])
         .output()
         .await?
         .stdout;
-    let instances = serde_json::from_slice::<TerraformOutput>(&output)?
-        .instances
-        .value;
+    let instances = serde_json::from_slice::<Vec<TerraformOutputInstance>>(&output)?;
+    Ok(instances)
+}
+
+pub async fn terraform_quorum_instances() -> anyhow::Result<Vec<TerraformOutputInstance>> {
+    let output = Command::new("terraform")
+        .args([
+            "-chdir=tools/boson-control/terraform",
+            "output",
+            "-json",
+            "quorum-instances",
+        ])
+        .output()
+        .await?
+        .stdout;
+    let instances = serde_json::from_slice::<Vec<TerraformOutputInstance>>(&output)?;
     Ok(instances)
 }
 

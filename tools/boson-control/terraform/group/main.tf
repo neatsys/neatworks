@@ -72,7 +72,7 @@ data "aws_ami" "ubuntu" {
   owners = ["099720109477"] # Canonical
 }
 
-variable "instance_type" {
+variable "instance-type" {
   type    = string
   default = "c5a.xlarge"
 }
@@ -86,7 +86,7 @@ resource "aws_instance" "boson" {
   count = var.instance-count
 
   ami                    = data.aws_ami.ubuntu.id
-  instance_type          = var.instance_type
+  instance_type          = var.instance-type
   subnet_id              = resource.aws_subnet.boson.id
   vpc_security_group_ids = [resource.aws_security_group.boson.id]
   key_name               = "Ephemeral"

@@ -8,8 +8,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use boson_control::{terraform_instances, TerraformOutputInstance};
-use rand::{seq::SliceRandom, thread_rng};
+use boson_control::{terraform_instances, terraform_quorum_instances, TerraformOutputInstance};
 use tokio::{
     fs::{create_dir_all, write},
     task::JoinSet,
@@ -25,33 +24,55 @@ async fn main() -> anyhow::Result<()> {
     let instances = terraform_instances().await?;
     match item.as_deref() {
         Some("mutex") => {
-            for num_region_processor in 1..=16 {
-                for variant in [
+            // for n in 1..=20 {
+            //     mutex_session(
+            //         client.clone(),
+            //         instances.clone(),
+            //         RequestMode::One,
+            //         Variant::Quorum,
+            //         n,
+            //     )
+            //     .await?
+            // }
+            // for n in 1..=20 {
+            //     mutex_session(
+            //         client.clone(),
+            //         instances.clone(),
+            //         RequestMode::One,
+            //         Variant::Untrusted,
+            //         n,
+            //     )
+            //     .await?
+            // }
+            // for n in 1..=20 {
+            //     mutex_session(
+            //         client.clone(),
+            //         instances.clone(),
+            //         RequestMode::One,
+            //         Variant::Replicated,
+            //         n,
+            //     )
+            //     .await?
+            // }
+            // for n in 1..=16 {
+            //     mutex_session(
+            //         client.clone(),
+            //         instances.clone(),
+            //         RequestMode::All,
+            //         Variant::Quorum,
+            //         n,
+            //     )
+            //     .await?
+            // }
+            for n in 11..=15 {
+                mutex_session(
+                    client.clone(),
+                    instances.clone(),
+                    RequestMode::All,
                     Variant::Untrusted,
-                    // Variant::Replicated,
-                    Variant::Quorum,
-                ] {
-                    mutex_session(
-                        client.clone(),
-                        instances.clone(),
-                        RequestMode::All,
-                        variant,
-                        num_region_processor,
-                    )
-                    .await?;
-                }
-            }
-            for num_region_processor in (1..=32).step_by(6) {
-                for variant in [Variant::Untrusted, Variant::Replicated, Variant::Quorum] {
-                    mutex_session(
-                        client.clone(),
-                        instances.clone(),
-                        RequestMode::One,
-                        variant,
-                        num_region_processor,
-                    )
-                    .await?;
-                }
+                    n,
+                )
+                .await?
             }
             Ok(())
         }
@@ -94,6 +115,8 @@ async fn mutex_session(
     variant: Variant,
     num_region_processor: usize,
 ) -> anyhow::Result<()> {
+    // this one will always be taken below
+    let one_instance = instances[0].clone();
     let mut region_instances = HashMap::<_, Vec<_>>::new();
     for instance in instances {
         region_instances
@@ -103,13 +126,15 @@ async fn mutex_session(
     }
     let num_region = region_instances.len();
 
-    let mut clock_instances = Vec::new();
+    // let mut clock_instances = Vec::new();
     let mut instances = Vec::new();
     for region_instances in region_instances.into_values() {
-        let mut region_instances = region_instances.into_iter();
-        clock_instances.extend((&mut region_instances).take(2));
+        // let mut region_instances = region_instances.into_iter();
+        // clock_instances.extend((&mut region_instances).take(2));
+        let region_instances = region_instances.into_iter();
         instances.extend(region_instances.take(num_region_processor))
     }
+    let clock_instances = terraform_quorum_instances().await?;
     anyhow::ensure!(clock_instances.len() >= num_region * 2);
     anyhow::ensure!(!instances.is_empty());
 
@@ -117,6 +142,8 @@ async fn mutex_session(
         .iter()
         .map(|instance| format!("http://{}:3000", instance.public_dns))
         .collect::<Vec<_>>();
+    let one_url = format!("http://{}:3000", one_instance.public_dns);
+    assert!(urls.contains(&one_url));
     let clock_urls = clock_instances
         .iter()
         .map(|instance| format!("http://{}:3000", instance.public_dns))
@@ -170,12 +197,7 @@ async fn mutex_session(
             RequestMode::One => {
                 while_ok(
                     &mut watchdog_sessions,
-                    mutex_request_session(
-                        client.clone(),
-                        urls.choose(&mut thread_rng()).cloned().unwrap(),
-                        at,
-                        out.clone(),
-                    ),
+                    mutex_request_session(client.clone(), one_url.clone(), at, out.clone()),
                 )
                 .await??
             }
@@ -429,25 +451,25 @@ async fn cops_session(
         .unzip::<_, _, Vec<_>, Vec<_>>();
     let throughput = throughputs.into_iter().sum::<f32>();
     let lantecy = latencies.iter().sum::<Duration>() / latencies.len() as u32;
-    println!(
-        "{variant:?},{},{num_concurrent},{num_concurrent_put},{throughput},{}",
-        num_region_replica,
-        lantecy.as_secs_f32()
-    );
-    // let path = Path::new("tools/boson-control/notebooks");
-    // create_dir_all(path).await?;
-    // write(
-    //     path.join(format!(
-    //         "cops-{}.txt",
-    //         SystemTime::UNIX_EPOCH.elapsed()?.as_secs()
-    //     )),
-    //     format!(
-    //         "{variant:?},{},{num_concurrent},{num_concurrent_put},{throughput},{}",
-    //         num_region_replica,
-    //         lantecy.as_secs_f32()
-    //     ),
-    // )
-    // .await?;
+    // println!(
+    //     "{variant:?},{},{num_concurrent},{num_concurrent_put},{throughput},{}",
+    //     num_region_replica,
+    //     lantecy.as_secs_f32()
+    // );
+    let path = Path::new("tools/boson-control/notebooks");
+    create_dir_all(path).await?;
+    write(
+        path.join(format!(
+            "cops-{}.txt",
+            SystemTime::UNIX_EPOCH.elapsed()?.as_secs()
+        )),
+        format!(
+            "{variant:?},{},{num_concurrent},{num_concurrent_put},{throughput},{}",
+            num_region_replica,
+            lantecy.as_secs_f32()
+        ),
+    )
+    .await?;
     Ok(())
 }
 

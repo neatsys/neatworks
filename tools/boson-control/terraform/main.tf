@@ -121,3 +121,65 @@ output "instances" {
     module.group-5-5.instances,
   )
 }
+
+
+module "group-5-1-quorum" {
+  source = "./group"
+  providers = {
+    aws = aws.ap-east-1
+  }
+
+  instance-count = var.mode == "five" ? 2 : 0
+  instance-type = "c5a.16xlarge"
+}
+
+
+module "group-5-2-quorum" {
+  source = "./group"
+  providers = {
+    aws = aws.us-west-1
+  }
+
+  instance-count = var.mode == "five" ? 2 : 0
+  instance-type = "c5a.16xlarge"
+}
+
+module "group-5-3-quorum" {
+  source = "./group"
+  providers = {
+    aws = aws.eu-central-1
+  }
+
+  instance-count = var.mode == "five" ? 2 : 0
+  instance-type = "c5a.16xlarge"
+}
+
+module "group-5-4-quorum" {
+  source = "./group"
+  providers = {
+    aws = aws.sa-east-1
+  }
+
+  instance-count = var.mode == "five" ? 2 : 0
+  instance-type = "c5a.16xlarge"
+}
+
+module "group-5-5-quorum" {
+  source = "./group"
+  providers = {
+    aws = aws.af-south-1
+  }
+
+  instance-count = var.mode == "five" ? 2 : 0
+  instance-type = "c5a.16xlarge"
+}
+
+output "quorum-instances" {
+  value = concat(
+    module.group-5-1-quorum.instances,
+    module.group-5-2-quorum.instances,
+    module.group-5-3-quorum.instances,
+    module.group-5-4-quorum.instances,
+    module.group-5-5-quorum.instances,
+  )
+}
