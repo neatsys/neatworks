@@ -67,8 +67,9 @@ pub async fn pbft_client_session(
 
     let mut sessions = JoinSet::new();
     for index in 0..num_concurrent {
-        let tcp_listener = TcpListener::bind((ip, 0)).await?;
-        let addr = tcp_listener.local_addr()?;
+        // let tcp_listener = TcpListener::bind((ip, 0)).await?;
+        let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?;
+        let addr = SocketAddr::from((ip, tcp_listener.local_addr()?.port()));
         let workload = create_workload(
             StdRng::seed_from_u64(117418 + index as u64),
             index < num_concurrent_put,
@@ -176,7 +177,8 @@ pub async fn pbft_server_session(
         }
     }
 
-    let tcp_listener = TcpListener::bind(addr).await?;
+    // let tcp_listener = TcpListener::bind(addr).await?;
+    let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], addr.port()))).await?;
     let mut dispatch_session = event::Session::new();
     let mut replica_session = Session::new();
     let (crypto_worker, mut crypto_executor) = spawning_backend();
@@ -239,8 +241,9 @@ pub async fn untrusted_client_session(
 
     let mut sessions = JoinSet::new();
     for index in 0..num_concurrent {
-        let tcp_listener = TcpListener::bind((ip, 0)).await?;
-        let addr = tcp_listener.local_addr()?;
+        // let tcp_listener = TcpListener::bind((ip, 0)).await?;
+        let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?;
+        let addr = SocketAddr::from((ip, tcp_listener.local_addr()?.port()));
         let workload = create_workload(
             StdRng::seed_from_u64(117418 + index as u64),
             index < num_concurrent_put,
@@ -328,7 +331,8 @@ pub async fn untrusted_server_session(
     };
     let addr = addrs[id as usize];
 
-    let tcp_listener = TcpListener::bind(addr).await?;
+    // let tcp_listener = TcpListener::bind(addr).await?;
+    let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], addr.port()))).await?;
     let mut dispatch_session = event::Session::new();
     let mut replica_session = Session::new();
 
@@ -399,8 +403,9 @@ pub async fn quorum_client_session(
 
     let mut sessions = JoinSet::new();
     for index in 0..num_concurrent {
-        let tcp_listener = TcpListener::bind((ip, 0)).await?;
-        let addr = tcp_listener.local_addr()?;
+        // let tcp_listener = TcpListener::bind((ip, 0)).await?;
+        let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?;
+        let addr = SocketAddr::from((ip, tcp_listener.local_addr()?.port()));
         let workload = create_workload(
             StdRng::seed_from_u64(117418 + index as u64),
             index < num_concurrent_put,
@@ -497,8 +502,9 @@ pub async fn quorum_server_session(
     let crypto = Crypto::new_random(&mut thread_rng());
 
     let tcp_listener = TcpListener::bind(addr).await?;
-    let clock_tcp_listener = TcpListener::bind((addr.ip(), 0)).await?;
-    let clock_addr = clock_tcp_listener.local_addr()?;
+    // let clock_tcp_listener = TcpListener::bind((addr.ip(), 0)).await?;
+    let clock_tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?;
+    let clock_addr = SocketAddr::from((addr.ip(), clock_tcp_listener.local_addr()?.port()));
 
     let mut dispatch_session = event::Session::new();
     let mut clock_dispatch_session = event::Session::new();

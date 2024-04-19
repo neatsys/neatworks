@@ -305,6 +305,8 @@ dependencies = [
  "anyhow",
  "boson-control-messages",
  "reqwest",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

@@ -66,7 +66,7 @@ struct AppSession {
     upcall: UnboundedReceiver<Upcall>,
 }
 
-#[derive(derive_more::From)]
+#[derive(Debug, derive_more::From)]
 enum Upcall {
     RequestOk(augustus::lamport_mutex::events::RequestOk),
     ThroughputLatency(f32, Duration),
@@ -168,15 +168,19 @@ async fn stop(State(state): State<AppState>) -> StatusCode {
 async fn mutex_request(State(state): State<AppState>, at: Json<SystemTime>) -> Response {
     let task = async {
         sleep(at.duration_since(SystemTime::now())?).await;
-        let mut session = state.session.lock().await;
-        let Some(session) = session.as_mut() else {
+        let mut state_session = state.session.lock().await;
+        let Some(session) = state_session.as_mut() else {
             anyhow::bail!("missing session")
         };
         let start = Instant::now();
         session.event_sender.send(boson_mutex::Event::Request)?;
         // TODO timeout
         let result = session.upcall.recv().await;
-        anyhow::ensure!(matches!(result, Some(Upcall::RequestOk(_))));
+        if result.is_none() {
+            state_session.take().unwrap().handle.await??;
+            anyhow::bail!("unreachable")
+        }
+        anyhow::ensure!(matches!(result, Some(Upcall::RequestOk(_))), "{result:?}");
         session.event_sender.send(boson_mutex::Event::Release)?;
         Ok(Json(start.elapsed()))
     };

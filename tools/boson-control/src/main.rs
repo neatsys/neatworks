@@ -1,9 +1,11 @@
 use std::{
+    collections::HashMap,
     future::Future,
     net::{IpAddr, SocketAddr},
     time::{Duration, SystemTime},
 };
 
+use boson_control::{terraform_instances, TerraformOutputInstance};
 use tokio::{task::JoinSet, time::sleep};
 
 #[tokio::main(flavor = "current_thread")]
@@ -12,8 +14,9 @@ async fn main() -> anyhow::Result<()> {
         .timeout(Duration::from_millis(1500))
         .build()?;
     let item = std::env::args().nth(1);
+    let instances = terraform_instances().await?;
     match item.as_deref() {
-        Some("mutex") => mutex_session(client, RequestMode::All).await,
+        Some("mutex") => mutex_session(client, instances, RequestMode::All).await,
         Some("cops") => cops_session(client).await,
         _ => Ok(()),
     }
@@ -36,19 +39,46 @@ pub enum RequestMode {
     All,
 }
 
-async fn mutex_session(client: reqwest::Client, mode: RequestMode) -> anyhow::Result<()> {
-    let urls = (0..2)
-        .map(|i| format!("http://127.0.0.{}:3000", i + 1))
+async fn mutex_session(
+    client: reqwest::Client,
+    instances: Vec<TerraformOutputInstance>,
+    mode: RequestMode,
+) -> anyhow::Result<()> {
+    let mut region_instances = HashMap::<_, Vec<_>>::new();
+    for instance in instances {
+        region_instances
+            .entry(instance.region())
+            .or_default()
+            .push(instance.clone())
+    }
+    let num_region = region_instances.len();
+
+    let mut clock_instances = Vec::new();
+    let mut instances = Vec::new();
+    for region_instances in region_instances.into_values() {
+        let mut region_instances = region_instances.into_iter();
+        clock_instances.extend((&mut region_instances).take(2));
+        instances.extend(region_instances)
+    }
+    anyhow::ensure!(clock_instances.len() >= num_region * 2);
+    anyhow::ensure!(!instances.is_empty());
+
+    let urls = instances
+        .iter()
+        .map(|instance| format!("http://{}:3000", instance.public_dns))
         .collect::<Vec<_>>();
-    let clock_urls = (0..2)
-        .map(|i| format!("http://127.0.1.{}:3000", i + 1))
+    let clock_urls = clock_instances
+        .iter()
+        .map(|instance| format!("http://{}:3000", instance.public_dns))
         .collect::<Vec<_>>();
 
-    let addrs = (0..2)
-        .map(|i| SocketAddr::from(([127, 0, 0, i + 1], 4000)))
+    let addrs = instances
+        .iter()
+        .map(|instance| SocketAddr::from((instance.public_ip, 4000)))
         .collect::<Vec<_>>();
-    let clock_addrs = (0..2)
-        .map(|i| SocketAddr::from(([127, 0, 0, i + 1], 5000)))
+    let clock_addrs = clock_instances
+        .iter()
+        .map(|instance| SocketAddr::from((instance.public_ip, 5000)))
         .collect::<Vec<_>>();
 
     let mut watchdog_sessions = JoinSet::new();

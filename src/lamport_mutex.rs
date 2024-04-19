@@ -281,8 +281,11 @@ impl<CN, U, C> Processor<CN, U, C> {
 pub mod events {
     pub use super::{Update, UpdateOk};
 
+    #[derive(Debug)]
     pub struct Request;
+    #[derive(Debug)]
     pub struct RequestOk;
+    #[derive(Debug)]
     pub struct Release;
 }
 
@@ -341,9 +344,9 @@ impl<CN, U, C: Clock> Processor<CN, U, C> {
         self.latests[id as usize] = message.clock.clone();
         match message.inner {
             Message::Request(_) => {
-                if let Err(index) = dbg!(self
+                if let Err(index) = self
                     .requests
-                    .binary_search_by(|(clock, _)| clock.arbitrary_cmp(&message.clock)))
+                    .binary_search_by(|(clock, _)| clock.arbitrary_cmp(&message.clock))
                 {
                     self.requests.insert(index, (message.clock, id))
                 };

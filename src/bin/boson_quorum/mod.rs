@@ -26,7 +26,8 @@ pub async fn session(
 ) -> anyhow::Result<()> {
     let addr = config.quorum.addrs[config.index];
     let crypto = Crypto::new_random(&mut thread_rng());
-    let tcp_listener = TcpListener::bind(addr).await?;
+    // let tcp_listener = TcpListener::bind(addr).await?;
+    let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], addr.port()))).await?;
 
     let mut dispatch_session = event::Session::new();
     let mut server_session = Session::new();

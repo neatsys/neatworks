@@ -47,7 +47,8 @@ pub async fn untrusted_session(
     };
     let addr = addrs[id as usize];
 
-    let tcp_listener = TcpListener::bind(addr).await?;
+    // let tcp_listener = TcpListener::bind(addr).await?;
+    let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], addr.port()))).await?;
     let mut dispatch_session = event::Session::new();
     let mut processor_session = Session::new();
     let mut causal_net_session = Session::new();
@@ -134,9 +135,11 @@ pub async fn replicated_session(
     let addr = addrs[id as usize];
     let num_replica = addrs.len();
 
-    let client_tcp_listener = TcpListener::bind(SocketAddr::from((addr.ip(), 0))).await?;
-    let client_addr = client_tcp_listener.local_addr()?;
-    let tcp_listener = TcpListener::bind(addr).await?;
+    // let client_tcp_listener = TcpListener::bind(SocketAddr::from((addr.ip(), 0))).await?;
+    let client_tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?;
+    let client_addr = SocketAddr::from((addr.ip(), client_tcp_listener.local_addr()?.port()));
+    // let tcp_listener = TcpListener::bind(addr).await?;
+    let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], addr.port()))).await?;
 
     let mut client_dispatch_session = event::Session::new();
     let mut client_session = Session::new();
@@ -264,9 +267,11 @@ pub async fn quorum_session(
     let addr = addrs[id as usize];
     let crypto = Crypto::new_random(&mut thread_rng());
 
-    let tcp_listener = TcpListener::bind(addr).await?;
-    let clock_tcp_listener = TcpListener::bind(SocketAddr::from((addr.ip(), 0))).await?;
-    let clock_addr = clock_tcp_listener.local_addr()?;
+    // let tcp_listener = TcpListener::bind(addr).await?;
+    let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], addr.port()))).await?;
+    // let clock_tcp_listener = TcpListener::bind(SocketAddr::from((addr.ip(), 0))).await?;
+    let clock_tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?;
+    let clock_addr = SocketAddr::from((addr.ip(), clock_tcp_listener.local_addr()?.port()));
 
     let mut dispatch_session = event::Session::new();
     let mut clock_dispatch_session = event::Session::new();
@@ -303,7 +308,7 @@ pub async fn quorum_session(
     )?));
     let mut processor = Blanket(Unify(Processor::new(
         id,
-        config.addrs.len(),
+        addrs.len(),
         num_faulty,
         |_| QuorumClock::default(),
         Detach(Sender::from(causal_net_session.sender())),
