@@ -37,6 +37,8 @@ pub struct AnnounceOk {
 pub struct QuorumClock {
     plain: DefaultVersion, // redundant, just for easier use
     #[derive_where(skip)]
+    id: u64, // to break tie in `arbitrary_cmp`, should not consider by `PartialOrd`
+    #[derive_where(skip)]
     cert: Vec<Verifiable<AnnounceOk>>,
 }
 
@@ -52,7 +54,7 @@ impl DepOrd for QuorumClock {
 
 impl lamport_mutex::Clock for QuorumClock {
     fn arbitrary_cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.plain.sum().cmp(&other.plain.sum())
+        (self.plain.sum(), self.id).cmp(&(other.plain.sum(), other.id))
     }
 }
 
@@ -262,6 +264,7 @@ impl<
             let announce_ok = announce_ok.into_inner();
             let clock = QuorumClock {
                 plain: announce_ok.plain,
+                id: announce_ok.id,
                 cert: working_state.replies.into_values().collect(),
             };
             self.upcall.send((announce_ok.id, clock))?

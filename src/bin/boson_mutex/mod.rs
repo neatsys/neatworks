@@ -8,9 +8,7 @@ use augustus::{
         erased::{events::Init, session::Sender, Blanket, Buffered, Session, Unify},
         Once, SendEvent,
     },
-    lamport_mutex::{
-        self, events::RequestOk, Causal, Lamport, LamportClock, Processor, Replicated,
-    },
+    lamport_mutex::{self, events::RequestOk, Causal, Lamport, LamportClock, Replicated},
     net::{
         deserialize, dispatch,
         events::Recv,
@@ -18,7 +16,7 @@ use augustus::{
         Detach, Dispatch, IndexNet, InvokeNet,
     },
     pbft,
-    worker::{spawn_backend, Submit, Worker},
+    worker::{spawning_backend, Submit, Worker},
     workload::{events::InvokeOk, Queue},
 };
 use rand::thread_rng;
@@ -36,10 +34,13 @@ pub async fn untrusted_session(
     upcall: impl SendEvent<RequestOk> + Send + Sync + 'static,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
+    use lamport_mutex::Processor;
+
     let boson_control_messages::Mutex {
         id,
         addrs,
         variant: boson_control_messages::Variant::Untrusted,
+        ..
     } = config
     else {
         anyhow::bail!("unimplemented")
@@ -115,12 +116,16 @@ pub async fn replicated_session(
     upcall: impl SendEvent<RequestOk> + Send + Sync + 'static,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    use augustus::crypto::{Crypto, CryptoFlavor};
+    use augustus::{
+        crypto::{Crypto, CryptoFlavor},
+        lamport_mutex::Processor,
+    };
 
     let boson_control_messages::Mutex {
         id,
         addrs,
         variant: boson_control_messages::Variant::Replicated(config),
+        ..
     } = config
     else {
         anyhow::bail!("unimplemented")
@@ -242,12 +247,16 @@ pub async fn quorum_session(
     upcall: impl SendEvent<RequestOk> + Send + Sync + 'static,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    use augustus::crypto::peer::{Crypto, Verifiable};
+    use augustus::{
+        crypto::peer::{Crypto, Verifiable},
+        lamport_mutex::verifiable::Processor,
+    };
 
     let boson_control_messages::Mutex {
         id,
         addrs,
         variant: boson_control_messages::Variant::Quorum(config),
+        num_faulty,
     } = config
     else {
         anyhow::bail!("unimplemented")
@@ -264,14 +273,23 @@ pub async fn quorum_session(
     let mut processor_session = Session::new();
     let mut causal_net_session = Session::new();
     let mut clock_session = Session::new();
-    let (recv_crypto_worker, mut recv_crypto_executor) = spawn_backend();
-    let (crypto_worker, mut crypto_executor) = spawn_backend();
+    // verify clocked messages sent by other processors before they are received causal net
+    // let (recv_crypto_worker, mut recv_crypto_executor) = spawning_backend();
+    // owned by quorum client
+    let (crypto_worker, mut crypto_executor) = spawning_backend();
+    // sign Ordered messages
+    let (processor_crypto_worker, mut processor_crypto_executor) = spawning_backend();
 
     let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
         Tcp::new(addr)?,
         {
-            let mut sender = VerifyQuorumClock::new(config.num_faulty, recv_crypto_worker);
-            move |buf: &_| lamport_mutex::on_buf(buf, &mut sender)
+            // let mut clocked_sender = VerifyQuorumClock::new(config.num_faulty, recv_crypto_worker);
+            let mut clocked_sender = VerifyQuorumClock::new(
+                config.num_faulty,
+                Worker::Inline(crypto.clone(), Sender::from(causal_net_session.sender())),
+            );
+            let mut sender = Sender::from(processor_session.sender());
+            move |buf: &_| lamport_mutex::verifiable::on_buf(buf, &mut clocked_sender, &mut sender)
         },
         Once(dispatch_session.sender()),
     )?));
@@ -286,8 +304,10 @@ pub async fn quorum_session(
     let mut processor = Blanket(Unify(Processor::new(
         id,
         config.addrs.len(),
+        num_faulty,
         |_| QuorumClock::default(),
         Detach(Sender::from(causal_net_session.sender())),
+        lamport_mutex::verifiable::SignOrdered::new(processor_crypto_worker),
         upcall,
     )));
     let mut causal_net = Blanket(Unify(Causal::new(
@@ -295,9 +315,9 @@ pub async fn quorum_session(
         Box::new(Sender::from(processor_session.sender()))
             as Box<dyn lamport_mutex::SendRecvEvent<QuorumClock> + Send + Sync>,
         boson::Lamport(Sender::from(clock_session.sender()), id as _),
-        lamport_mutex::MessageNet::<_, QuorumClock>::new(IndexNet::new(
+        lamport_mutex::verifiable::MessageNet::<_, QuorumClock>::new(IndexNet::new(
             dispatch::Net::from(dispatch_session.sender()),
-            addrs,
+            addrs.clone(),
             // intentionally sending loopback messages as expected by processor protocol
             None,
         )),
@@ -343,9 +363,17 @@ pub async fn quorum_session(
     let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
     let clock_tcp_accept_session =
         tcp::accept_session(clock_tcp_listener, clock_dispatch_session.sender());
-    let recv_crypto_session =
-        recv_crypto_executor.run(crypto.clone(), Sender::from(causal_net_session.sender()));
-    let crypto_session = crypto_executor.run(crypto, Sender::from(clock_session.sender()));
+    // let recv_crypto_session =
+    //     recv_crypto_executor.run(crypto.clone(), Sender::from(causal_net_session.sender()));
+    let crypto_session = crypto_executor.run(crypto.clone(), Sender::from(clock_session.sender()));
+    let processor_crypto_session = processor_crypto_executor.run(
+        crypto,
+        lamport_mutex::verifiable::MessageNet::<_, QuorumClock>::new(IndexNet::new(
+            dispatch::Net::from(dispatch_session.sender()),
+            addrs,
+            None,
+        )),
+    );
     let dispatch_session = dispatch_session.run(&mut dispatch);
     let clock_dispatch_session = clock_dispatch_session.run(&mut clock_dispatch);
     let processor_session = processor_session.run(&mut processor);
@@ -361,8 +389,9 @@ pub async fn quorum_session(
         result = clock_dispatch_session => result?,
         result = processor_session => result?,
         result = causal_net_session => result?,
-        result = recv_crypto_session => result?,
+        // result = recv_crypto_session => result?,
         result = crypto_session => result?,
+        result = processor_crypto_session => result?,
         result = clock_session => result?,
     }
     anyhow::bail!("unreachable")

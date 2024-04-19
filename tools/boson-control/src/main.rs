@@ -66,12 +66,13 @@ async fn mutex_session(client: reqwest::Client, mode: RequestMode) -> anyhow::Re
     while_ok(&mut watchdog_sessions, sleep(Duration::from_millis(5000))).await?;
     use boson_control_messages::Variant::*;
     // let variant = Quorum(quorum);
-    let variant = Untrusted;
-    // let variant = Replicated(boson_control_messages::Replicated { num_faulty: 0 });
+    // let variant = Untrusted;
+    let variant = Replicated(boson_control_messages::Replicated { num_faulty: 0 });
     for (index, url) in urls.iter().enumerate() {
         let config = boson_control_messages::Mutex {
             addrs: addrs.clone(),
             id: index as _,
+            num_faulty: 1,
             variant: variant.clone(),
         };
         watchdog_sessions.spawn(mutex_start_session(client.clone(), url.clone(), config));

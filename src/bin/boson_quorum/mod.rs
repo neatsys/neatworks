@@ -14,7 +14,7 @@ use augustus::{
         session::{tcp, Tcp},
         Dispatch, MessageNet,
     },
-    worker::spawn_backend,
+    worker::spawning_backend,
 };
 use rand::thread_rng;
 use tokio::net::TcpListener;
@@ -30,8 +30,8 @@ pub async fn session(
 
     let mut dispatch_session = event::Session::new();
     let mut server_session = Session::new();
-    let (recv_crypto_worker, mut recv_crypto_executor) = spawn_backend();
-    let (send_crypto_worker, mut send_crypto_executor) = spawn_backend();
+    let (recv_crypto_worker, mut recv_crypto_executor) = spawning_backend();
+    let (send_crypto_worker, mut send_crypto_executor) = spawning_backend();
 
     let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
         Tcp::new(addr)?,

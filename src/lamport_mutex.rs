@@ -22,7 +22,7 @@
 use std::{cmp::Ordering, collections::VecDeque, mem::replace};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::{
     event::{
@@ -335,14 +335,15 @@ impl<CN, U, C: Clock> Processor<CN, U, C> {
         let Some(Ordering::Greater | Ordering::Equal) =
             message.clock.partial_cmp(&self.latests[id as usize])
         else {
+            warn!("out of order clock received from {id}");
             return Ok(());
         };
         self.latests[id as usize] = message.clock.clone();
         match message.inner {
             Message::Request(_) => {
-                if let Err(index) = self
+                if let Err(index) = dbg!(self
                     .requests
-                    .binary_search_by(|(clock, _)| message.clock.arbitrary_cmp(clock))
+                    .binary_search_by(|(clock, _)| clock.arbitrary_cmp(&message.clock)))
                 {
                     self.requests.insert(index, (message.clock, id))
                 };
@@ -427,7 +428,7 @@ pub mod verifiable {
     // finally decided to duplicate some code to above
     // 27 hours until ddl, should be forgivable
 
-    use std::{cmp::Ordering, collections::HashMap, mem::replace};
+    use std::{cmp::Ordering, collections::HashMap};
 
     use serde::{de::DeserializeOwned, Deserialize, Serialize};
     use tracing::debug;
@@ -437,7 +438,7 @@ pub mod verifiable {
             peer::{Crypto, Verifiable},
             DigestHash,
         },
-        event::{erased::OnEvent, SendEvent, Timer},
+        event::{erased::OnEvent, OnTimer, SendEvent, Timer},
         net::{deserialize, events::Recv, Addr, All, SendMessage},
         worker::Submit,
     };
@@ -511,10 +512,7 @@ pub mod verifiable {
         ) -> anyhow::Result<()> {
             debug!("{:?}", message.inner);
             self.handle_clocked(message, |_| All)?;
-            if self.requesting {
-                self.check_requested()?
-            }
-            Ok(())
+            self.check_requested()
         }
     }
 
@@ -522,8 +520,11 @@ pub mod verifiable {
         Processor<CN, N, U, C>
     {
         fn check_requested(&mut self) -> anyhow::Result<()> {
+            // println!("check requested");
             for (clock, id) in &self.inner.requests {
+                // println!("check requested {id}");
                 if clock.arbitrary_cmp(&self.last_ordered).is_le() {
+                    // println!("skip ordered clock");
                     continue;
                 }
                 if self.latests.iter().all(|other_clock| {
@@ -537,26 +538,29 @@ pub mod verifiable {
                         after: self.requests.clone(), // TODO trim the later requests
                         id: self.id,
                     };
-                    self.net.send(*id, ordered)?
+                    // println!("ordered");
+                    self.net.send(*id, ordered)?;
+                    self.last_ordered = clock.clone()
                 } else {
                     break;
                 }
             }
-            if let Some((clock, id)) = self.requests.first() {
-                if *id == self.inner.id
-                    && self
-                        .proof
-                        .values()
-                        .filter(|message| {
-                            // probably not Greater, but who cares
-                            matches!(message.clock.partial_cmp(clock), Some(Ordering::Equal))
-                        })
-                        .count()
-                        > self.num_faulty
-                {
-                    let replaced = replace(&mut self.requesting, false);
-                    anyhow::ensure!(replaced);
-                    self.upcall.send(events::RequestOk)?
+            if self.requesting {
+                if let Some((clock, id)) = self.requests.first() {
+                    if *id == self.id
+                        && self
+                            .proof
+                            .values()
+                            .filter(|message| {
+                                // probably not Greater, but who cares
+                                matches!(message.clock.partial_cmp(clock), Some(Ordering::Equal))
+                            })
+                            .count()
+                            > self.num_faulty
+                    {
+                        self.requesting = false;
+                        self.upcall.send(events::RequestOk)?
+                    }
                 }
             }
             Ok(())
@@ -583,16 +587,28 @@ pub mod verifiable {
             Recv(ordered): Recv<Verifiable<Ordered<C>>>,
             _: &mut impl Timer,
         ) -> anyhow::Result<()> {
+            // println!("recv ordered");
             if let Some(other_ordered) = self.proof.get(&ordered.id) {
                 if matches!(
                     other_ordered.clock.partial_cmp(&ordered.clock),
                     Some(Ordering::Greater | Ordering::Equal)
                 ) {
+                    // println!("discard earlier ordered");
                     return Ok(());
                 }
             }
             self.proof.insert(ordered.id, ordered);
             self.check_requested()
+        }
+    }
+
+    impl<CN, N, U, C> OnTimer for Processor<CN, N, U, C> {
+        fn on_timer(
+            &mut self,
+            timer_id: crate::event::TimerId,
+            timer: &mut impl Timer,
+        ) -> anyhow::Result<()> {
+            self.inner.on_timer(timer_id, timer)
         }
     }
 

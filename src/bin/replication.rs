@@ -21,7 +21,7 @@ use augustus::{
     },
     net::{session::Udp, IndexNet, Payload},
     pbft, unreplicated,
-    worker::{spawn_backend, Submit},
+    worker::{spawning_backend, Submit},
     workload::{
         self,
         events::{Invoke, InvokeOk},
@@ -375,7 +375,7 @@ async fn start_replica(State(state): State<AppState>, Json(config): Json<Replica
                 ))
             }
             Protocol::Pbft => {
-                let (crypto_worker, mut crypto_executor) = spawn_backend();
+                let (crypto_worker, mut crypto_executor) = spawning_backend();
                 let state = Blanket(Buffered::from(pbft::Replica::new(
                     config.replica_id,
                     app,

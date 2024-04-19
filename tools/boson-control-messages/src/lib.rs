@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub struct Mutex {
     pub addrs: Vec<SocketAddr>,
     pub id: u8,
+    pub num_faulty: usize,
     pub variant: Variant,
 }
 

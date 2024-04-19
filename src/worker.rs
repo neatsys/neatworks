@@ -60,7 +60,7 @@ impl<S: Clone + Send + 'static, E: Clone + Send + 'static> SpawnExecutor<S, E> {
     }
 }
 
-pub fn spawn_backend<S, E>() -> (Worker<S, E>, SpawnExecutor<S, E>) {
+pub fn spawning_backend<S, E>() -> (Worker<S, E>, SpawnExecutor<S, E>) {
     let (sender, receiver) = unbounded_channel();
     let executor = SpawnExecutor {
         receiver,

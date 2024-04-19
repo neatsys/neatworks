@@ -16,7 +16,7 @@ use augustus::{
         Dispatch, IndexNet,
     },
     pbft,
-    worker::{spawn_backend, Submit},
+    worker::{spawning_backend, Submit},
     workload::{CloseLoop, Iter, Json, Upcall, Workload},
 };
 use boson_control_messages::{CopsClient, CopsServer, Variant};
@@ -179,7 +179,7 @@ pub async fn pbft_server_session(
     let tcp_listener = TcpListener::bind(addr).await?;
     let mut dispatch_session = event::Session::new();
     let mut replica_session = Session::new();
-    let (crypto_worker, mut crypto_executor) = spawn_backend();
+    let (crypto_worker, mut crypto_executor) = spawning_backend();
 
     let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
         Tcp::new(addr)?,
@@ -411,7 +411,7 @@ pub async fn quorum_client_session(
         let mut dispatch_session = event::Session::new();
         let mut client_session = Session::new();
         let mut close_loop_session = Session::new();
-        let (crypto_worker, mut crypto_executor) = spawn_backend();
+        let (crypto_worker, mut crypto_executor) = spawning_backend();
 
         let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
             Tcp::new(addr)?,
@@ -504,8 +504,8 @@ pub async fn quorum_server_session(
     let mut clock_dispatch_session = event::Session::new();
     let mut replica_session = Session::new();
     let mut clock_session = Session::new();
-    let (client_crypto_worker, mut client_crypto_executor) = spawn_backend();
-    let (crypto_worker, mut crypto_executor) = spawn_backend();
+    let (client_crypto_worker, mut client_crypto_executor) = spawning_backend();
+    let (crypto_worker, mut crypto_executor) = spawning_backend();
 
     let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
         Tcp::new(addr)?,
