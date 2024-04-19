@@ -55,7 +55,10 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Some("cops") => cops_session(client, instances).await,
+        Some("cops") => {
+            cops_session(client, instances, Variant::Replicated, 1, 1, 1, 1).await?;
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -286,6 +289,11 @@ async fn mutex_request_session(
 async fn cops_session(
     client: reqwest::Client,
     instances: Vec<TerraformOutputInstance>,
+    variant: Variant,
+    num_region_replica: usize,
+    num_replica_client: usize,
+    num_concurrent: usize,
+    num_concurrent_put: usize,
 ) -> anyhow::Result<()> {
     let mut region_instances = HashMap::<_, Vec<_>>::new();
     for instance in instances {
@@ -295,6 +303,7 @@ async fn cops_session(
             .push(instance.clone())
     }
     let num_region = region_instances.len();
+    let num_region_client = num_region_replica * num_replica_client;
 
     let mut clock_instances = Vec::new();
     let mut instances = Vec::new();
@@ -302,12 +311,12 @@ async fn cops_session(
     for region_instances in region_instances.into_values() {
         let mut region_instances = region_instances.into_iter();
         clock_instances.extend((&mut region_instances).take(2));
-        instances.extend((&mut region_instances).take(4));
-        client_instances.extend(region_instances.take(instances.len()));
+        instances.extend((&mut region_instances).take(num_region_replica));
+        client_instances.extend(region_instances.take(num_region_client));
     }
     anyhow::ensure!(clock_instances.len() >= num_region * 2);
-    anyhow::ensure!(!instances.is_empty());
-    anyhow::ensure!(client_instances.len() == instances.len());
+    anyhow::ensure!(instances.len() == num_region * num_region_replica);
+    anyhow::ensure!(client_instances.len() == num_region * num_region_client);
 
     let urls = instances
         .iter()
@@ -347,9 +356,13 @@ async fn cops_session(
         watchdog_sessions.spawn(start_quorum_session(client.clone(), url.clone(), config));
     }
     use boson_control_messages::Variant::*;
-    // let variant = Replicated(boson_control_messages::Replicated { num_faulty: 1 });
-    // let variant = Untrusted;
-    let variant = Quorum(quorum);
+    let variant_config = match variant {
+        Variant::Untrusted => Untrusted,
+        Variant::Replicated => Replicated(boson_control_messages::Replicated {
+            num_faulty: (urls.len() - 1) / 3,
+        }),
+        Variant::Quorum => Quorum(quorum),
+    };
     println!("Start servers");
     let record_count = 1000;
     for (i, url) in urls.iter().enumerate() {
@@ -358,7 +371,7 @@ async fn cops_session(
             addrs: addrs.clone(),
             id: i as _,
             record_count,
-            variant: variant.clone(),
+            variant: variant_config.clone(),
         };
         watchdog_sessions.spawn(cops_start_server_session(
             client.clone(),
@@ -369,19 +382,26 @@ async fn cops_session(
     while_ok(&mut watchdog_sessions, sleep(Duration::from_millis(5000))).await?;
     println!("Start clients");
     let mut client_sessions = JoinSet::new();
-    let record_count_per_client = record_count / client_urls.len();
+    let record_count_per_replica = record_count / urls.len();
+    let out = Arc::new(Mutex::new(Vec::new()));
     for (i, url) in client_urls.into_iter().enumerate() {
+        let index = i / num_replica_client;
         let config = boson_control_messages::CopsClient {
             addrs: addrs.clone(),
             ip: client_ips[i],
-            index: i,
-            num_concurrent: 1,
-            num_concurrent_put: 1,
+            index,
+            num_concurrent,
+            num_concurrent_put,
             record_count,
-            put_range: record_count_per_client * i..record_count_per_client * (i + 1),
-            variant: variant.clone(),
+            put_range: record_count_per_replica * index..record_count_per_replica * (index + 1),
+            variant: variant_config.clone(),
         };
-        client_sessions.spawn(cops_client_session(client.clone(), url, config));
+        client_sessions.spawn(cops_client_session(
+            client.clone(),
+            url,
+            config,
+            out.clone(),
+        ));
     }
     while_ok(&mut watchdog_sessions, async {
         while let Some(result) = client_sessions.join_next().await {
@@ -402,6 +422,32 @@ async fn cops_session(
     while let Some(result) = stop_sessions.join_next().await {
         result??
     }
+    let (throughputs, latencies) = Arc::into_inner(out)
+        .unwrap()
+        .into_inner()?
+        .into_iter()
+        .unzip::<_, _, Vec<_>, Vec<_>>();
+    let throughput = throughputs.into_iter().sum::<f32>();
+    let lantecy = latencies.iter().sum::<Duration>() / latencies.len() as u32;
+    println!(
+        "{variant:?},{},{num_concurrent},{num_concurrent_put},{throughput},{}",
+        num_region_replica,
+        lantecy.as_secs_f32()
+    );
+    // let path = Path::new("tools/boson-control/notebooks");
+    // create_dir_all(path).await?;
+    // write(
+    //     path.join(format!(
+    //         "cops-{}.txt",
+    //         SystemTime::UNIX_EPOCH.elapsed()?.as_secs()
+    //     )),
+    //     format!(
+    //         "{variant:?},{},{num_concurrent},{num_concurrent_put},{throughput},{}",
+    //         num_region_replica,
+    //         lantecy.as_secs_f32()
+    //     ),
+    // )
+    // .await?;
     Ok(())
 }
 
@@ -439,6 +485,7 @@ async fn cops_client_session(
     client: reqwest::Client,
     url: String,
     config: boson_control_messages::CopsClient,
+    out: Arc<Mutex<Vec<(f32, Duration)>>>,
 ) -> anyhow::Result<()> {
     client
         .post(format!("{url}/cops/start-client"))
@@ -457,6 +504,9 @@ async fn cops_client_session(
             .await?;
         if let Some(results) = results {
             println!("{results:?}");
+            out.lock()
+                .map_err(|err| anyhow::format_err!("{err}"))?
+                .extend(results);
             break Ok(());
         }
     }

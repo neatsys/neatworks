@@ -70,7 +70,7 @@ pub async fn pbft_client_session(
         // let tcp_listener = TcpListener::bind((ip, 0)).await?;
         let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?;
         let addr = SocketAddr::from((ip, tcp_listener.local_addr()?.port()));
-        println!("client {addr} listening {:?}", tcp_listener.local_addr());
+        // println!("client {addr} listening {:?}", tcp_listener.local_addr());
         let workload = create_workload(
             StdRng::seed_from_u64(117418 + index as u64),
             index < num_concurrent_put,

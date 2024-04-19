@@ -239,14 +239,14 @@ impl<N, U: SendEvent<InvokeOk<ycsb::Result>>, V: Version, A> OnEvent<Recv<PutOk<
         let Some((key, timer_id)) = self.working_key.take() else {
             anyhow::bail!("missing working key")
         };
-        if !self.deps.values().all(|dep| {
-            matches!(
-                put_ok.version_deps.partial_cmp(dep),
-                Some(Ordering::Greater)
-            )
-        }) {
-            return Ok(());
-        }
+        // if !self.deps.values().all(|dep| {
+        //     matches!(
+        //         put_ok.version_deps.partial_cmp(dep),
+        //         Some(Ordering::Greater)
+        //     )
+        // }) {
+        //     return Ok(());
+        // }
         self.deps = [(key, put_ok.version_deps)].into();
         timer.unset(timer_id)?;
         self.upcall.send((Default::default(), ycsb::Result::Ok)) // careful
@@ -264,13 +264,13 @@ impl<N, U: SendEvent<InvokeOk<ycsb::Result>>, V: Version, A> OnEvent<Recv<GetOk<
         let Some((key, timer_id)) = self.working_key.take() else {
             anyhow::bail!("missing working key")
         };
-        if !self
-            .deps
-            .values()
-            .all(|dep| get_ok.version_deps.dep_cmp(dep, key).is_ge())
-        {
-            return Ok(());
-        }
+        // if !self
+        //     .deps
+        //     .values()
+        //     .all(|dep| get_ok.version_deps.dep_cmp(dep, key).is_ge())
+        // {
+        //     return Ok(());
+        // }
         self.deps.insert(key, get_ok.version_deps);
         timer.unset(timer_id)?;
         self.upcall

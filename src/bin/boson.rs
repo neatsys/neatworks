@@ -30,6 +30,11 @@ use tracing::warn;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
+    let mut rlimit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+    if rlimit.current.is_some() && rlimit.current < rlimit.maximum {
+        rlimit.current = rlimit.maximum;
+        rustix::process::setrlimit(rustix::process::Resource::Nofile, rlimit)?
+    }
     let app = Router::new()
         .route("/ok", get(ok))
         .route("/mutex/start", post(mutex_start))
