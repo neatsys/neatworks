@@ -1,7 +1,7 @@
 use std::{
     future::Future,
     net::{IpAddr, SocketAddr},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use tokio::{task::JoinSet, time::sleep};
@@ -60,7 +60,8 @@ async fn mutex_session(client: reqwest::Client) -> anyhow::Result<()> {
     while_ok(&mut watchdog_sessions, sleep(Duration::from_millis(5000))).await?;
     use boson_control_messages::Variant::*;
     // let variant = Quorum(quorum);
-    let variant = Untrusted;
+    // let variant = Untrusted;
+    let variant = Replicated(boson_control_messages::Replicated { num_faulty: 0 });
     for (index, url) in urls.iter().enumerate() {
         let config = boson_control_messages::Mutex {
             addrs: addrs.clone(),
@@ -70,10 +71,12 @@ async fn mutex_session(client: reqwest::Client) -> anyhow::Result<()> {
         watchdog_sessions.spawn(mutex_start_session(client.clone(), url.clone(), config));
     }
     for _ in 0..10 {
-        while_ok(&mut watchdog_sessions, async {
-            sleep(Duration::from_millis(1000)).await;
-            mutex_request_session(client.clone(), urls[0].clone()).await
-        })
+        let at = SystemTime::now() + Duration::from_millis(2000);
+        println!("Next request scheduled at {at:?}");
+        while_ok(
+            &mut watchdog_sessions,
+            mutex_request_session(client.clone(), urls[0].clone(), at),
+        )
         .await??
     }
     watchdog_sessions.shutdown().await;
@@ -120,9 +123,15 @@ async fn mutex_stop_session(client: reqwest::Client, url: String) -> anyhow::Res
     Ok(())
 }
 
-async fn mutex_request_session(client: reqwest::Client, url: String) -> anyhow::Result<()> {
+async fn mutex_request_session(
+    client: reqwest::Client,
+    url: String,
+    at: SystemTime,
+) -> anyhow::Result<()> {
     let latency = client
         .post(format!("{url}/mutex/request"))
+        .json(&at)
+        .timeout(Duration::from_millis(5000))
         .send()
         .await?
         .error_for_status()?

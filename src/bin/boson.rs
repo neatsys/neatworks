@@ -2,7 +2,11 @@ mod boson_cops;
 mod boson_mutex;
 mod boson_quorum;
 
-use std::{backtrace::BacktraceStatus, sync::Arc, time::Duration};
+use std::{
+    backtrace::BacktraceStatus,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use axum::{
     extract::State,
@@ -18,7 +22,7 @@ use tokio::{
         Mutex,
     },
     task::JoinHandle,
-    time::Instant,
+    time::{sleep, Instant},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -148,7 +152,7 @@ async fn stop(State(state): State<AppState>) -> StatusCode {
     if let Err(err) = async {
         let mut session = state.session.lock().await;
         let Some(session) = session.take() else {
-            anyhow::bail!("unimplemented")
+            anyhow::bail!("missing session")
         };
         session.cancel.cancel();
         session.handle.await?
@@ -161,11 +165,12 @@ async fn stop(State(state): State<AppState>) -> StatusCode {
     }
 }
 
-async fn mutex_request(State(state): State<AppState>) -> Response {
+async fn mutex_request(State(state): State<AppState>, at: Json<SystemTime>) -> Response {
     let task = async {
+        sleep(at.duration_since(SystemTime::now())?).await;
         let mut session = state.session.lock().await;
         let Some(session) = session.as_mut() else {
-            anyhow::bail!("unimplemented")
+            anyhow::bail!("missing session")
         };
         let start = Instant::now();
         session.event_sender.send(boson_mutex::Event::Request)?;
