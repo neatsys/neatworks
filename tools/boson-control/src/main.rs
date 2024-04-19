@@ -13,7 +13,7 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
     let item = std::env::args().nth(1);
     match item.as_deref() {
-        Some("mutex") => mutex_session(client).await,
+        Some("mutex") => mutex_session(client, RequestMode::All).await,
         Some("cops") => cops_session(client).await,
         _ => Ok(()),
     }
@@ -30,7 +30,13 @@ async fn while_ok<T>(
     anyhow::bail!("unreachable")
 }
 
-async fn mutex_session(client: reqwest::Client) -> anyhow::Result<()> {
+#[derive(Debug)]
+pub enum RequestMode {
+    One,
+    All,
+}
+
+async fn mutex_session(client: reqwest::Client, mode: RequestMode) -> anyhow::Result<()> {
     let urls = (0..2)
         .map(|i| format!("http://127.0.0.{}:3000", i + 1))
         .collect::<Vec<_>>();
@@ -60,8 +66,8 @@ async fn mutex_session(client: reqwest::Client) -> anyhow::Result<()> {
     while_ok(&mut watchdog_sessions, sleep(Duration::from_millis(5000))).await?;
     use boson_control_messages::Variant::*;
     // let variant = Quorum(quorum);
-    // let variant = Untrusted;
-    let variant = Replicated(boson_control_messages::Replicated { num_faulty: 0 });
+    let variant = Untrusted;
+    // let variant = Replicated(boson_control_messages::Replicated { num_faulty: 0 });
     for (index, url) in urls.iter().enumerate() {
         let config = boson_control_messages::Mutex {
             addrs: addrs.clone(),
@@ -73,11 +79,28 @@ async fn mutex_session(client: reqwest::Client) -> anyhow::Result<()> {
     for _ in 0..10 {
         let at = SystemTime::now() + Duration::from_millis(2000);
         println!("Next request scheduled at {at:?}");
-        while_ok(
-            &mut watchdog_sessions,
-            mutex_request_session(client.clone(), urls[0].clone(), at),
-        )
-        .await??
+        match mode {
+            RequestMode::One => {
+                while_ok(
+                    &mut watchdog_sessions,
+                    mutex_request_session(client.clone(), urls[0].clone(), at),
+                )
+                .await??
+            }
+            RequestMode::All => {
+                let mut sessions = JoinSet::new();
+                for url in &urls {
+                    sessions.spawn(mutex_request_session(client.clone(), url.clone(), at));
+                }
+                while_ok(&mut watchdog_sessions, async move {
+                    while let Some(result) = sessions.join_next().await {
+                        result??
+                    }
+                    anyhow::Ok(())
+                })
+                .await??
+            }
+        }
     }
     watchdog_sessions.shutdown().await;
     let mut stop_sessions = JoinSet::new();

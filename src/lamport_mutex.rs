@@ -312,6 +312,7 @@ impl<
         Recv(message): Recv<Clocked<Message, C>>,
         _: &mut impl Timer,
     ) -> anyhow::Result<()> {
+        debug!("{:?}", message.inner);
         let id = match &message.inner {
             Message::Request(id) | Message::RequestOk(id) | Message::Release(id) => *id,
         };
@@ -337,15 +338,16 @@ impl<
             }
             Message::RequestOk(_) => {}
             Message::Release(_) => {
-                if let Ok(index) = self
+                if let Some(index) = self
                     .requests
-                    .binary_search_by(|(clock, _)| message.clock.arbitrary_cmp(clock))
+                    .iter()
+                    .position(|(_, other_id)| *other_id == id)
                 {
-                    let (_, processor_id) = self.requests.remove(index);
+                    let (clock, _) = self.requests.remove(index);
                     // not so sure whether faulty processors can cause this break on other processors
                     // anyway let's go with this for now, since it should always be the case for the
                     // evaluated path
-                    anyhow::ensure!(processor_id == id);
+                    anyhow::ensure!(message.clock.arbitrary_cmp(&clock).is_gt());
                 }
             }
         }
