@@ -130,7 +130,8 @@ module "group-5-1-quorum" {
   }
 
   instance-count = var.mode == "five" ? 2 : 0
-  instance-type = "c5a.16xlarge"
+  # instance-type = "c5a.16xlarge"
+  instance-type = "c5a.xlarge"
 }
 
 
@@ -141,7 +142,8 @@ module "group-5-2-quorum" {
   }
 
   instance-count = var.mode == "five" ? 2 : 0
-  instance-type = "c5a.16xlarge"
+  # instance-type = "c5a.16xlarge"
+  instance-type = "c5a.xlarge"
 }
 
 module "group-5-3-quorum" {
@@ -151,7 +153,8 @@ module "group-5-3-quorum" {
   }
 
   instance-count = var.mode == "five" ? 2 : 0
-  instance-type = "c5a.16xlarge"
+  # instance-type = "c5a.16xlarge"
+  instance-type = "c5a.xlarge"
 }
 
 module "group-5-4-quorum" {
@@ -161,7 +164,8 @@ module "group-5-4-quorum" {
   }
 
   instance-count = var.mode == "five" ? 2 : 0
-  instance-type = "c5a.16xlarge"
+  # instance-type = "c5a.16xlarge"
+  instance-type = "c5a.xlarge"
 }
 
 module "group-5-5-quorum" {
@@ -171,7 +175,8 @@ module "group-5-5-quorum" {
   }
 
   instance-count = var.mode == "five" ? 2 : 0
-  instance-type = "c5a.16xlarge"
+  # instance-type = "c5a.16xlarge"
+  instance-type = "c5a.xlarge"
 }
 
 output "quorum-instances" {

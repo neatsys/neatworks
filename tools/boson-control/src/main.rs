@@ -24,47 +24,47 @@ async fn main() -> anyhow::Result<()> {
     let instances = terraform_instances().await?;
     match item.as_deref() {
         Some("mutex") => {
-            // for n in 1..=20 {
-            //     mutex_session(
-            //         client.clone(),
-            //         instances.clone(),
-            //         RequestMode::One,
-            //         Variant::Quorum,
-            //         n,
-            //     )
-            //     .await?
-            // }
-            // for n in 1..=20 {
-            //     mutex_session(
-            //         client.clone(),
-            //         instances.clone(),
-            //         RequestMode::One,
-            //         Variant::Untrusted,
-            //         n,
-            //     )
-            //     .await?
-            // }
-            // for n in 1..=20 {
-            //     mutex_session(
-            //         client.clone(),
-            //         instances.clone(),
-            //         RequestMode::One,
-            //         Variant::Replicated,
-            //         n,
-            //     )
-            //     .await?
-            // }
-            // for n in 1..=16 {
-            //     mutex_session(
-            //         client.clone(),
-            //         instances.clone(),
-            //         RequestMode::All,
-            //         Variant::Quorum,
-            //         n,
-            //     )
-            //     .await?
-            // }
-            for n in 11..=15 {
+            for n in 1..=20 {
+                mutex_session(
+                    client.clone(),
+                    instances.clone(),
+                    RequestMode::One,
+                    Variant::Quorum,
+                    n,
+                )
+                .await?
+            }
+            for n in 1..=20 {
+                mutex_session(
+                    client.clone(),
+                    instances.clone(),
+                    RequestMode::One,
+                    Variant::Untrusted,
+                    n,
+                )
+                .await?
+            }
+            for n in 1..=20 {
+                mutex_session(
+                    client.clone(),
+                    instances.clone(),
+                    RequestMode::One,
+                    Variant::Replicated,
+                    n,
+                )
+                .await?
+            }
+            for n in 1..=16 {
+                mutex_session(
+                    client.clone(),
+                    instances.clone(),
+                    RequestMode::All,
+                    Variant::Quorum,
+                    n,
+                )
+                .await?
+            }
+            for n in 1..=16 {
                 mutex_session(
                     client.clone(),
                     instances.clone(),
@@ -77,7 +77,120 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("cops") => {
-            cops_session(client, instances, Variant::Replicated, 1, 1, 1, 1).await?;
+            cops_session(
+                client.clone(),
+                instances.clone(),
+                Variant::Untrusted,
+                1,
+                1,
+                5,
+                2,
+            )
+            .await?;
+            cops_session(
+                client.clone(),
+                instances.clone(),
+                Variant::Untrusted,
+                1,
+                1,
+                10,
+                4,
+            )
+            .await?;
+            for n in 1..=10 {
+                cops_session(
+                    client.clone(),
+                    instances.clone(),
+                    Variant::Untrusted,
+                    1,
+                    2,
+                    n * 10,
+                    n * 4,
+                )
+                .await?
+            }
+
+            cops_session(
+                client.clone(),
+                instances.clone(),
+                Variant::Quorum,
+                1,
+                1,
+                5,
+                2,
+            )
+            .await?;
+            cops_session(
+                client.clone(),
+                instances.clone(),
+                Variant::Quorum,
+                1,
+                1,
+                10,
+                4,
+            )
+            .await?;
+            for n in 1..=10 {
+                cops_session(
+                    client.clone(),
+                    instances.clone(),
+                    Variant::Quorum,
+                    1,
+                    2,
+                    n * 10,
+                    n * 4,
+                )
+                .await?
+            }
+
+            for n in [1, 2, 4, 8, 20, 40, 60, 80, 120, 160] {
+                cops_session(
+                    client.clone(),
+                    instances.clone(),
+                    Variant::Untrusted,
+                    1,
+                    2,
+                    200,
+                    n,
+                )
+                .await?
+            }
+            cops_session(
+                client.clone(),
+                instances.clone(),
+                Variant::Untrusted,
+                1,
+                2,
+                160,
+                160,
+            )
+            .await?;
+
+            for (n_put, n) in [
+                (1, 200),
+                (2, 200),
+                (4, 200),
+                (8, 200),
+                (20, 200),
+                (20, 100),
+                (30, 100),
+                (40, 100),
+                (30, 50),
+                (40, 50),
+                (50, 50),
+            ] {
+                cops_session(
+                    client.clone(),
+                    instances.clone(),
+                    Variant::Quorum,
+                    1,
+                    2,
+                    n,
+                    n_put,
+                )
+                .await?
+            }
+
             Ok(())
         }
         _ => Ok(()),
@@ -327,15 +440,16 @@ async fn cops_session(
     let num_region = region_instances.len();
     let num_region_client = num_region_replica * num_replica_client;
 
-    let mut clock_instances = Vec::new();
+    // let mut clock_instances = Vec::new();
     let mut instances = Vec::new();
     let mut client_instances = Vec::new();
     for region_instances in region_instances.into_values() {
         let mut region_instances = region_instances.into_iter();
-        clock_instances.extend((&mut region_instances).take(2));
+        // clock_instances.extend((&mut region_instances).take(2));
         instances.extend((&mut region_instances).take(num_region_replica));
         client_instances.extend(region_instances.take(num_region_client));
     }
+    let clock_instances = terraform_quorum_instances().await?;
     anyhow::ensure!(clock_instances.len() >= num_region * 2);
     anyhow::ensure!(instances.len() == num_region * num_region_replica);
     anyhow::ensure!(client_instances.len() == num_region * num_region_client);
