@@ -299,7 +299,8 @@ impl<
 
         if matches!(
             self.connections.get(&remote),
-            Some(Connection::BackedOff(..))
+            // TODO find a way to add this condition
+            Some(Connection::BackedOff(_sender, _)) // if !sender.is_closed()
         ) {
             // always prefer to keep the connection created locally
             // the connection in `self.connections` may not be created locally, but the incoming

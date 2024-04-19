@@ -70,6 +70,7 @@ pub async fn pbft_client_session(
         // let tcp_listener = TcpListener::bind((ip, 0)).await?;
         let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?;
         let addr = SocketAddr::from((ip, tcp_listener.local_addr()?.port()));
+        println!("client {addr} listening {:?}", tcp_listener.local_addr());
         let workload = create_workload(
             StdRng::seed_from_u64(117418 + index as u64),
             index < num_concurrent_put,
@@ -108,6 +109,7 @@ pub async fn pbft_client_session(
 
         let mut upcall = upcall.clone();
         sessions.spawn(async move {
+            let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
             let dispatch_session = dispatch_session.run(&mut dispatch);
             let client_session = client_session.run(&mut client);
             // wanted to reuse this below, but cannot (easily), because the `close_loop`s are
@@ -136,6 +138,7 @@ pub async fn pbft_client_session(
                 ))
             };
             tokio::select! {
+                result = tcp_accept_session => result?,
                 result = dispatch_session => result?,
                 result = client_session => result?,
                 result = close_loop_session => return result,
@@ -170,7 +173,8 @@ pub async fn pbft_server_session(
     let crypto = Crypto::new_hardcoded(num_replica, id, CryptoFlavor::Schnorrkel)?;
     let mut app = app::BTreeMap::new();
     {
-        let mut workload = create_workload(thread_rng(), false, record_count, 0..1)?;
+        let mut workload =
+            create_workload(StdRng::seed_from_u64(117418), false, record_count, 0..1)?;
         let mut workload = Json(Iter::<_, _, ()>::from(workload.startup_ops()));
         while let Some((op, ())) = workload.next_op()? {
             app.execute(&op)?;
@@ -279,6 +283,7 @@ pub async fn untrusted_client_session(
 
         let mut upcall = upcall.clone();
         sessions.spawn(async move {
+            let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
             let dispatch_session = dispatch_session.run(&mut dispatch);
             let client_session = client_session.run(&mut client);
             let close_loop_session = async move {
@@ -303,6 +308,7 @@ pub async fn untrusted_client_session(
                 ))
             };
             tokio::select! {
+                result = tcp_accept_session => result?,
                 result = dispatch_session => result?,
                 result = client_session => result?,
                 result = close_loop_session => return result,
@@ -358,7 +364,8 @@ pub async fn untrusted_server_session(
         ),
     ));
     {
-        let mut workload = create_workload(thread_rng(), false, record_count, 0..1)?;
+        let mut workload =
+            create_workload(StdRng::seed_from_u64(117418), false, record_count, 0..1)?;
         let mut workload = Iter::<_, _, ()>::from(workload.startup_ops());
         while let Some((op, ())) = workload.next_op()? {
             replica.startup_insert(op)?
@@ -381,7 +388,7 @@ pub async fn quorum_client_session(
     config: CopsClient,
     upcall: impl Clone + SendEvent<(f32, Duration)> + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
-    use augustus::crypto::peer::Crypto;
+    // use augustus::crypto::peer::Crypto;
 
     let CopsClient {
         addrs,
@@ -391,15 +398,14 @@ pub async fn quorum_client_session(
         num_concurrent_put,
         record_count,
         put_range,
-        variant: Variant::Quorum(config),
+        // variant: Variant::Quorum(config),
+        variant: Variant::Quorum(_),
     } = config
     else {
         anyhow::bail!("unimplemented")
     };
     let replica_addr = addrs[index];
-    // client don't sign clocks, only verify, so index could be arbitrary
-    // still not good practice though
-    let crypto = Crypto::new_random(&mut thread_rng());
+    // let crypto = Crypto::new_random(&mut thread_rng());
 
     let mut sessions = JoinSet::new();
     for index in 0..num_concurrent {
@@ -416,12 +422,13 @@ pub async fn quorum_client_session(
         let mut dispatch_session = event::Session::new();
         let mut client_session = Session::new();
         let mut close_loop_session = Session::new();
-        let (crypto_worker, mut crypto_executor) = spawning_backend();
+        // let (crypto_worker, mut crypto_executor) = spawning_backend();
 
         let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
             Tcp::new(addr)?,
             {
-                let mut sender = boson::VerifyQuorumClock::new(config.num_faulty, crypto_worker);
+                // let mut sender = boson::VerifyQuorumClock::new(config.num_faulty, crypto_worker);
+                let mut sender = Sender::from(client_session.sender());
                 move |buf: &_| cops::to_client_on_buf(buf, &mut sender)
             },
             Once(dispatch_session.sender()),
@@ -441,9 +448,10 @@ pub async fn quorum_client_session(
         )));
 
         let mut upcall = upcall.clone();
-        let crypto = crypto.clone();
+        // let crypto = crypto.clone();
         sessions.spawn(async move {
-            let crypto_session = crypto_executor.run(crypto, Sender::from(client_session.sender()));
+            let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
+            // let crypto_session = crypto_executor.run(crypto, Sender::from(client_session.sender()));
             let dispatch_session = dispatch_session.run(&mut dispatch);
             let client_session = client_session.run(&mut client);
             let close_loop_session = async move {
@@ -468,7 +476,8 @@ pub async fn quorum_client_session(
                 ))
             };
             tokio::select! {
-                result = crypto_session => result?,
+                result = tcp_accept_session => result?,
+                // result = crypto_session => result?,
                 result = dispatch_session => result?,
                 result = client_session => result?,
                 result = close_loop_session => return result,
@@ -501,7 +510,8 @@ pub async fn quorum_server_session(
     // replica also don't sign any clock
     let crypto = Crypto::new_random(&mut thread_rng());
 
-    let tcp_listener = TcpListener::bind(addr).await?;
+    // let tcp_listener = TcpListener::bind(addr).await?;
+    let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], addr.port()))).await?;
     // let clock_tcp_listener = TcpListener::bind((addr.ip(), 0)).await?;
     let clock_tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?;
     let clock_addr = SocketAddr::from((addr.ip(), clock_tcp_listener.local_addr()?.port()));
@@ -542,7 +552,8 @@ pub async fn quorum_server_session(
         ),
     ));
     {
-        let mut workload = create_workload(thread_rng(), false, record_count, 0..1)?;
+        let mut workload =
+            create_workload(StdRng::seed_from_u64(117418), false, record_count, 0..1)?;
         let mut workload = Iter::<_, _, ()>::from(workload.startup_ops());
         while let Some((op, ())) = workload.next_op()? {
             replica.startup_insert(op)?

@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     future::Future,
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     time::{Duration, SystemTime},
 };
 
@@ -17,7 +17,7 @@ async fn main() -> anyhow::Result<()> {
     let instances = terraform_instances().await?;
     match item.as_deref() {
         Some("mutex") => mutex_session(client, instances, RequestMode::All).await,
-        Some("cops") => cops_session(client).await,
+        Some("cops") => cops_session(client, instances).await,
         _ => Ok(()),
     }
 }
@@ -195,24 +195,55 @@ async fn mutex_request_session(
     Ok(())
 }
 
-async fn cops_session(client: reqwest::Client) -> anyhow::Result<()> {
-    let urls = (0..2)
-        .map(|i| format!("http://127.0.0.{}:3000", i + 1))
+async fn cops_session(
+    client: reqwest::Client,
+    instances: Vec<TerraformOutputInstance>,
+) -> anyhow::Result<()> {
+    let mut region_instances = HashMap::<_, Vec<_>>::new();
+    for instance in instances {
+        region_instances
+            .entry(instance.region())
+            .or_default()
+            .push(instance.clone())
+    }
+    let num_region = region_instances.len();
+
+    let mut clock_instances = Vec::new();
+    let mut instances = Vec::new();
+    let mut client_instances = Vec::new();
+    for region_instances in region_instances.into_values() {
+        let mut region_instances = region_instances.into_iter();
+        clock_instances.extend((&mut region_instances).take(2));
+        instances.extend((&mut region_instances).take(4));
+        client_instances.extend(region_instances.take(instances.len()));
+    }
+    anyhow::ensure!(clock_instances.len() >= num_region * 2);
+    anyhow::ensure!(!instances.is_empty());
+    anyhow::ensure!(client_instances.len() == instances.len());
+
+    let urls = instances
+        .iter()
+        .map(|instance| format!("http://{}:3000", instance.public_dns))
         .collect::<Vec<_>>();
-    let client_urls = (0..2)
-        .map(|i| format!("http://127.0.0.{}:3000", i + 101))
+    let client_urls = client_instances
+        .iter()
+        .map(|instance| format!("http://{}:3000", instance.public_dns))
         .collect::<Vec<_>>();
-    let clock_urls = (0..2)
-        .map(|i| format!("http://127.0.1.{}:3000", i + 1))
+    let clock_urls = clock_instances
+        .iter()
+        .map(|instance| format!("http://{}:3000", instance.public_dns))
         .collect::<Vec<_>>();
-    let addrs = (0..2)
-        .map(|i| SocketAddr::from(([127, 0, 0, i + 1], 4000)))
+    let addrs = instances
+        .iter()
+        .map(|instance| SocketAddr::from((instance.public_ip, 4000)))
         .collect::<Vec<_>>();
-    let clock_addrs = (0..2)
-        .map(|i| SocketAddr::from(([127, 0, 0, i + 1], 5000)))
+    let clock_addrs = clock_instances
+        .iter()
+        .map(|instance| SocketAddr::from((instance.public_ip, 5000)))
         .collect::<Vec<_>>();
-    let client_ips = (0..2)
-        .map(|_| IpAddr::from([127, 0, 0, 101]))
+    let client_ips = client_instances
+        .iter()
+        .map(|instance| instance.public_ip)
         .collect::<Vec<_>>();
     let mut watchdog_sessions = JoinSet::new();
     println!("Start clock services");
@@ -228,15 +259,17 @@ async fn cops_session(client: reqwest::Client) -> anyhow::Result<()> {
         watchdog_sessions.spawn(start_quorum_session(client.clone(), url.clone(), config));
     }
     use boson_control_messages::Variant::*;
-    // let variant = Replicated(boson_control_messages::CopsReplicated { num_faulty: 0 });
+    // let variant = Replicated(boson_control_messages::Replicated { num_faulty: 1 });
     // let variant = Untrusted;
     let variant = Quorum(quorum);
     println!("Start servers");
+    let record_count = 1000;
     for (i, url) in urls.iter().enumerate() {
+        println!("{url}");
         let config = boson_control_messages::CopsServer {
             addrs: addrs.clone(),
             id: i as _,
-            record_count: 1000,
+            record_count,
             variant: variant.clone(),
         };
         watchdog_sessions.spawn(cops_start_server_session(
@@ -248,15 +281,16 @@ async fn cops_session(client: reqwest::Client) -> anyhow::Result<()> {
     while_ok(&mut watchdog_sessions, sleep(Duration::from_millis(5000))).await?;
     println!("Start clients");
     let mut client_sessions = JoinSet::new();
+    let record_count_per_client = record_count / client_urls.len();
     for (i, url) in client_urls.into_iter().enumerate() {
         let config = boson_control_messages::CopsClient {
             addrs: addrs.clone(),
             ip: client_ips[i],
             index: i,
-            num_concurrent: 10,
+            num_concurrent: 1,
             num_concurrent_put: 1,
-            record_count: 1000,
-            put_range: 500 * i..500 * (i + 1),
+            record_count,
+            put_range: record_count_per_client * i..record_count_per_client * (i + 1),
             variant: variant.clone(),
         };
         client_sessions.spawn(cops_client_session(client.clone(), url, config));

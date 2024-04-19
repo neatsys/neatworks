@@ -186,6 +186,7 @@ impl<N, U: SendEvent<InvokeOk>, A> OnEvent<Recv<Reply>> for Client<N, U, A> {
             return Ok(());
         };
         invoke.replies.insert(reply.replica_id, reply.clone());
+        // println!("{:?}", invoke.replies);
         if invoke
             .replies
             .values()
