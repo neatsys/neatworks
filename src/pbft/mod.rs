@@ -144,7 +144,7 @@ impl<N, U, A> Client<N, U, A> {
     }
 }
 
-const CLIENT_RESEND_INTERVAL: Duration = Duration::from_millis(1000);
+const CLIENT_RESEND_INTERVAL: Duration = Duration::from_millis(2000);
 
 impl<N: ToReplicaNet<A>, U, A: Addr> OnEvent<Invoke> for Client<N, U, A> {
     fn on_event(&mut self, Invoke(op): Invoke, timer: &mut impl Timer<Self>) -> anyhow::Result<()> {
@@ -167,7 +167,7 @@ struct Resend;
 
 impl<N: ToReplicaNet<A>, U, A: Addr> OnEvent<Resend> for Client<N, U, A> {
     fn on_event(&mut self, Resend: Resend, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
-        println!("Resend timeout on seq {}", self.seq);
+        warn!("Resend timeout on seq {}", self.seq);
         self.do_send(All)
         // Ok(())
     }
@@ -547,6 +547,7 @@ impl<M: ReplicaCommon> OnEvent<ProgressPrepared> for Replica<M::N, M::CN, M::CW,
     where
         Self: Sized,
     {
+        warn!("progress prepared {op_num}");
         let entry = &self.log[op_num as usize];
         let pre_prepare = entry
             .pre_prepare

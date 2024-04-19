@@ -1,0 +1,9 @@
+One,Quorum,95,0.9270616
+One,Quorum,95,1.1203867
+One,Quorum,95,0.9452231
+One,Quorum,95,0.4987558
+One,Quorum,95,1.1355232
+One,Quorum,95,0.580473
+One,Quorum,95,1.1914452
+One,Quorum,95,0.5364497
+One,Quorum,95,1.1768333

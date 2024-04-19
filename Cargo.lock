@@ -304,6 +304,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "boson-control-messages",
+ "rand",
  "reqwest",
  "serde",
  "serde_json",

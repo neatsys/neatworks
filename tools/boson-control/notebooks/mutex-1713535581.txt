@@ -1,0 +1,9 @@
+One,Quorum,35,0.3389346
+One,Quorum,35,0.22171424
+One,Quorum,35,0.2973779
+One,Quorum,35,0.21929604
+One,Quorum,35,0.33859426
+One,Quorum,35,0.33784497
+One,Quorum,35,0.22038354
+One,Quorum,35,0.21912342
+One,Quorum,35,0.36562583

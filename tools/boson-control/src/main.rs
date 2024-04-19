@@ -1,12 +1,20 @@
 use std::{
     collections::HashMap,
+    fmt::Write,
     future::Future,
     net::SocketAddr,
+    path::Path,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 
 use boson_control::{terraform_instances, TerraformOutputInstance};
-use tokio::{task::JoinSet, time::sleep};
+use rand::{seq::SliceRandom, thread_rng};
+use tokio::{
+    fs::{create_dir_all, write},
+    task::JoinSet,
+    time::sleep,
+};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
@@ -16,7 +24,37 @@ async fn main() -> anyhow::Result<()> {
     let item = std::env::args().nth(1);
     let instances = terraform_instances().await?;
     match item.as_deref() {
-        Some("mutex") => mutex_session(client, instances, RequestMode::All).await,
+        Some("mutex") => {
+            for num_region_processor in 1..=16 {
+                for variant in [
+                    Variant::Untrusted,
+                    // Variant::Replicated,
+                    Variant::Quorum,
+                ] {
+                    mutex_session(
+                        client.clone(),
+                        instances.clone(),
+                        RequestMode::All,
+                        variant,
+                        num_region_processor,
+                    )
+                    .await?;
+                }
+            }
+            for num_region_processor in (1..=32).step_by(6) {
+                for variant in [Variant::Untrusted, Variant::Replicated, Variant::Quorum] {
+                    mutex_session(
+                        client.clone(),
+                        instances.clone(),
+                        RequestMode::One,
+                        variant,
+                        num_region_processor,
+                    )
+                    .await?;
+                }
+            }
+            Ok(())
+        }
         Some("cops") => cops_session(client, instances).await,
         _ => Ok(()),
     }
@@ -39,10 +77,19 @@ pub enum RequestMode {
     All,
 }
 
+#[derive(Debug)]
+pub enum Variant {
+    Untrusted,
+    Replicated,
+    Quorum,
+}
+
 async fn mutex_session(
     client: reqwest::Client,
     instances: Vec<TerraformOutputInstance>,
     mode: RequestMode,
+    variant: Variant,
+    num_region_processor: usize,
 ) -> anyhow::Result<()> {
     let mut region_instances = HashMap::<_, Vec<_>>::new();
     for instance in instances {
@@ -58,7 +105,7 @@ async fn mutex_session(
     for region_instances in region_instances.into_values() {
         let mut region_instances = region_instances.into_iter();
         clock_instances.extend((&mut region_instances).take(2));
-        instances.extend(region_instances)
+        instances.extend(region_instances.take(num_region_processor))
     }
     anyhow::ensure!(clock_instances.len() >= num_region * 2);
     anyhow::ensure!(!instances.is_empty());
@@ -95,33 +142,49 @@ async fn mutex_session(
     }
     while_ok(&mut watchdog_sessions, sleep(Duration::from_millis(5000))).await?;
     use boson_control_messages::Variant::*;
-    // let variant = Quorum(quorum);
-    // let variant = Untrusted;
-    let variant = Replicated(boson_control_messages::Replicated { num_faulty: 0 });
+    let variant_config = match variant {
+        Variant::Untrusted => Untrusted,
+        Variant::Replicated => Replicated(boson_control_messages::Replicated {
+            num_faulty: num_region_processor - 1,
+        }),
+        Variant::Quorum => Quorum(quorum),
+    };
     for (index, url) in urls.iter().enumerate() {
         let config = boson_control_messages::Mutex {
             addrs: addrs.clone(),
             id: index as _,
-            num_faulty: 1,
-            variant: variant.clone(),
+            num_faulty: num_region_processor - 1,
+            variant: variant_config.clone(),
         };
         watchdog_sessions.spawn(mutex_start_session(client.clone(), url.clone(), config));
     }
-    for _ in 0..10 {
+    let mut lines = String::new();
+    for i in 0..10 {
         let at = SystemTime::now() + Duration::from_millis(2000);
         println!("Next request scheduled at {at:?}");
+        let out = Arc::new(Mutex::new(Vec::new()));
         match mode {
             RequestMode::One => {
                 while_ok(
                     &mut watchdog_sessions,
-                    mutex_request_session(client.clone(), urls[0].clone(), at),
+                    mutex_request_session(
+                        client.clone(),
+                        urls.choose(&mut thread_rng()).cloned().unwrap(),
+                        at,
+                        out.clone(),
+                    ),
                 )
                 .await??
             }
             RequestMode::All => {
                 let mut sessions = JoinSet::new();
                 for url in &urls {
-                    sessions.spawn(mutex_request_session(client.clone(), url.clone(), at));
+                    sessions.spawn(mutex_request_session(
+                        client.clone(),
+                        url.clone(),
+                        at,
+                        out.clone(),
+                    ));
                 }
                 while_ok(&mut watchdog_sessions, async move {
                     while let Some(result) = sessions.join_next().await {
@@ -130,6 +193,16 @@ async fn mutex_session(
                     anyhow::Ok(())
                 })
                 .await??
+            }
+        }
+        if i != 0 {
+            for duration in Arc::into_inner(out).unwrap().into_inner()? {
+                writeln!(
+                    &mut lines,
+                    "{mode:?},{variant:?},{},{}",
+                    urls.len(),
+                    duration.as_secs_f32()
+                )?
             }
         }
     }
@@ -144,6 +217,17 @@ async fn mutex_session(
     while let Some(result) = stop_sessions.join_next().await {
         result??
     }
+    // print!("{lines}");
+    let path = Path::new("tools/boson-control/notebooks");
+    create_dir_all(path).await?;
+    write(
+        path.join(format!(
+            "mutex-{}.txt",
+            SystemTime::UNIX_EPOCH.elapsed()?.as_secs()
+        )),
+        lines,
+    )
+    .await?;
     Ok(())
 }
 
@@ -160,11 +244,11 @@ async fn mutex_start_session(
         .error_for_status()?;
     loop {
         sleep(Duration::from_millis(1000)).await;
-        client
-            .get(format!("{url}/ok"))
-            .send()
-            .await?
-            .error_for_status()?;
+        // client
+        //     .get(format!("{url}/ok"))
+        //     .send()
+        //     .await?
+        //     .error_for_status()?;
     }
 }
 
@@ -181,17 +265,21 @@ async fn mutex_request_session(
     client: reqwest::Client,
     url: String,
     at: SystemTime,
+    out: Arc<Mutex<Vec<Duration>>>,
 ) -> anyhow::Result<()> {
     let latency = client
         .post(format!("{url}/mutex/request"))
         .json(&at)
-        .timeout(Duration::from_millis(5000))
+        .timeout(Duration::from_millis(30000))
         .send()
         .await?
         .error_for_status()?
         .json::<Duration>()
         .await?;
     println!("{latency:?}");
+    out.lock()
+        .map_err(|err| anyhow::format_err!("{err}"))?
+        .push(latency);
     Ok(())
 }
 
