@@ -228,7 +228,7 @@ pub mod simplex {
     use tracing::warn;
 
     use crate::{
-        event::BlackHole,
+        event::Unreachable,
         net::{Buf, IterAddr, SendMessage},
     };
 
@@ -254,7 +254,7 @@ pub mod simplex {
                     stream.write_all(&preamble).await?;
                     let (sender, receiver) = unbounded_channel();
                     sender.send(message)?;
-                    super::Tcp::write_task::<_, BlackHole>(
+                    super::Tcp::write_task::<_, Unreachable>(
                         stream.into_split().1,
                         receiver,
                         dest,

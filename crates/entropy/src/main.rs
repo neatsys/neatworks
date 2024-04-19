@@ -24,7 +24,7 @@ use augustus::{
             session::{Buffered, Sender},
             Blanket, Session,
         },
-        session, BlackHole, Once, SendEvent, Unify,
+        session, Once, SendEvent, Unify, Unreachable,
     },
     kademlia::{self, Buckets, PeerRecord, SendCryptoEvent},
     net::{dispatch, kademlia::Control, Detach, Dispatch, Payload},
@@ -298,7 +298,7 @@ async fn start_peer(
     let mut kademlia_peer = Blanket(Buffered::from(
         // TODO when there's dynamical joining peer that actually need to do bootstrap (and wait for
         // it done)
-        kademlia::Peer::<_, _, _, BlackHole, _>::new(
+        kademlia::Peer::<_, _, _, Unreachable, _>::new(
             buckets,
             Box::new(MessageNet::new(dispatch::Net::from(
                 dispatch_control_session.sender(),

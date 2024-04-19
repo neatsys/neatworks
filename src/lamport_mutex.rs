@@ -25,7 +25,10 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tracing::debug;
 
 use crate::{
-    event::{erased::OnEvent, OnTimer, SendEvent, Timer},
+    event::{
+        erased::{events::Init, OnEvent},
+        OnTimer, SendEvent, Timer,
+    },
     net::{deserialize, events::Recv, All, SendMessage},
 };
 
@@ -92,26 +95,28 @@ pub struct Causal<E, CS, N, C, M> {
 }
 
 impl<E, CS: SendEvent<Update<C>>, N, C: Clone, M> Causal<E, CS, N, C, M> {
-    pub fn new(
-        clock_zero: C,
-        recv_sender: E,
-        mut clock_service: CS,
-        net: N,
-    ) -> anyhow::Result<Self> {
+    pub fn new(clock_zero: C, recv_sender: E, clock_service: CS, net: N) -> anyhow::Result<Self> {
         // make sure all egress message is clocked > `clock_zero`
-        let update = Update {
-            prev: clock_zero.clone(),
-            remote: clock_zero.clone(),
-        };
-        clock_service.send(update)?;
         Ok(Self {
             clock: clock_zero,
             recv_sender,
             clock_service,
             net,
-            pending_recv: Some(Default::default()),
+            pending_recv: None,
             pending_send: Default::default(),
         })
+    }
+}
+
+impl<E, CS: SendEvent<Update<C>>, N, C: Clone, M> OnEvent<Init> for Causal<E, CS, N, C, M> {
+    fn on_event(&mut self, Init: Init, _: &mut impl Timer) -> anyhow::Result<()> {
+        let update = Update {
+            prev: self.clock.clone(),
+            remote: self.clock.clone(),
+        };
+        self.clock_service.send(update)?;
+        self.pending_recv = Some(Default::default());
+        Ok(())
     }
 }
 
@@ -243,18 +248,18 @@ pub enum Message {
     Release(u8),
 }
 
-// `V` for verifiable
-pub struct Processor<CN, U, C, const V: bool = false> {
+#[derive(Debug)]
+pub struct Processor<CN, U, C> {
     id: u8,
     latests: Vec<C>,
     requests: Vec<(C, u8)>,
     requesting: bool,
 
-    pub causal_net: CN,
+    causal_net: CN,
     upcall: U,
 }
 
-impl<CN, U, C, const V: bool> Processor<CN, U, C, V> {
+impl<CN, U, C> Processor<CN, U, C> {
     pub fn new(
         id: u8,
         num_processor: usize,
@@ -266,7 +271,7 @@ impl<CN, U, C, const V: bool> Processor<CN, U, C, V> {
             id,
             causal_net,
             upcall,
-            latests: (0..num_processor as u8).map(clock_zero).collect(),
+            latests: (0..num_processor as u8).map(&clock_zero).collect(),
             requests: Default::default(),
             requesting: false,
         }
@@ -284,9 +289,7 @@ pub mod events {
 pub trait Net: SendMessage<u8, Message> + SendMessage<All, Message> {}
 impl<T: SendMessage<u8, Message> + SendMessage<All, Message>> Net for T {}
 
-impl<CN: SendMessage<All, Message>, U, C, const V: bool> OnEvent<events::Request>
-    for Processor<CN, U, C, V>
-{
+impl<CN: SendMessage<All, Message>, U, C> OnEvent<events::Request> for Processor<CN, U, C> {
     fn on_event(
         &mut self,
         events::Request: events::Request,
@@ -300,12 +303,8 @@ impl<CN: SendMessage<All, Message>, U, C, const V: bool> OnEvent<events::Request
     }
 }
 
-impl<
-        CN: SendMessage<u8, Message> + SendMessage<All, Message>,
-        U: SendEvent<events::RequestOk>,
-        C: Clock,
-        const V: bool,
-    > OnEvent<Recv<Clocked<Message, C>>> for Processor<CN, U, C, V>
+impl<CN: SendMessage<u8, Message>, U: SendEvent<events::RequestOk>, C: Clock>
+    OnEvent<Recv<Clocked<Message, C>>> for Processor<CN, U, C>
 {
     fn on_event(
         &mut self,
@@ -313,6 +312,23 @@ impl<
         _: &mut impl Timer,
     ) -> anyhow::Result<()> {
         debug!("{:?}", message.inner);
+        self.handle_clocked(message, |id| id)?;
+        if self.requesting {
+            self.check_requested()?
+        }
+        Ok(())
+    }
+}
+
+impl<CN, U, C: Clock> Processor<CN, U, C> {
+    fn handle_clocked<A>(
+        &mut self,
+        message: Clocked<Message, C>,
+        into_addr: impl Fn(u8) -> A,
+    ) -> anyhow::Result<()>
+    where
+        CN: SendMessage<A, Message>,
+    {
         let id = match &message.inner {
             Message::Request(id) | Message::RequestOk(id) | Message::Release(id) => *id,
         };
@@ -330,11 +346,8 @@ impl<
                 {
                     self.requests.insert(index, (message.clock, id))
                 };
-                if V {
-                    self.causal_net.send(All, Message::RequestOk(self.id))?;
-                } else {
-                    self.causal_net.send(id, Message::RequestOk(self.id))?;
-                }
+                self.causal_net
+                    .send(into_addr(id), Message::RequestOk(self.id))?;
             }
             Message::RequestOk(_) => {}
             Message::Release(_) => {
@@ -351,14 +364,11 @@ impl<
                 }
             }
         }
-        if self.requesting {
-            self.check_requested()?
-        }
         Ok(())
     }
 }
 
-impl<CN, U: SendEvent<events::RequestOk>, C: Clock, const V: bool> Processor<CN, U, C, V> {
+impl<CN, U: SendEvent<events::RequestOk>, C: Clock> Processor<CN, U, C> {
     fn check_requested(&mut self) -> anyhow::Result<()> {
         // self Request, requesting == true
         // all others Request are Release, while loopback Request still not received
@@ -381,9 +391,7 @@ impl<CN, U: SendEvent<events::RequestOk>, C: Clock, const V: bool> Processor<CN,
     }
 }
 
-impl<CN: SendMessage<All, Message>, U, C, const V: bool> OnEvent<events::Release>
-    for Processor<CN, U, C, V>
-{
+impl<CN: SendMessage<All, Message>, U, C> OnEvent<events::Release> for Processor<CN, U, C> {
     fn on_event(
         &mut self,
         events::Release: events::Release,
@@ -397,7 +405,7 @@ impl<CN: SendMessage<All, Message>, U, C, const V: bool> OnEvent<events::Release
     }
 }
 
-impl<CN, U, C, const V: bool> OnTimer for Processor<CN, U, C, V> {
+impl<CN, U, C> OnTimer for Processor<CN, U, C> {
     fn on_timer(&mut self, _: crate::event::TimerId, _: &mut impl Timer) -> anyhow::Result<()> {
         unreachable!()
     }
@@ -413,6 +421,225 @@ pub fn on_buf<C: DeserializeOwned>(
     sender: &mut impl SendRecvEvent<C>,
 ) -> anyhow::Result<()> {
     sender.send(Recv(deserialize(buf)?))
+}
+
+pub mod verifiable {
+    // finally decided to duplicate some code to above
+    // 27 hours until ddl, should be forgivable
+
+    use std::{cmp::Ordering, collections::HashMap, mem::replace};
+
+    use serde::{de::DeserializeOwned, Deserialize, Serialize};
+    use tracing::debug;
+
+    use crate::{
+        crypto::{
+            peer::{Crypto, Verifiable},
+            DigestHash,
+        },
+        event::{erased::OnEvent, SendEvent, Timer},
+        net::{deserialize, events::Recv, Addr, All, SendMessage},
+        worker::Submit,
+    };
+
+    use super::{events, Clock, Clocked};
+
+    // the message type used by the verifiable variant of mutex protocol
+    // f + 1 Verifiable<Ordered<C>> forms an acquisition proof
+    #[derive(Debug, Hash, Serialize, Deserialize)]
+    pub struct Ordered<C> {
+        clock: C,
+        after: Vec<(C, u8)>,
+        id: u8,
+    }
+
+    #[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
+    pub struct Processor<CN, N, U, C> {
+        num_faulty: usize,
+        #[deref]
+        #[deref_mut]
+        inner: super::Processor<CN, U, C>,
+        last_ordered: C,
+        proof: HashMap<u8, Verifiable<Ordered<C>>>,
+        net: N,
+    }
+
+    impl<CN, N, U, C> Processor<CN, N, U, C> {
+        pub fn new(
+            id: u8,
+            num_processor: usize,
+            num_faulty: usize,
+            clock_zero: impl Fn(u8) -> C,
+            causal_net: CN,
+            net: N,
+            upcall: U,
+        ) -> Self {
+            let inner = super::Processor::new(id, num_processor, &clock_zero, causal_net, upcall);
+            Self {
+                inner,
+                num_faulty,
+                net,
+                last_ordered: clock_zero(id),
+                proof: Default::default(),
+            }
+        }
+    }
+
+    impl<CN: SendMessage<All, super::Message>, N, U, C> OnEvent<events::Request>
+        for Processor<CN, N, U, C>
+    {
+        fn on_event(
+            &mut self,
+            events::Request: events::Request,
+            timer: &mut impl Timer,
+        ) -> anyhow::Result<()> {
+            self.inner.on_event(events::Request, timer)
+        }
+    }
+
+    impl<
+            CN: SendMessage<All, super::Message>,
+            N: SendMessage<u8, Ordered<C>>,
+            U: SendEvent<events::RequestOk>,
+            C: Clock,
+        > OnEvent<Recv<Clocked<super::Message, C>>> for Processor<CN, N, U, C>
+    {
+        fn on_event(
+            &mut self,
+            Recv(message): Recv<Clocked<super::Message, C>>,
+            _: &mut impl Timer,
+        ) -> anyhow::Result<()> {
+            debug!("{:?}", message.inner);
+            self.handle_clocked(message, |_| All)?;
+            if self.requesting {
+                self.check_requested()?
+            }
+            Ok(())
+        }
+    }
+
+    impl<CN, N: SendMessage<u8, Ordered<C>>, U: SendEvent<events::RequestOk>, C: Clock>
+        Processor<CN, N, U, C>
+    {
+        fn check_requested(&mut self) -> anyhow::Result<()> {
+            for (clock, id) in &self.inner.requests {
+                if clock.arbitrary_cmp(&self.last_ordered).is_le() {
+                    continue;
+                }
+                if self.latests.iter().all(|other_clock| {
+                    matches!(
+                        other_clock.partial_cmp(clock),
+                        Some(Ordering::Greater | Ordering::Equal)
+                    )
+                }) {
+                    let ordered = Ordered {
+                        clock: clock.clone(),
+                        after: self.requests.clone(), // TODO trim the later requests
+                        id: self.id,
+                    };
+                    self.net.send(*id, ordered)?
+                } else {
+                    break;
+                }
+            }
+            if let Some((clock, id)) = self.requests.first() {
+                if *id == self.inner.id
+                    && self
+                        .proof
+                        .values()
+                        .filter(|message| {
+                            // probably not Greater, but who cares
+                            matches!(message.clock.partial_cmp(clock), Some(Ordering::Equal))
+                        })
+                        .count()
+                        > self.num_faulty
+                {
+                    let replaced = replace(&mut self.requesting, false);
+                    anyhow::ensure!(replaced);
+                    self.upcall.send(events::RequestOk)?
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl<CN: SendMessage<All, super::Message>, N, U, C> OnEvent<events::Release>
+        for Processor<CN, N, U, C>
+    {
+        fn on_event(
+            &mut self,
+            events::Release: events::Release,
+            timer: &mut impl Timer,
+        ) -> anyhow::Result<()> {
+            self.inner.on_event(events::Release, timer)
+        }
+    }
+
+    impl<CN, N: SendMessage<u8, Ordered<C>>, U: SendEvent<events::RequestOk>, C: Clock>
+        OnEvent<Recv<Verifiable<Ordered<C>>>> for Processor<CN, N, U, C>
+    {
+        fn on_event(
+            &mut self,
+            Recv(ordered): Recv<Verifiable<Ordered<C>>>,
+            _: &mut impl Timer,
+        ) -> anyhow::Result<()> {
+            if let Some(other_ordered) = self.proof.get(&ordered.id) {
+                if matches!(
+                    other_ordered.clock.partial_cmp(&ordered.clock),
+                    Some(Ordering::Greater | Ordering::Equal)
+                ) {
+                    return Ok(());
+                }
+            }
+            self.proof.insert(ordered.id, ordered);
+            self.check_requested()
+        }
+    }
+
+    #[derive(Debug, Serialize, Deserialize, derive_more::From)]
+    pub enum Message<C> {
+        Clocked(Clocked<super::Message, C>),
+        Ordered(Verifiable<Ordered<C>>),
+    }
+
+    pub type MessageNet<N, C> = crate::net::MessageNet<N, Message<C>>;
+
+    pub fn on_buf<C: DeserializeOwned>(
+        buf: &[u8],
+        clocked_sender: &mut impl super::SendRecvEvent<C>,
+        sender: &mut impl SendEvent<Recv<Verifiable<Ordered<C>>>>,
+    ) -> anyhow::Result<()> {
+        match deserialize(buf)? {
+            Message::Clocked(message) => clocked_sender.send(Recv(message)),
+            Message::Ordered(message) => sender.send(Recv(message)),
+        }
+    }
+
+    pub struct SignOrdered<CW, E> {
+        crypto_worker: CW,
+        _m: std::marker::PhantomData<E>,
+    }
+
+    impl<CW, E> SignOrdered<CW, E> {
+        pub fn new(crypto_worker: CW) -> Self {
+            Self {
+                crypto_worker,
+                _m: Default::default(),
+            }
+        }
+    }
+
+    impl<CW: Submit<Crypto, E>, E: SendMessage<A, Verifiable<Ordered<C>>>, A: Addr, C>
+        SendMessage<A, Ordered<C>> for SignOrdered<CW, E>
+    where
+        Ordered<C>: DigestHash + Send + Sync + 'static,
+    {
+        fn send(&mut self, dest: A, message: Ordered<C>) -> anyhow::Result<()> {
+            self.crypto_worker.submit(Box::new(move |crypto, net| {
+                net.send(dest, crypto.sign(message))
+            }))
+        }
+    }
 }
 
 // cSpell:words lamport deque upcall

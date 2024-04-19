@@ -805,7 +805,10 @@ mod tests {
     use proptest::prelude::*;
     use rand::thread_rng;
 
-    use crate::{event::BlackHole, worker::Worker};
+    use crate::{
+        event::{BlackHole, Unreachable},
+        worker::Worker,
+    };
 
     use super::*;
 
@@ -888,11 +891,11 @@ mod tests {
     fn refresh_buckets() -> anyhow::Result<()> {
         let origin = PeerRecord::new(Crypto::new_random(&mut thread_rng()).public_key(), ());
         let buckets = Buckets::new(origin.clone());
-        let mut peer = Peer::<_, _, _, BlackHole, _>::new(
+        let mut peer = Peer::<_, _, _, Unreachable, _>::new(
             buckets,
             BlackHole,
-            BlackHole,
-            CryptoWorker::<_, BlackHole>::from(Worker::Null),
+            Unreachable,
+            CryptoWorker::<_, Unreachable>::from(Worker::Null),
         );
         peer.refresh_buckets()
     }

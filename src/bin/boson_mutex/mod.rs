@@ -5,7 +5,7 @@ use augustus::{
     boson::{self, QuorumClient, QuorumClock, VerifyQuorumClock},
     event::{
         self,
-        erased::{session::Sender, Blanket, Buffered, Session, Unify},
+        erased::{events::Init, session::Sender, Blanket, Buffered, Session, Unify},
         Once, SendEvent,
     },
     lamport_mutex::{
@@ -59,7 +59,7 @@ pub async fn untrusted_session(
         },
         Once(dispatch_session.sender()),
     )?));
-    let mut processor = Blanket(Unify(Processor::<_, _, _>::new(
+    let mut processor = Blanket(Unify(Processor::new(
         id,
         addrs.len(),
         |id| (0u32, id),
@@ -79,6 +79,7 @@ pub async fn untrusted_session(
             None,
         )),
     )?));
+    Sender::from(causal_net_session.sender()).send(Init)?;
 
     let event_session = {
         let mut sender = Sender::from(processor_session.sender());
@@ -188,7 +189,7 @@ pub async fn replicated_session(
         num_faulty,
     )));
     let mut queue = Blanket(Unify(Queue::new(Sender::from(client_session.sender()))));
-    let mut processor = Blanket(Unify(Processor::<_, _, _>::new(
+    let mut processor = Blanket(Unify(Processor::new(
         id,
         num_replica,
         |_| 0u32,
@@ -282,7 +283,7 @@ pub async fn quorum_session(
         },
         Once(dispatch_session.sender()),
     )?));
-    let mut processor = Blanket(Unify(Processor::<_, _, _, true>::new(
+    let mut processor = Blanket(Unify(Processor::new(
         id,
         config.addrs.len(),
         |_| QuorumClock::default(),
@@ -324,6 +325,8 @@ pub async fn quorum_session(
             ),
         ),
     )));
+
+    Sender::from(causal_net_session.sender()).send(Init)?;
 
     let event_session = {
         let mut sender = Sender::from(processor_session.sender());

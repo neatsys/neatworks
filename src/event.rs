@@ -187,11 +187,20 @@ pub use session::Session;
 // utility types and combinator
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct BlackHole; // for testing
+pub struct BlackHole;
 
 impl<M> SendEvent<M> for BlackHole {
     fn send(&mut self, _: M) -> anyhow::Result<()> {
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Unreachable;
+
+impl<M> SendEvent<M> for Unreachable {
+    fn send(&mut self, _: M) -> anyhow::Result<()> {
+        anyhow::bail!("unreachable")
     }
 }
 
@@ -202,6 +211,12 @@ pub trait SendEventOnce<M> {
 impl<M> SendEventOnce<M> for BlackHole {
     fn send_once(self, _: M) -> anyhow::Result<()> {
         Ok(())
+    }
+}
+
+impl<M> SendEventOnce<M> for Unreachable {
+    fn send_once(self, _: M) -> anyhow::Result<()> {
+        anyhow::bail!("unreachable")
     }
 }
 

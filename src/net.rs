@@ -80,6 +80,7 @@ pub trait SendMessage<A, M> {
     fn send(&mut self, dest: A, message: M) -> anyhow::Result<()>;
 }
 
+// is it good practice to reuse?
 impl<A, M> SendMessage<A, M> for BlackHole {
     fn send(&mut self, _: A, _: M) -> anyhow::Result<()> {
         Ok(())
