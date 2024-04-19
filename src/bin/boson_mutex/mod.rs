@@ -21,7 +21,6 @@ use augustus::{
     worker::{spawn_backend, Submit, Worker},
     workload::{events::InvokeOk, Queue},
 };
-use boson_control_messages::{MutexQuorum, MutexReplicated, MutexUntrusted};
 use rand::thread_rng;
 use tokio::{net::TcpListener, sync::mpsc::UnboundedReceiver};
 use tokio_util::sync::CancellationToken;
@@ -32,13 +31,20 @@ pub enum Event {
 }
 
 pub async fn untrusted_session(
-    config: MutexUntrusted,
+    config: boson_control_messages::Mutex,
     mut events: UnboundedReceiver<Event>,
     upcall: impl SendEvent<RequestOk> + Send + Sync + 'static,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    let id = config.id;
-    let addr = config.addrs[id as usize];
+    let boson_control_messages::Mutex {
+        id,
+        addrs,
+        variant: boson_control_messages::Variant::Untrusted,
+    } = config
+    else {
+        anyhow::bail!("unimplemented")
+    };
+    let addr = addrs[id as usize];
 
     let tcp_listener = TcpListener::bind(addr).await?;
     let mut dispatch_session = event::Session::new();
@@ -55,7 +61,7 @@ pub async fn untrusted_session(
     )?));
     let mut processor = Blanket(Unify(Processor::<_, _, _>::new(
         id,
-        config.addrs.len(),
+        addrs.len(),
         |id| (0u32, id),
         Detach(Sender::from(causal_net_session.sender())),
         upcall,
@@ -68,7 +74,7 @@ pub async fn untrusted_session(
             as Box<dyn SendEvent<lamport_mutex::Update<LamportClock>> + Send + Sync>,
         lamport_mutex::MessageNet::<_, LamportClock>::new(IndexNet::new(
             dispatch::Net::from(dispatch_session.sender()),
-            config.addrs,
+            addrs,
             // intentionally sending loopback messages as expected by processor protocol
             None,
         )),
@@ -103,18 +109,24 @@ pub async fn untrusted_session(
 }
 
 pub async fn replicated_session(
-    config: MutexReplicated,
+    config: boson_control_messages::Mutex,
     mut events: UnboundedReceiver<Event>,
     upcall: impl SendEvent<RequestOk> + Send + Sync + 'static,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     use augustus::crypto::{Crypto, CryptoFlavor};
 
-    let id = config.id;
-    let addr = config.addrs[config.id as usize];
-    let num_replica = config.addrs.len();
+    let boson_control_messages::Mutex {
+        id,
+        addrs,
+        variant: boson_control_messages::Variant::Replicated(config),
+    } = config
+    else {
+        anyhow::bail!("unimplemented")
+    };
     let num_faulty = config.num_faulty;
-    let addrs = config.addrs;
+    let addr = addrs[id as usize];
+    let num_replica = addrs.len();
 
     let client_tcp_listener = TcpListener::bind(SocketAddr::from((addr.ip(), 0))).await?;
     let client_addr = client_tcp_listener.local_addr()?;
@@ -224,15 +236,22 @@ pub async fn replicated_session(
 }
 
 pub async fn quorum_session(
-    config: MutexQuorum,
+    config: boson_control_messages::Mutex,
     mut events: UnboundedReceiver<Event>,
     upcall: impl SendEvent<RequestOk> + Send + Sync + 'static,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     use augustus::crypto::peer::{Crypto, Verifiable};
 
-    let id = config.id;
-    let addr = config.addrs[id as usize];
+    let boson_control_messages::Mutex {
+        id,
+        addrs,
+        variant: boson_control_messages::Variant::Quorum(config),
+    } = config
+    else {
+        anyhow::bail!("unimplemented")
+    };
+    let addr = addrs[id as usize];
     let crypto = Crypto::new_random(&mut thread_rng());
 
     let tcp_listener = TcpListener::bind(addr).await?;
@@ -250,7 +269,7 @@ pub async fn quorum_session(
     let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
         Tcp::new(addr)?,
         {
-            let mut sender = VerifyQuorumClock::new(config.quorum.num_faulty, recv_crypto_worker);
+            let mut sender = VerifyQuorumClock::new(config.num_faulty, recv_crypto_worker);
             move |buf: &_| lamport_mutex::on_buf(buf, &mut sender)
         },
         Once(dispatch_session.sender()),
@@ -277,7 +296,7 @@ pub async fn quorum_session(
         boson::Lamport(Sender::from(clock_session.sender()), id as _),
         lamport_mutex::MessageNet::<_, QuorumClock>::new(IndexNet::new(
             dispatch::Net::from(dispatch_session.sender()),
-            config.addrs,
+            addrs,
             // intentionally sending loopback messages as expected by processor protocol
             None,
         )),
@@ -285,7 +304,7 @@ pub async fn quorum_session(
     let mut clock = Blanket(Unify(QuorumClient::new(
         clock_addr,
         crypto.public_key(),
-        config.quorum.num_faulty,
+        config.num_faulty,
         Box::new(boson::quorum_client::CryptoWorker::from(crypto_worker))
             as Box<
                 dyn Submit<Crypto, dyn boson::quorum_client::SendCryptoEvent<SocketAddr>>
@@ -300,7 +319,7 @@ pub async fn quorum_session(
         augustus::net::MessageNet::<_, Verifiable<boson::Announce<SocketAddr>>>::new(
             IndexNet::new(
                 dispatch::Net::from(clock_dispatch_session.sender()),
-                config.quorum.addrs,
+                config.addrs,
                 None,
             ),
         ),

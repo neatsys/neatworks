@@ -107,21 +107,21 @@ async fn mutex_start(
         let (event_sender, event_receiver) = unbounded_channel();
         let (upcall_sender, upcall_receiver) = unbounded_channel();
         let cancel = CancellationToken::new();
-        use boson_control_messages::Mutex::*;
-        let handle = match config {
-            Untrusted(config) => tokio::spawn(boson_mutex::untrusted_session(
+        use boson_control_messages::Variant::*;
+        let handle = match &config.variant {
+            Untrusted => tokio::spawn(boson_mutex::untrusted_session(
                 config,
                 event_receiver,
                 upcall_sender,
                 cancel.clone(),
             )),
-            Replicated(config) => tokio::spawn(boson_mutex::replicated_session(
+            Replicated(_) => tokio::spawn(boson_mutex::replicated_session(
                 config,
                 event_receiver,
                 upcall_sender,
                 cancel.clone(),
             )),
-            Quorum(config) => tokio::spawn(boson_mutex::quorum_session(
+            Quorum(_) => tokio::spawn(boson_mutex::quorum_session(
                 config,
                 event_receiver,
                 upcall_sender,
@@ -191,7 +191,7 @@ async fn cops_start_client(
         let (event_sender, _) = unbounded_channel();
         let (upcall_sender, upcall_receiver) = unbounded_channel();
         let cancel = CancellationToken::new();
-        use boson_control_messages::CopsVariant::*;
+        use boson_control_messages::Variant::*;
         let handle = match &config.variant {
             Untrusted => tokio::spawn(boson_cops::untrusted_client_session(config, upcall_sender)),
             Replicated(_) => tokio::spawn(boson_cops::pbft_client_session(config, upcall_sender)),
@@ -249,7 +249,7 @@ async fn cops_start_server(
         let (event_sender, _) = unbounded_channel();
         let (_, upcall_receiver) = unbounded_channel();
         let cancel = CancellationToken::new();
-        use boson_control_messages::CopsVariant::*;
+        use boson_control_messages::Variant::*;
         let handle = match &config.variant {
             Untrusted => tokio::spawn(boson_cops::untrusted_server_session(config, cancel.clone())),
             Replicated(_) => tokio::spawn(boson_cops::pbft_server_session(config, cancel.clone())),

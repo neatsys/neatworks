@@ -6,30 +6,10 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
-pub enum Mutex {
-    Untrusted(MutexUntrusted),
-    Replicated(MutexReplicated),
-    Quorum(MutexQuorum),
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct MutexUntrusted {
+pub struct Mutex {
     pub addrs: Vec<SocketAddr>,
     pub id: u8,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct MutexReplicated {
-    pub addrs: Vec<SocketAddr>,
-    pub id: u8,
-    pub num_faulty: usize,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct MutexQuorum {
-    pub addrs: Vec<SocketAddr>,
-    pub id: u8,
-    pub quorum: Quorum,
+    pub variant: Variant,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -37,7 +17,7 @@ pub struct CopsServer {
     pub addrs: Vec<SocketAddr>,
     pub id: u8,
     pub record_count: usize,
-    pub variant: CopsVariant,
+    pub variant: Variant,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -49,18 +29,18 @@ pub struct CopsClient {
     pub num_concurrent_put: usize,
     pub record_count: usize,
     pub put_range: Range<usize>, // probably redundant to `record_count` and `index`?
-    pub variant: CopsVariant,
+    pub variant: Variant,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CopsVariant {
+pub enum Variant {
     Untrusted,
-    Replicated(CopsReplicated),
+    Replicated(Replicated),
     Quorum(Quorum),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CopsReplicated {
+pub struct Replicated {
     pub num_faulty: usize,
 }
 

@@ -1,4 +1,5 @@
 use std::{
+    future::Future,
     net::{IpAddr, SocketAddr},
     time::Duration,
 };
@@ -16,6 +17,17 @@ async fn main() -> anyhow::Result<()> {
         Some("cops") => cops_session(client).await,
         _ => Ok(()),
     }
+}
+
+async fn while_ok<T>(
+    watchdog_sessions: &mut JoinSet<anyhow::Result<()>>,
+    task: impl Future<Output = T>,
+) -> anyhow::Result<T> {
+    tokio::select! {
+        result = task => return Ok(result),
+        Some(result) = watchdog_sessions.join_next() => result??,
+    }
+    anyhow::bail!("unreachable")
 }
 
 async fn mutex_session(client: reqwest::Client) -> anyhow::Result<()> {
@@ -45,31 +57,24 @@ async fn mutex_session(client: reqwest::Client) -> anyhow::Result<()> {
         };
         watchdog_sessions.spawn(start_quorum_session(client.clone(), url.clone(), config));
     }
+    while_ok(&mut watchdog_sessions, sleep(Duration::from_millis(5000))).await?;
+    use boson_control_messages::Variant::*;
+    // let variant = Quorum(quorum);
+    let variant = Untrusted;
     for (index, url) in urls.iter().enumerate() {
-        let config = 
-            // boson_control_messages::Mutex::Untrusted(boson_control_messages::MutexUntrusted {
-            //     addrs: addrs.clone(),
-            //     id: index as _,
-            // });
-            boson_control_messages::Mutex::Replicated(boson_control_messages::MutexReplicated {
-                addrs: addrs.clone(),
-                id: index as _,
-                num_faulty: 0,
-            });
-            // boson_control_messages::Mutex::Quorum(boson_control_messages::MutexQuorum {
-            //     addrs: addrs.clone(),
-            //     id: index as _,
-            //     quorum: quorum.clone(),
-            // });
-
+        let config = boson_control_messages::Mutex {
+            addrs: addrs.clone(),
+            id: index as _,
+            variant: variant.clone(),
+        };
         watchdog_sessions.spawn(mutex_start_session(client.clone(), url.clone(), config));
     }
     for _ in 0..10 {
-        sleep(Duration::from_millis(1000)).await;
-        tokio::select! {
-            result = mutex_request_session(client.clone(), urls[0].clone()) => result?,
-            Some(result) = watchdog_sessions.join_next() => result??,
-        }
+        while_ok(&mut watchdog_sessions, async {
+            sleep(Duration::from_millis(1000)).await;
+            mutex_request_session(client.clone(), urls[0].clone()).await
+        })
+        .await??
     }
     watchdog_sessions.shutdown().await;
     let mut stop_sessions = JoinSet::new();
@@ -159,7 +164,7 @@ async fn cops_session(client: reqwest::Client) -> anyhow::Result<()> {
         };
         watchdog_sessions.spawn(start_quorum_session(client.clone(), url.clone(), config));
     }
-    use boson_control_messages::CopsVariant::*;
+    use boson_control_messages::Variant::*;
     // let variant = Replicated(boson_control_messages::CopsReplicated { num_faulty: 0 });
     // let variant = Untrusted;
     let variant = Quorum(quorum);
@@ -177,10 +182,7 @@ async fn cops_session(client: reqwest::Client) -> anyhow::Result<()> {
             config,
         ));
     }
-    tokio::select! {
-        () = sleep(Duration::from_millis(5000)) => {}
-        Some(result) = watchdog_sessions.join_next() => result??,
-    }
+    while_ok(&mut watchdog_sessions, sleep(Duration::from_millis(5000))).await?;
     println!("Start clients");
     let mut client_sessions = JoinSet::new();
     for (i, url) in client_urls.into_iter().enumerate() {
@@ -196,16 +198,13 @@ async fn cops_session(client: reqwest::Client) -> anyhow::Result<()> {
         };
         client_sessions.spawn(cops_client_session(client.clone(), url, config));
     }
-    let task = async {
+    while_ok(&mut watchdog_sessions, async {
         while let Some(result) = client_sessions.join_next().await {
             result??
         }
         anyhow::Ok(())
-    };
-    tokio::select! {
-        result = task => result?,
-        Some(result) = watchdog_sessions.join_next() => result??,
-    }
+    })
+    .await??;
     println!("Shutdown");
     watchdog_sessions.shutdown().await;
     let mut stop_sessions = JoinSet::new();

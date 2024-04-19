@@ -19,7 +19,7 @@ use augustus::{
     worker::{spawn_backend, Submit},
     workload::{CloseLoop, Iter, Json, Upcall, Workload},
 };
-use boson_control_messages::{CopsClient, CopsServer, CopsVariant};
+use boson_control_messages::{CopsClient, CopsServer, Variant};
 use rand::{rngs::StdRng, thread_rng, SeedableRng};
 use rand_distr::Uniform;
 use tokio::{net::TcpListener, task::JoinSet, time::sleep};
@@ -56,7 +56,7 @@ pub async fn pbft_client_session(
         num_concurrent_put,
         record_count,
         put_range,
-        variant: CopsVariant::Replicated(config),
+        variant: Variant::Replicated(config),
         ..
     } = config
     else {
@@ -109,6 +109,10 @@ pub async fn pbft_client_session(
         sessions.spawn(async move {
             let dispatch_session = dispatch_session.run(&mut dispatch);
             let client_session = client_session.run(&mut client);
+            // wanted to reuse this below, but cannot (easily), because the `close_loop`s are
+            // substantially different: this one is
+            // `CloseLoop<impl Workload<Op = Payload, Result = Payload, ...>, ...>`, while the later
+            // one is `CloseLoop<impl Workload<Op = ycsb::Op, Result = ycsb::Result, ...>, ...>`
             let close_loop_session = async move {
                 Sender::from(close_loop_session.sender()).send(Init)?;
                 tokio::select! {
@@ -154,7 +158,7 @@ pub async fn pbft_server_session(
         addrs,
         id,
         record_count,
-        variant: CopsVariant::Replicated(config),
+        variant: Variant::Replicated(config),
     } = config
     else {
         anyhow::bail!("unimplemented")
@@ -226,7 +230,7 @@ pub async fn untrusted_client_session(
         num_concurrent_put,
         record_count,
         put_range,
-        variant: CopsVariant::Untrusted,
+        variant: Variant::Untrusted,
     } = config
     else {
         anyhow::bail!("unimplemented")
@@ -317,7 +321,7 @@ pub async fn untrusted_server_session(
         addrs,
         id,
         record_count,
-        variant: CopsVariant::Untrusted,
+        variant: Variant::Untrusted,
     } = config
     else {
         anyhow::bail!("unimplemented")
@@ -383,7 +387,7 @@ pub async fn quorum_client_session(
         num_concurrent_put,
         record_count,
         put_range,
-        variant: CopsVariant::Quorum(config),
+        variant: Variant::Quorum(config),
     } = config
     else {
         anyhow::bail!("unimplemented")
@@ -483,7 +487,7 @@ pub async fn quorum_server_session(
         addrs,
         id,
         record_count,
-        variant: CopsVariant::Quorum(config),
+        variant: Variant::Quorum(config),
     } = config
     else {
         anyhow::bail!("unimplemented")

@@ -229,6 +229,8 @@ impl<E: SendEvent<UpdateOk<LamportClock>>> SendEvent<Update<LamportClock>> for L
         // this would sound like `update.prev.0.max(update.remote.0 + 1)`, taking this alternative
         // because `self.clock` is used by events *after* this receiving, so increment is always
         // expected according to C1
+        // caveat: there are (intentional) loopback messages in the mutex case, should be careful
+        // about how this modification interacts with that fact
         let counter = update.prev.0.max(update.remote.0) + 1;
         self.0.send(UpdateOk((counter, self.1)))
     }
