@@ -486,7 +486,8 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
         assert!(!self.requests.is_empty());
         let requests = self
             .requests
-            .drain(..self.requests.len().min(100))
+            // .drain(..self.requests.len().min(100))
+            .drain(..self.requests.len().min(1))
             .collect::<Vec<_>>();
         let view_num = self.view_num;
         let op_num = self.op_num();
@@ -781,9 +782,12 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
             return Ok(());
         }
         let Some(entry) = self.log.get_mut(prepare.op_num as usize) else {
-            // postpone prepared until receiving PrePrepare and matching digest against it
             return Ok(());
         };
+        if entry.pre_prepare.is_none() {
+            // postpone prepared until receiving PrePrepare and matching digest against it
+            return Ok(());
+        }
         assert!(entry.prepares.is_empty());
         entry.prepares = self.prepare_quorums.remove(&prepare.op_num).unwrap();
 

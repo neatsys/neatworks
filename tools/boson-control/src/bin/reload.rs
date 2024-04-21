@@ -47,6 +47,7 @@ async fn join_sessions(sessions: &mut JoinSet<anyhow::Result<()>>) -> anyhow::Re
 }
 
 async fn host_session(ssh_host: String, sync: bool) -> anyhow::Result<()> {
+    // println!("{ssh_host}");
     if sync {
         let status = Command::new("rsync")
             .arg("target/artifact/boson")

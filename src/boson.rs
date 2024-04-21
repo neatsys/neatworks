@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::OnceLock};
 
+use bincode::Options;
 use derive_where::derive_where;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -12,7 +13,7 @@ use crate::{
     },
     event::{erased::OnEvent, OnTimer, SendEvent},
     lamport_mutex,
-    net::{events::Recv, Addr, All, SendMessage},
+    net::{events::Recv, Addr, All, Payload, SendMessage},
     worker::Submit,
 };
 
@@ -472,6 +473,60 @@ impl<A: Addr> VerifyClock for cops::Get<A> {
 impl VerifyClock for cops::SyncKey<QuorumClock> {
     fn verify_clock(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()> {
         self.version_deps.verify(num_faulty, crypto)
+    }
+}
+
+#[derive(Debug)]
+#[derive_where(PartialOrd, PartialEq)]
+pub struct NitroEnclavesClock {
+    plain: DefaultVersion,
+    #[derive_where(skip)]
+    id: u64,
+    #[derive_where(skip)]
+    pub document: Payload,
+}
+
+impl DepOrd for NitroEnclavesClock {
+    fn dep_cmp(&self, other: &Self, id: crate::cops::KeyId) -> std::cmp::Ordering {
+        self.plain.dep_cmp(&other.plain, id)
+    }
+
+    fn deps(&self) -> impl Iterator<Item = crate::cops::KeyId> + '_ {
+        self.plain.deps()
+    }
+}
+
+pub struct NitroEnclaves(i32);
+
+static NITRO_ENCLAVES_CONTEXT: OnceLock<NitroEnclaves> = OnceLock::new();
+
+impl NitroEnclaves {
+    fn new() -> Self {
+        Self(aws_nitro_enclaves_nsm_api::driver::nsm_init())
+    }
+
+    fn process_attestation(user_data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+        let NitroEnclaves(fd) = NITRO_ENCLAVES_CONTEXT.get_or_init(Self::new);
+        let request = aws_nitro_enclaves_nsm_api::api::Request::Attestation {
+            user_data: Some(serde_bytes::ByteBuf::from(user_data)),
+            nonce: None,
+            public_key: None,
+        };
+        let response = aws_nitro_enclaves_nsm_api::driver::nsm_process_request(*fd, request);
+        let aws_nitro_enclaves_nsm_api::api::Response::Attestation { document } = response else {
+            anyhow::bail!("unimplemented")
+        };
+        Ok(document)
+    }
+
+    pub fn issue(plain: DefaultVersion, id: u64) -> anyhow::Result<NitroEnclavesClock> {
+        let user_data = bincode::options().serialize(&(&plain, id))?;
+        let document = Self::process_attestation(user_data)?;
+        Ok(NitroEnclavesClock {
+            plain,
+            id,
+            document: Payload(document),
+        })
     }
 }
 

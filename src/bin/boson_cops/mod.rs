@@ -205,7 +205,11 @@ pub async fn pbft_server_session(
         )),
         pbft::ToClientMessageNet::new(dispatch::Net::from(dispatch_session.sender())),
         Box::new(pbft::CryptoWorker::from(crypto_worker))
-            as Box<dyn Submit<Crypto, dyn pbft::SendCryptoEvent<SocketAddr>> + Send + Sync>,
+        // Box::new(pbft::CryptoWorker::from(augustus::worker::Worker::Inline(
+        //     crypto,
+        //     Sender::from(replica_session.sender()),
+        // ))) 
+        as Box<dyn Submit<Crypto, dyn pbft::SendCryptoEvent<SocketAddr>> + Send + Sync>,
         num_replica,
         num_faulty,
     )));

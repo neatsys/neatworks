@@ -193,6 +193,16 @@ async fn main() -> anyhow::Result<()> {
 
             Ok(())
         }
+        Some("cops-replicated") => {
+            for n in [1].into_iter().chain((2..=20).step_by(2)) {
+                cops_replicated_session(client.clone(), instances.clone(), 5, 1, n * 10, n * 4)
+                    .await?
+            }
+            for n in [1, 2, 4, 8, 20, 40, 60, 80, 120, 160, 200] {
+                cops_replicated_session(client.clone(), instances.clone(), 5, 1, 200, n).await?
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -494,9 +504,7 @@ async fn cops_session(
     use boson_control_messages::Variant::*;
     let variant_config = match variant {
         Variant::Untrusted => Untrusted,
-        Variant::Replicated => Replicated(boson_control_messages::Replicated {
-            num_faulty: (urls.len() - 1) / 3,
-        }),
+        Variant::Replicated => anyhow::bail!("unimplemented"),
         Variant::Quorum => Quorum(quorum),
     };
     println!("Start servers");
@@ -675,6 +683,142 @@ async fn stop_quorum_session(client: reqwest::Client, url: String) -> anyhow::Re
         .send()
         .await?
         .error_for_status()?;
+    Ok(())
+}
+
+async fn cops_replicated_session(
+    client: reqwest::Client,
+    instances: Vec<TerraformOutputInstance>,
+    num_region_replica: usize,
+    num_replica_client: usize,
+    num_concurrent: usize,
+    num_concurrent_put: usize,
+) -> anyhow::Result<()> {
+    let mut region_instances = HashMap::<_, Vec<_>>::new();
+    for instance in instances {
+        region_instances
+            .entry(instance.region())
+            .or_default()
+            .push(instance.clone())
+    }
+    let num_region = region_instances.len();
+    let num_region_client = num_region_replica * num_replica_client;
+
+    // let mut clock_instances = Vec::new();
+    let mut instances = Vec::new();
+    let mut client_instances = Vec::new();
+    for region_instances in region_instances.into_values() {
+        let mut region_instances = region_instances.into_iter();
+        // clock_instances.extend((&mut region_instances).take(2));
+        instances.extend((&mut region_instances).take(num_region_replica));
+        client_instances.extend(region_instances.take(num_region_client));
+    }
+    anyhow::ensure!(instances.len() == num_region * num_region_replica);
+    anyhow::ensure!(client_instances.len() == num_region * num_region_client);
+
+    let urls = instances
+        .iter()
+        .map(|instance| format!("http://{}:3000", instance.public_dns))
+        .collect::<Vec<_>>();
+    let client_urls = client_instances
+        .iter()
+        .map(|instance| format!("http://{}:3000", instance.public_dns))
+        .collect::<Vec<_>>();
+    let addrs = instances
+        .iter()
+        .map(|instance| SocketAddr::from((instance.public_ip, 4000)))
+        .collect::<Vec<_>>();
+    let client_ips = client_instances
+        .iter()
+        .map(|instance| instance.public_ip)
+        .collect::<Vec<_>>();
+    let mut watchdog_sessions = JoinSet::new();
+    use boson_control_messages::Variant::*;
+    let variant_config = Replicated(boson_control_messages::Replicated {
+        num_faulty: (urls.len() - 1) / 3,
+    });
+    println!("Start servers");
+    let record_count = 1000;
+    for (i, url) in urls.iter().enumerate() {
+        println!("{url}");
+        let config = boson_control_messages::CopsServer {
+            addrs: addrs.clone(),
+            id: i as _,
+            record_count,
+            variant: variant_config.clone(),
+        };
+        watchdog_sessions.spawn(cops_start_server_session(
+            client.clone(),
+            url.clone(),
+            config,
+        ));
+    }
+    while_ok(&mut watchdog_sessions, sleep(Duration::from_millis(5000))).await?;
+    println!("Start clients");
+    let mut client_sessions = JoinSet::new();
+    let record_count_per_replica = record_count / urls.len();
+    let out = Arc::new(Mutex::new(Vec::new()));
+    for (i, url) in client_urls.into_iter().enumerate() {
+        let index = i / num_replica_client;
+        let config = boson_control_messages::CopsClient {
+            addrs: addrs.clone(),
+            ip: client_ips[i],
+            index,
+            num_concurrent,
+            num_concurrent_put,
+            record_count,
+            put_range: record_count_per_replica * index..record_count_per_replica * (index + 1),
+            variant: variant_config.clone(),
+        };
+        client_sessions.spawn(cops_client_session(
+            client.clone(),
+            url,
+            config,
+            out.clone(),
+        ));
+    }
+    while_ok(&mut watchdog_sessions, async {
+        while let Some(result) = client_sessions.join_next().await {
+            result??
+        }
+        anyhow::Ok(())
+    })
+    .await??;
+    println!("Shutdown");
+    watchdog_sessions.shutdown().await;
+    let mut stop_sessions = JoinSet::new();
+    for url in urls {
+        stop_sessions.spawn(cops_stop_server_session(client.clone(), url));
+    }
+    while let Some(result) = stop_sessions.join_next().await {
+        result??
+    }
+    let (throughputs, latencies) = Arc::into_inner(out)
+        .unwrap()
+        .into_inner()?
+        .into_iter()
+        .unzip::<_, _, Vec<_>, Vec<_>>();
+    let throughput = throughputs.into_iter().sum::<f32>();
+    let lantecy = latencies.iter().sum::<Duration>() / latencies.len() as u32;
+    // println!(
+    //     "Replicated (local),{},{num_concurrent},{num_concurrent_put},{throughput},{}",
+    //     num_region_replica,
+    //     lantecy.as_secs_f32()
+    // );
+    let path = Path::new("tools/boson-control/notebooks");
+    create_dir_all(path).await?;
+    write(
+        path.join(format!(
+            "cops-{}.txt",
+            SystemTime::UNIX_EPOCH.elapsed()?.as_secs()
+        )),
+        format!(
+            "Replicated (local),{},{num_concurrent},{num_concurrent_put},{throughput},{}",
+            num_region_replica,
+            lantecy.as_secs_f32()
+        ),
+    )
+    .await?;
     Ok(())
 }
 
