@@ -1,6 +1,2 @@
 {
-    "rust-analyzer.linkedProjects": [
-        "./Cargo.toml",
-        "./crates/boson-circuit/Cargo.toml"
-    ]
 }
