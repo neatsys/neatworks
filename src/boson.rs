@@ -55,7 +55,7 @@ impl DepOrd for QuorumClock {
 
 impl lamport_mutex::Clock for QuorumClock {
     fn arbitrary_cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.plain.sum(), self.id).cmp(&(other.plain.sum(), other.id))
+        (self.plain.reduce(), self.id).cmp(&(other.plain.reduce(), other.id))
     }
 }
 

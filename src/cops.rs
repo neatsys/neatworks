@@ -21,15 +21,17 @@
 // (at the same time, upon Put requests server also perform checks on submitted
 // `deps`, ensure that it will not be fooled by malicious client and end up in
 // an inconsistent state)
-// besides of these additions, the only substantial difference to the original
-// work is a deletion in the (geological) synchronization: the nearest set is
-// omitted since all it's information is covered by the `V` value
-// because of this deletion and also considering the additional storage and
-// checking overhead is lightweight, i have the referenced implementation for
-// trusted setup, i.e. the `DefaultVersion` below, also follows this design.
-// so the protocol has unified logic under different setup (just all additional
-// checks are expected to always pass under trusted setup), just plug in
-// different `V` type for difference use case
+// the modification is fully backward compatible to the original work. with the
+// trusted setup assumed by the original work, all the added checks will pass
+// and all the dependency checks upon receiving remote key synchronization will
+// return the same result as when in the original work the replica examines its
+// local storage against the received "nearest" set. notice that in this
+// implementation the "nearest" in synchronization messages are also replaced
+// with a `V` type just as in the `PutOk` messages and replica storage which
+// were mentioned above. in conclusion, although maintaining slightly different
+// states for tracking causal dependencies, this implementation maps to a strict
+// superset of the original work, with the additional ability of dealing with
+// arbitrary faulty participants (if paired with a capable `V`)
 // producing `V` typed value potentially takes long latency: it may require the
 // computational expensive incrementally verifiable computation, or asynchronous
 // network communication. so instead of inlined "version bumping" as in the
@@ -39,7 +41,9 @@
 // hopefully not critical (or even noticeable) since the work targets geological
 // replication scenario
 // the original work does not talk specifically about the causality policy of
-// the same key across sessions. for the conflict-free scenario we assume an
+// the same key across sessions that are not temporarily overlapping with each
+// other. (it also only roughly mentioned the overlapping case i.e. the
+// "conflict resolving" procedure.) for the conflict-free scenario we assume an
 // incremental causality of each key: the causal dependencies of the old version
 // automatically carries to the new version. this policy is equivalent to the
 // original work as long as it ensure to sequentially synchronize all versions
@@ -189,11 +193,7 @@ impl<N: ClientNet<A, V>, U, V: Version, A: Addr> OnEvent<Invoke<ycsb::Op>> for C
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
         let key = match &op {
-            ycsb::Op::Read(key) | ycsb::Op::Update(key, ..) => key
-                // easy way to adapt current YCSB key format (easier than adapt on YCSB side)
-                .strip_prefix("user")
-                .ok_or(anyhow::format_err!("malformed key name: {key}"))?
-                .parse()?,
+            ycsb::Op::Read(key) | ycsb::Op::Update(key, ..) => from_ycsb(key)?,
             _ => anyhow::bail!("unimplemented"),
         };
         let replaced = self
@@ -228,6 +228,14 @@ impl<N: ClientNet<A, V>, U, V: Version, A: Addr> OnEvent<Invoke<ycsb::Op>> for C
     }
 }
 
+// easy way to adapt current YCSB key format (easier than adapt on YCSB side)
+fn from_ycsb(key: &str) -> anyhow::Result<KeyId> {
+    Ok(key
+        .strip_prefix("user")
+        .ok_or(anyhow::format_err!("unimplemented"))?
+        .parse()?)
+}
+
 impl<N, U: SendEvent<InvokeOk<ycsb::Result>>, V: Version, A> OnEvent<Recv<PutOk<V>>>
     for Client<N, U, V, A>
 {
@@ -239,14 +247,14 @@ impl<N, U: SendEvent<InvokeOk<ycsb::Result>>, V: Version, A> OnEvent<Recv<PutOk<
         let Some((key, timer_id)) = self.working_key.take() else {
             anyhow::bail!("missing working key")
         };
-        // if !self.deps.values().all(|dep| {
-        //     matches!(
-        //         put_ok.version_deps.partial_cmp(dep),
-        //         Some(Ordering::Greater)
-        //     )
-        // }) {
-        //     return Ok(());
-        // }
+        if !self.deps.values().all(|dep| {
+            matches!(
+                put_ok.version_deps.partial_cmp(dep),
+                Some(Ordering::Greater)
+            )
+        }) {
+            return Ok(());
+        }
         self.deps = [(key, put_ok.version_deps)].into();
         timer.unset(timer_id)?;
         self.upcall.send((Default::default(), ycsb::Result::Ok)) // careful
@@ -264,13 +272,13 @@ impl<N, U: SendEvent<InvokeOk<ycsb::Result>>, V: Version, A> OnEvent<Recv<GetOk<
         let Some((key, timer_id)) = self.working_key.take() else {
             anyhow::bail!("missing working key")
         };
-        // if !self
-        //     .deps
-        //     .values()
-        //     .all(|dep| get_ok.version_deps.dep_cmp(dep, key).is_ge())
-        // {
-        //     return Ok(());
-        // }
+        if !self
+            .deps
+            .values()
+            .all(|dep| get_ok.version_deps.dep_cmp(dep, key).is_ge())
+        {
+            return Ok(());
+        }
         self.deps.insert(key, get_ok.version_deps);
         timer.unset(timer_id)?;
         self.upcall
@@ -322,10 +330,7 @@ impl<N, CN, VS, V: Clone, A: Clone> Replica<N, CN, VS, V, A> {
         let ycsb::Op::Insert(key, mut value) = op else {
             anyhow::bail!("unimplemented")
         };
-        let key = key
-            .strip_prefix("user")
-            .ok_or(anyhow::format_err!("unimplemented"))?
-            .parse()?;
+        let key = from_ycsb(&key)?;
         anyhow::ensure!(value.len() == 1, "unimplemented");
         let value = value.remove(0);
         let state = KeyState {
@@ -367,18 +372,12 @@ impl<M: ReplicaCommon> OnEvent<Recv<Get<M::A>>> for Replica<M::N, M::CN, M::VS, 
         Recv(get): Recv<Get<M::A>>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        let get_ok = if let Some(state) = self.store.get(&get.key) {
-            GetOk {
-                value: state.value.clone(),
-                version_deps: state.version_deps.clone(),
-            }
-        } else {
-            // reasonable default?
-            // GetOk {
-            //     value: Default::default(),
-            //     version_deps: self.version_zero.clone(),
-            // }
+        let Some(state) = self.store.get(&get.key) else {
             anyhow::bail!("missing state for key {}", get.key)
+        };
+        let get_ok = GetOk {
+            value: state.value.clone(),
+            version_deps: state.version_deps.clone(),
         };
         self.client_net.send(get.client_addr, get_ok)
     }
@@ -405,8 +404,8 @@ impl<M: ReplicaCommon> OnEvent<Recv<Put<M::V, M::A>>>
             }
         }
         let state = self.store.entry(put.key).or_insert_with(|| KeyState {
-            value: Default::default(),
             version_deps: self.version_zero.clone(),
+            value: Default::default(),
             pending_puts: Default::default(),
         });
         state.pending_puts.push_back(put.clone());
@@ -602,13 +601,19 @@ impl DefaultVersion {
     }
 
     fn merge(&self, other: &Self) -> Self {
-        let mut merged = self.0.clone();
-        for (id, version) in &other.0 {
-            merged
-                .entry(*id)
-                .and_modify(|v| *v = (*v).max(*version))
-                .or_insert(*version);
-        }
+        let merged = self
+            .0
+            .keys()
+            .chain(other.0.keys())
+            .map(|id| {
+                let n = match (self.0.get(id), other.0.get(id)) {
+                    (Some(n), Some(other_n)) => (*n).max(*other_n),
+                    (Some(n), None) | (None, Some(n)) => *n,
+                    (None, None) => unreachable!(),
+                };
+                (*id, n)
+            })
+            .collect();
         Self(merged)
     }
 
@@ -618,7 +623,7 @@ impl DefaultVersion {
         updated
     }
 
-    pub fn sum(&self) -> u32 {
+    pub fn reduce(&self) -> u32 {
         self.0.values().copied().sum()
     }
 }
