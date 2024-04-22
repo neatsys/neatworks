@@ -13,6 +13,9 @@ pub mod unreplicated;
 pub mod worker;
 pub mod workload;
 
+#[cfg(feature = "entropy")]
+pub mod entropy;
+
 #[cfg(all(not(target_env = "msvc"), feature = "tikv-jemallocator"))]
 use tikv_jemallocator::Jemalloc;
 

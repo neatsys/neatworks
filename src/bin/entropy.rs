@@ -18,6 +18,10 @@ use augustus::{
         peer::{Crypto, PublicKey},
         DigestHash as _, H256,
     },
+    entropy::{
+        BulkService, CodecWorker, Get, GetOk, MessageNet, Net, Peer, Put, PutOk, SendCodecEvent,
+        SendFsEvent,
+    },
     event::{
         self,
         erased::{
@@ -35,10 +39,6 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
     Json, Router,
-};
-use entropy::{
-    BulkService, CodecWorker, Get, GetOk, MessageNet, Net, Peer, Put, PutOk, SendCodecEvent,
-    SendFsEvent,
 };
 use entropy_control_messages::{
     GetConfig, GetResult, PeerUrl, PutConfig, PutResult, StartPeersConfig,
@@ -193,7 +193,7 @@ type P = Blanket<
         Peer<
             Box<dyn Net + Send + Sync>,
             Box<dyn BulkService + Send + Sync>,
-            Box<dyn entropy::Upcall<H256> + Send + Sync>,
+            Box<dyn augustus::entropy::Upcall<H256> + Send + Sync>,
             Box<dyn Submit<(), dyn SendCodecEvent> + Send + Sync>,
             Box<dyn SendFsEvent + Send + Sync>,
             H256,
@@ -343,7 +343,7 @@ async fn start_peer(
             let mut peer_sender = Sender::from(peer_session.sender());
             let mut kademlia_sender = Sender::from(kademlia_session.sender());
             move |buf: &_| {
-                entropy::on_buf::<SocketAddr>(
+                augustus::entropy::on_buf::<SocketAddr>(
                     buf,
                     &mut peer_sender,
                     &mut kademlia_sender,
@@ -365,7 +365,8 @@ async fn start_peer(
         Sender::from(peer_session.sender()),
     );
     let kademlia_control_session = kademlia_control_session.run(&mut kademlia_control);
-    let fs_session = entropy::fs::session(path, fs_receiver, Sender::from(peer_session.sender()));
+    let fs_session =
+        augustus::entropy::fs::session(path, fs_receiver, Sender::from(peer_session.sender()));
     let peer_session = peer_session.run(&mut peer);
     let dispatch_control_session = dispatch_control_session.run(&mut dispatch_control);
 

@@ -6,7 +6,12 @@ use std::{
     sync::Arc,
 };
 
-use augustus::{
+use bytes::Bytes;
+use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
+use wirehair::{Decoder, Encoder};
+
+use crate::{
     bulk::{self, RecvOffer, ServiceExt as _},
     crypto::{
         peer::{Crypto, PublicKey, Verifiable},
@@ -20,11 +25,6 @@ use augustus::{
     net::{deserialize, events::Recv, kademlia::Multicast, Addr, Payload, SendMessage},
     worker::Submit,
 };
-
-use bytes::Bytes;
-use serde::{Deserialize, Serialize};
-use tokio_util::sync::CancellationToken;
-use wirehair::{Decoder, Encoder};
 
 type Chunk = Target;
 
@@ -133,10 +133,7 @@ impl<W, E> From<W> for CodecWorker<W, E> {
 impl<W: Submit<(), E>, E: SendCodecEvent + 'static> Submit<(), dyn SendCodecEvent>
     for CodecWorker<W, E>
 {
-    fn submit(
-        &mut self,
-        work: augustus::worker::Work<(), dyn SendCodecEvent>,
-    ) -> anyhow::Result<()> {
+    fn submit(&mut self, work: crate::worker::Work<(), dyn SendCodecEvent>) -> anyhow::Result<()> {
         self.0.submit(Box::new(move |(), emit| work(&(), emit)))
     }
 }
@@ -780,7 +777,7 @@ pub enum Message<A> {
     BlobServe(bulk::Serve<SendFragment>),
 }
 
-pub type MessageNet<T, A> = augustus::net::MessageNet<T, Message<A>>;
+pub type MessageNet<T, A> = crate::net::MessageNet<T, Message<A>>;
 
 pub trait SendRecvEvent:
     SendEvent<Recv<Invite>>
@@ -821,14 +818,15 @@ pub fn on_buf<A: Addr>(
 pub mod fs {
     use std::{fmt::Debug, path::Path};
 
-    use augustus::{event::SendEvent, net::Payload};
     use tokio::{
         fs::{create_dir, read, remove_dir_all, write},
         sync::mpsc::UnboundedReceiver,
         task::JoinSet,
     };
 
-    use crate::Chunk;
+    use crate::{event::SendEvent, net::Payload};
+
+    use super::Chunk;
 
     #[derive(Debug, Clone)]
     pub struct Store(pub Chunk, pub u32, pub Payload);

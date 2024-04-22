@@ -1,2 +1,6 @@
 {
+    "rust-analyzer.cargo.features": [
+        "all",
+        // "entropy",
+    ]
 }
