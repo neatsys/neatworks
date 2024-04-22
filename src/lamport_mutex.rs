@@ -8,17 +8,16 @@
 // the `Clock` here is not lamport clock. it's the abstraction of causality i.e.
 // the happens before relation, that specific implementation may or may not
 // guarantee to have false positive (through the `PartialOrd` interface)
-// this implementation assumes a potentially arbitrary fault setup. processors
-// performs additional checks to ensure receiving ordered messages from a remote
-// processor. the causally ordered communication model i.e. `Causal` also
-// assumes an ordered and reliable underlying network i.e. `net`
-// in this implementation updating clock is assumed to have potentially large
-// overhead, so `Causal` is designed to work with asynchronous clock service
-// instead of updating clock inline. the clock updating strategy is also adapted
-// a little, as comment below. the caveat is that with this `Causal` processors
-// may send sequential messages with the same clock value, instead of
-// incrementing for every sending, so should use more >= instead of > to check
-// for new messages
+// `Causal`, as the network middleware that assigns proper logical clock value
+// to each outgoing message, has defined a slightly different event model that
+// considers the processor state machine as blackbox and only manages message
+// sending/receiving events, which is considered to be more practical than the
+// definition in the original work from an engineering aspect. the `Causal` also
+// assumes that updating clock may have potentially large overhead and works
+// with asynchronous clock service instead of updating clock inline
+// last but not least, a modified version of the mutex protocol that is
+// prepared for tolerating arbitrary faulty behaviors is appended. check the
+// note below for details
 use std::{cmp::Ordering, collections::VecDeque, mem::replace};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -55,6 +54,13 @@ pub struct Clocked<M, C> {
     pub inner: M,
 }
 
+// a trivial causality middleware that assumes a replicated network i.e. all
+// messages are received in the same order on everyone
+// it does not assign clock values for outgoing messages (so it does not impl
+// `SendMessage<_, _>`), just assign a sequence number for every incoming
+// message. the sequence number will be the same for the same message on every
+// recipient, as guaranteed by the relied replication protocol
+// the clock value type i.e. `C` above is `u32`
 pub struct Replicated<E> {
     seq: u32,
     recv_sender: E,
@@ -79,6 +85,26 @@ impl<E: SendEvent<Recv<Clocked<M, u32>>>, M> SendEvent<Recv<M>> for Replicated<E
     }
 }
 
+// a network middleware that tracks and specified causal relation of network
+// events i.e. message sending/receiving
+// the causal relation is defined as
+// * messages are received sequentially i.e. every receiving event happens after
+//   the event of receiving its previous message
+// * sending events are effectively grouped into sending batches. a sending
+//   batch consists of sending events that happen between two consecutive
+//   receiving events. sending events of the same batch is the *same* event:
+//   they share the same clock value, and the aggregated event happens after the
+//   immediately predecessor receiving event
+// in another word the event "timeline" looks like this
+//   [recv] <- [send 3 message] <- [recv] <- [recv] <- [send 1 message] <- [recv] ...
+// each of the <- is the partial ordering between local events respecting
+// execution order i.e. partial ordering across processors are not shown
+// this middleware guarantees to provide real time correspondence of the
+// timeline above to the network user. for example, if a processors is observed
+// to have the timeline above, then it must have send all three messages before
+// processing the second receiving message, the other cases e.g. it sends one
+// of the three messages after the second receiving, but a stalled clock value
+// is assigned to that message, are guaranteed to be impossible
 pub struct Causal<E, CS, N, C, M> {
     clock: C,
     pending_recv: Option<VecDeque<Clocked<M, C>>>,
@@ -165,11 +191,6 @@ impl<
             }));
             return Ok(());
         }
-        // IR2 (a) if event a is the sending of a message m by process p_i then the message m
-        // contains a timestamp T_m = C_i(a)
-        // as what condition C1 expects, we probably should increment `self.clock` before sending.
-        // omitted for potential large overhead in certain clock implementations, hopefully safe to
-        // do so in the presence of the extra `+ 1` below
         let clocked = Clocked {
             clock: self.clock.clone(),
             inner: message,
@@ -229,13 +250,13 @@ pub type LamportClock = (u32, u8); // (counter, processor id)
 
 impl<E: SendEvent<UpdateOk<LamportClock>>> SendEvent<Update<LamportClock>> for Lamport<E> {
     fn send(&mut self, update: Update<LamportClock>) -> anyhow::Result<()> {
-        // IR2 (b) upon receiving a message m, process p_j sets C_j greater than or equal to its
+        // IR2. (b) upon receiving a message m, process P_j sets C_j greater than or equal to its
         // present value and greater than T_m
-        // this would sound like `update.prev.0.max(update.remote.0 + 1)`, taking this alternative
-        // because `self.clock` is used by events *after* this receiving, so increment is always
-        // expected according to C1
-        // caveat: there are (intentional) loopback messages in the mutex case, should be careful
-        // about how this modification interacts with that fact
+        // this would sound like `update.prev.0.max(update.remote.0 + 1)`, but the definition of
+        // `Update` is to "return the clock value of the event happens after observing `remote`
+        // based on `prev`", so there is actually an implicit IR1 follows
+        // IR1. Each process P_i increments C_i between any two successive events.
+        // and this would be a little bit optimization over the naive `_.max(_ + 1) + 1`
         let counter = update.prev.0.max(update.remote.0) + 1;
         self.0.send(UpdateOk((counter, self.1)))
     }
@@ -403,8 +424,6 @@ impl<CN: SendMessage<All, Message>, U, C> OnEvent<events::Release> for Processor
     ) -> anyhow::Result<()> {
         // consider further check whether we have requested
         anyhow::ensure!(!self.requesting, "release while requesting");
-        // in this protocol we always expect to loopback `Recv(_)` our own messages
-        // the Request will be added into ourselves queue there
         self.causal_net.send(All, Message::Release(self.id))
     }
 }
@@ -427,6 +446,29 @@ pub fn on_buf<C: DeserializeOwned>(
     sender.send(Recv(deserialize(buf)?))
 }
 
+// the modified mutex protocol that can tolerate arbitrary faulty processors
+// the protocol is specifically designed for two kinds of faulty behaviors:
+// * sending messages disregard their clock values. another word, the messages
+//   that sent later does not contain clock values that is greater (could be
+//   either less or equal or incomparable). this is actually solved above: there
+//   are explicit checks on clock values upon receiving messages, and any out of
+//   order incoming message is ignored
+// * completely disregard the protocol, claim to have the lock at arbitrary
+//   time. to prevent this we have added a message `Ordered` that is sent by
+//   every processor for every `Request`, both of itself and of others. the
+//   order of a `Request` to get a lock relative to the other `Request`s, in
+//   another word, the `Release` of what set of `Request`s must be present
+//   before this `Request` can have the lock. f + 1 signed `Ordered`s, paired
+//   with the corresponded `Release` of the mentioned `Request`s, construct a
+//   so called "acquisition proof", which indicates at least one honest
+//   processor agrees the `Request` to get lock in the presence of at most f
+//   faulty processors
+// the timings are adjusted around this new `Ordered` and acquisition proof
+// mechanisms, additionally, the `RequestOk` message is changed to be broadcast
+// to every processor instead of directly reply to the `Request` sender, in
+// order to enable processors to be able to keep track of the progress of the
+// `Request`s of other processors in addition to itself's and send `Ordered`
+// when necessary
 pub mod verifiable {
     // finally decided to duplicate some code to above
     // 27 hours until ddl, should be forgivable
@@ -448,8 +490,6 @@ pub mod verifiable {
 
     use super::{events, Clock, Clocked};
 
-    // the message type used by the verifiable variant of mutex protocol
-    // f + 1 Verifiable<Ordered<C>> forms an acquisition proof
     #[derive(Debug, Hash, Serialize, Deserialize)]
     pub struct Ordered<C> {
         clock: C,
@@ -661,5 +701,5 @@ pub mod verifiable {
     }
 }
 
-// cSpell:words lamport deque upcall
+// cSpell:words lamport deque upcall blackbox
 // cSpell:ignore commun
