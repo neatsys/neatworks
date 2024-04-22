@@ -500,18 +500,28 @@ pub struct NitroEnclaves(i32);
 
 static NITRO_ENCLAVES_CONTEXT: OnceLock<NitroEnclaves> = OnceLock::new();
 
+#[cfg(feature = "nitro-enclaves")]
 impl NitroEnclaves {
     fn new() -> Self {
         Self(aws_nitro_enclaves_nsm_api::driver::nsm_init())
     }
 
     fn process_attestation(user_data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+        use aws_nitro_enclaves_nsm_api::api::Request::Attestation;
         let NitroEnclaves(fd) = NITRO_ENCLAVES_CONTEXT.get_or_init(Self::new);
-        let request = aws_nitro_enclaves_nsm_api::api::Request::Attestation {
-            user_data: Some(serde_bytes::ByteBuf::from(user_data)),
+        let mut request = Attestation {
+            user_data: Some(Default::default()),
             nonce: None,
             public_key: None,
         };
+        let Attestation {
+            user_data: Some(buf),
+            ..
+        } = &mut request
+        else {
+            unreachable!()
+        };
+        buf.extend(user_data);
         let response = aws_nitro_enclaves_nsm_api::driver::nsm_process_request(*fd, request);
         let aws_nitro_enclaves_nsm_api::api::Response::Attestation { document } = response else {
             anyhow::bail!("unimplemented")

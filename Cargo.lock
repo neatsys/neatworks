@@ -158,7 +158,6 @@ dependencies = [
  "schnorrkel",
  "secp256k1",
  "serde",
- "serde_bytes",
  "serde_json",
  "sha2",
  "tikv-jemallocator",
@@ -3026,7 +3025,7 @@ dependencies = [
 [[package]]
 name = "wirehair"
 version = "0.1.2"
-source = "git+https://github.com/sgdxbc/wirehair#d52dc50c9cb8b936360dbb153def64c77081b035"
+source = "git+https://github.com/neatsys/wirehair#d52dc50c9cb8b936360dbb153def64c77081b035"
 dependencies = [
  "bindgen",
  "cmake",
