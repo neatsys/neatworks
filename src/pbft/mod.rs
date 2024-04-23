@@ -486,8 +486,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
         assert!(!self.requests.is_empty());
         let requests = self
             .requests
-            // .drain(..self.requests.len().min(100))
-            .drain(..self.requests.len().min(1))
+            .drain(..self.requests.len().min(100))
             .collect::<Vec<_>>();
         let view_num = self.view_num;
         let op_num = self.op_num();

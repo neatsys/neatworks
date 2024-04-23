@@ -1,10 +1,9 @@
+mod client;
+
 use std::{
     future::{pending, Future},
-    iter::repeat_with,
-    mem::take,
     net::SocketAddr,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use augustus::{
@@ -12,24 +11,19 @@ use augustus::{
     crypto::{Crypto, CryptoFlavor},
     event::{
         erased::{
-            events::Init,
             session::{Buffered, Sender},
             Blanket, Event, Session, Unify,
         },
         session::SessionTimer,
-        OnEventUniversal, OnTimerUniversal, SendEvent,
+        OnEventUniversal, OnTimerUniversal,
     },
-    net::{session::Udp, IndexNet, Payload},
+    net::{session::Udp, IndexNet},
     pbft, unreplicated,
     worker::{spawning_backend, Submit},
-    workload::{
-        self,
-        events::{Invoke, InvokeOk},
-        CloseLoop, Iter, OpLatency, Workload,
-    },
 };
 use axum::{
     extract::State,
+    http::StatusCode,
     routing::{get, post},
     Json, Router,
 };
@@ -41,13 +35,14 @@ use tokio::{
     runtime,
     signal::ctrl_c,
     spawn,
-    sync::Barrier,
-    task::{spawn_blocking, JoinHandle, JoinSet},
+    task::{spawn_blocking, JoinHandle},
 };
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt::init();
     let app = Router::new()
         .route("/ok", get(ok))
         .route("/start-client", post(start_client))
@@ -92,214 +87,21 @@ async fn ok(State(state): State<AppState>) {
     }
 }
 
-async fn start_client(State(state): State<AppState>, Json(config): Json<ClientConfig>) {
+async fn start_client(
+    State(state): State<AppState>,
+    Json(config): Json<ClientConfig>,
+) -> StatusCode {
     let mut session = state.session.lock().unwrap();
-    let cancel = CancellationToken::new();
-    let benchmark_result = state.benchmark_result.clone();
-    benchmark_result.lock().unwrap().take();
-    let handle = spawn_blocking(move || {
-        let runtime = &runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()?;
-        match config.protocol {
-            Protocol::Unreplicated => runtime.block_on(client_session(
-                config,
-                |id, addr, net, upcall| {
-                    Blanket(Unify(unreplicated::Client::new(
-                        id,
-                        addr,
-                        unreplicated::ToReplicaMessageNet::new(net),
-                        upcall,
-                    )))
-                },
-                unreplicated::erased::to_client_on_buf,
-                benchmark_result,
-            )),
-            Protocol::Pbft => runtime.block_on(client_session(
-                config.clone(),
-                |id, addr, net, upcall| {
-                    Blanket(Buffered::from(pbft::Client::new(
-                        id,
-                        addr,
-                        pbft::ToReplicaMessageNet::new(net),
-                        upcall,
-                        config.num_replica,
-                        config.num_faulty,
-                    )))
-                },
-                pbft::to_client_on_buf,
-                benchmark_result,
-            )),
-        }
-    });
-    let replaced = session.replace((handle, cancel));
-    assert!(replaced.is_none())
-}
-
-async fn client_session<
-    S: OnEventUniversal<SessionTimer, Event = Event<S, SessionTimer>>
-        + OnTimerUniversal<SessionTimer>
-        + Send
-        + Sync
-        + 'static,
->(
-    config: ClientConfig,
-    new_client: impl Fn(
-        u32,
-        SocketAddr,
-        IndexNet<Udp, SocketAddr>,
-        Box<dyn SendEvent<InvokeOk> + Send + Sync>,
-    ) -> S,
-    on_buf: impl Fn(&[u8], &mut Sender<S>) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
-    benchmark_result: Arc<Mutex<Option<BenchmarkResult>>>,
-) -> anyhow::Result<()>
-where
-    Sender<S>: SendEvent<Invoke>,
-{
-    let mut sessions = JoinSet::new();
-    let stop = CancellationToken::new();
-    let latencies = Arc::new(Mutex::new(Vec::new()));
-    let barrier = Arc::new(Barrier::new(config.num_close_loop + 1));
-
-    use replication_control_messages::App::*;
-    match &config.app {
-        Null => {
-            spawn_client_sessions(
-                &mut sessions,
-                config,
-                new_client,
-                on_buf,
-                || OpLatency::new(Iter::from(repeat_with(Default::default))),
-                stop.clone(),
-                latencies.clone(),
-                barrier.clone(),
-            )
-            .await?
-        }
-        Ycsb(ycsb_config) => {
-            use replication_control_messages::YcsbProfile::*;
-            let workload = ycsb::Workload::new(
-                StdRng::seed_from_u64(117418),
-                match &ycsb_config.profile {
-                    A => ycsb::WorkloadSettings::new_a,
-                    B => ycsb::WorkloadSettings::new_b,
-                    C => ycsb::WorkloadSettings::new_c,
-                    D => ycsb::WorkloadSettings::new_d,
-                    E => ycsb::WorkloadSettings::new_e,
-                    F => ycsb::WorkloadSettings::new_f,
-                }(ycsb_config.record_count),
-            )?;
-            let mut i = 0;
-            spawn_client_sessions(
-                &mut sessions,
-                config,
-                new_client,
-                on_buf,
-                || {
-                    i += 1;
-                    workload::Json(workload.clone_reseed(StdRng::seed_from_u64(117418 + i)))
-                },
-                stop.clone(),
-                latencies.clone(),
-                barrier.clone(),
-            )
-            .await?
-        }
+    let replaced = session.replace((
+        tokio::spawn(client::session(config, state.benchmark_result.clone())),
+        CancellationToken::new(),
+    ));
+    if replaced.is_none() {
+        StatusCode::OK
+    } else {
+        warn!("duplicated session");
+        StatusCode::INTERNAL_SERVER_ERROR
     }
-
-    // TODO escape with an error indicating the root problem instead of a disconnected channel error
-    // caused by the problem
-    // is it (easily) possible?
-    'select: {
-        tokio::select! {
-            result = sessions.join_next() => result.unwrap()??,
-            () = tokio::time::sleep(Duration::from_secs(1)) => break 'select,
-            // () = cancel.cancelled() => break 'select,
-        }
-        return Err(anyhow::format_err!("unexpected shutdown"));
-    }
-    stop.cancel();
-    barrier.wait().await;
-    sessions.shutdown().await;
-    let mut latencies = latencies.lock().unwrap();
-    let throughput = latencies.len() as f32;
-    benchmark_result.lock().unwrap().replace(BenchmarkResult {
-        throughput: latencies.len() as f32,
-        latency: latencies.drain(..).sum::<Duration>() / (throughput.floor() as u32 + 1),
-    });
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn spawn_client_sessions<
-    S: OnEventUniversal<SessionTimer, Event = Event<S, SessionTimer>>
-        + OnTimerUniversal<SessionTimer>
-        + Send
-        + Sync
-        + 'static,
-    W: Workload<Op = Payload, Result = Payload> + AsMut<Vec<Duration>> + Send + Sync + 'static,
->(
-    sessions: &mut JoinSet<anyhow::Result<()>>,
-    config: ClientConfig,
-    new_client: impl Fn(
-        u32,
-        SocketAddr,
-        IndexNet<Udp, SocketAddr>,
-        Box<dyn SendEvent<InvokeOk> + Send + Sync>,
-    ) -> S,
-    on_buf: impl Fn(&[u8], &mut Sender<S>) -> anyhow::Result<()> + Clone + Send + Sync + 'static,
-    mut workload: impl FnMut() -> W,
-    stop: CancellationToken,
-    latencies: Arc<Mutex<Vec<Duration>>>,
-    barrier: Arc<Barrier>,
-) -> anyhow::Result<()>
-where
-    Sender<S>: SendEvent<Invoke>,
-    W::Attach: Send + Sync,
-{
-    for client_id in repeat_with(rand::random).take(config.num_close_loop) {
-        let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
-        let addr = socket.local_addr()?;
-        println!("Client {client_id:08x} bind to {addr}");
-        let net = Udp(socket.into());
-
-        let mut session = Session::new();
-        let mut close_loop_session = Session::new();
-
-        let mut state = new_client(
-            client_id,
-            addr,
-            IndexNet::new(net.clone(), config.replica_addrs.clone(), None),
-            Box::new(Sender::from(close_loop_session.sender())),
-        );
-        let mut close_loop = Blanket(Unify(CloseLoop::new(
-            Sender::from(session.sender()),
-            workload(),
-        )));
-
-        let mut sender = Sender::from(session.sender());
-        let on_buf = on_buf.clone();
-        sessions.spawn(async move { net.recv_session(|buf| on_buf(buf, &mut sender)).await });
-        sessions.spawn(async move { session.run(&mut state).await });
-        let stop = stop.clone();
-        let latencies = latencies.clone();
-        let barrier = barrier.clone();
-        sessions.spawn(async move {
-            Sender::from(close_loop_session.sender()).send(Init)?;
-            tokio::select! {
-                result = close_loop_session.run(&mut close_loop) => result?,
-                () = stop.cancelled() => {}
-            }
-            latencies
-                .lock()
-                .unwrap()
-                .extend(take(close_loop.workload.as_mut()));
-            barrier.wait().await;
-            Ok(())
-        });
-    }
-    Ok(())
 }
 
 async fn take_benchmark_result(State(state): State<AppState>) -> Json<Option<BenchmarkResult>> {
