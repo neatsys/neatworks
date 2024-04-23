@@ -138,10 +138,11 @@ async fn benchmark_session(
     let result = 'select: {
         tokio::select! {
             result = result_session(control_client.clone(), client_url.into()) => break 'select result?,
-            result = watchdog_sessions.join_next() => result.unwrap()??,
+            Some(result) = watchdog_sessions.join_next() => result??,
         }
-        return Err(anyhow::format_err!("unexpected shutdown"));
+        anyhow::bail!("unexpected shutdown")
     };
+    watchdog_sessions.shutdown().await;
     for replica_url in replica_urls {
         control_client
             .post(format!("{replica_url}/stop-replica"))

@@ -1,5 +1,4 @@
 use std::{
-    future::Future,
     iter::repeat_with,
     mem::take,
     net::SocketAddr,
@@ -184,14 +183,14 @@ async fn close_loop_session<
     Ok(())
 }
 
-fn unreplicated_session(
+async fn unreplicated_session(
     config: ClientConfig,
     mut invoke: UnboundedReceiver<Invoke>,
     upcall: UnboundedSender<InvokeOk>,
     id: u32,
     addr: SocketAddr,
     net: Udp,
-) -> impl Future<Output = anyhow::Result<()>> {
+) -> anyhow::Result<()> {
     let mut state_session = Session::new();
 
     let mut state = Blanket(Unify(unreplicated::Client::new(
@@ -205,15 +204,10 @@ fn unreplicated_session(
         upcall,
     )));
 
-    let recv_session = {
+    let recv_session = net.recv_session({
         let mut state_sender = Sender::from(state_session.sender());
-        async move {
-            net.recv_session(move |buf: &_| {
-                unreplicated::erased::to_client_on_buf(buf, &mut state_sender)
-            })
-            .await
-        }
-    };
+        move |buf: &_| unreplicated::erased::to_client_on_buf(buf, &mut state_sender)
+    });
     let invoke_session = {
         let mut state_sender = Sender::from(state_session.sender());
         async move {
@@ -223,26 +217,24 @@ fn unreplicated_session(
             anyhow::Ok(())
         }
     };
-    let state_session = async move { state_session.run(&mut state).await };
+    let state_session = state_session.run(&mut state);
 
-    async move {
-        tokio::select! {
-            result = recv_session => result?,
-            result = invoke_session => return result,
-            result = state_session => result?,
-        }
-        anyhow::bail!("unreachable")
+    tokio::select! {
+        result = recv_session => result?,
+        result = invoke_session => return result,
+        result = state_session => result?,
     }
+    anyhow::bail!("unreachable")
 }
 
-fn pbft_session(
+async fn pbft_session(
     config: ClientConfig,
     mut invoke: UnboundedReceiver<Invoke>,
     upcall: UnboundedSender<InvokeOk>,
     id: u32,
     addr: SocketAddr,
     net: Udp,
-) -> impl Future<Output = anyhow::Result<()>> {
+) -> anyhow::Result<()> {
     let mut state_session = Session::new();
 
     let mut state = Blanket(Buffered::from(pbft::Client::new(
@@ -254,13 +246,10 @@ fn pbft_session(
         config.num_faulty,
     )));
 
-    let recv_session = {
+    let recv_session = net.recv_session({
         let mut state_sender = Sender::from(state_session.sender());
-        async move {
-            net.recv_session(move |buf: &_| pbft::to_client_on_buf(buf, &mut state_sender))
-                .await
-        }
-    };
+        move |buf: &_| pbft::to_client_on_buf(buf, &mut state_sender)
+    });
     let invoke_session = {
         let mut state_sender = Sender::from(state_session.sender());
         async move {
@@ -270,14 +259,12 @@ fn pbft_session(
             anyhow::Ok(())
         }
     };
-    let state_session = async move { state_session.run(&mut state).await };
+    let state_session = state_session.run(&mut state);
 
-    async move {
-        tokio::select! {
-            result = recv_session => result?,
-            result = invoke_session => return result,
-            result = state_session => result?,
-        }
-        anyhow::bail!("unreachable")
+    tokio::select! {
+        result = recv_session => result?,
+        result = invoke_session => return result,
+        result = state_session => result?,
     }
+    anyhow::bail!("unreachable")
 }
