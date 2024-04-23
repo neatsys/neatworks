@@ -45,10 +45,6 @@ required-features = ["entropy"]
 name = "check-unreplicated"
 required-features = ["tikv-jemallocator"]
 
-[[example]]
-name = "nitro-enclaves-clock"
-required-features = ["nitro-enclaves"]
-
 [dependencies]
 anyhow = { version = "1.0.79", features = ["backtrace"] }
 axum = "0.7.4"
@@ -85,7 +81,7 @@ replication-control-messages = { version = "0.1.0", path = "tools/replication-co
 
 boson-control-messages = { version = "0.1.0", path = "tools/boson-control-messages" }
 aws-nitro-enclaves-nsm-api = { version = "0.4.0", optional = true }
-nix = "0.20"
+nix = { version = "0.28.0", features = ["socket"] }
 
 entropy-control-messages = { version = "0.1.0", path = "tools/entropy-control-messages" }
 wirehair = { git = "https://github.com/neatsys/wirehair", version = "0.1.2", optional = true }
@@ -93,5 +89,3 @@ reqwest = { version = "0.12.4", features = ["json", "multipart"], optional = tru
 
 [dev-dependencies]
 proptest = "1.4.0"
-
-byteorder = "1.3"

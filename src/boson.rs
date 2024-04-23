@@ -13,9 +13,49 @@ use crate::{
     },
     event::{erased::OnEvent, OnTimer, SendEvent},
     lamport_mutex,
-    net::{events::Recv, Addr, All, Payload, SendMessage},
+    net::{deserialize, events::Recv, Addr, All, Payload, SendMessage},
     worker::Submit,
 };
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Update<C>(C, Vec<C>, u64);
+
+// feel lazy to define event type for replying
+type UpdateOk<C> = (u64, C);
+
+pub struct Lamport<E>(pub E, pub u64);
+
+impl<E: SendEvent<Update<C>>, C> SendEvent<lamport_mutex::events::Update<C>> for Lamport<E> {
+    fn send(&mut self, update: lamport_mutex::Update<C>) -> anyhow::Result<()> {
+        self.0
+            .send(Update(update.prev, vec![update.remote], self.1))
+    }
+}
+
+impl<E: SendEvent<lamport_mutex::events::UpdateOk<C>>, C> SendEvent<UpdateOk<C>> for Lamport<E> {
+    fn send(&mut self, (id, clock): (u64, C)) -> anyhow::Result<()> {
+        anyhow::ensure!(id == self.1);
+        self.0.send(lamport_mutex::events::UpdateOk(clock))
+    }
+}
+
+pub struct Cops<E>(pub E);
+
+impl<E: SendEvent<Update<C>>, C> SendEvent<cops::events::Update<C>> for Cops<E> {
+    fn send(&mut self, update: cops::events::Update<C>) -> anyhow::Result<()> {
+        self.0.send(Update(update.prev, update.deps, update.id))
+    }
+}
+
+impl<E: SendEvent<cops::events::UpdateOk<C>>, C> SendEvent<UpdateOk<C>> for Cops<E> {
+    fn send(&mut self, (id, clock): (u64, C)) -> anyhow::Result<()> {
+        let update_ok = cops::events::UpdateOk {
+            id,
+            version_deps: clock,
+        };
+        self.0.send(update_ok)
+    }
+}
 
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]
 pub struct Announce<A> {
@@ -155,14 +195,12 @@ impl<CW, U, N, A> QuorumClient<CW, U, N, A> {
     }
 }
 
-struct SubmitAnnounce(QuorumClock, Vec<QuorumClock>, u64);
-
 impl<CW: Submit<Crypto, dyn quorum_client::SendCryptoEvent<A>>, U, N, A: Addr>
-    OnEvent<SubmitAnnounce> for QuorumClient<CW, U, N, A>
+    OnEvent<Update<QuorumClock>> for QuorumClient<CW, U, N, A>
 {
     fn on_event(
         &mut self,
-        SubmitAnnounce(prev, merged, id): SubmitAnnounce,
+        Update(prev, merged, id): Update<QuorumClock>,
         _: &mut impl crate::event::Timer,
     ) -> anyhow::Result<()> {
         let replaced = self.working_announces.insert(
@@ -199,7 +237,6 @@ impl<CW, U, N: SendMessage<All, Verifiable<Announce<A>>>, A> OnEvent<Signed<Anno
     }
 }
 
-// feel lazy to define event type for replying
 impl<
         CW: Submit<Crypto, dyn quorum_client::SendCryptoEvent<A>>,
         U: SendEvent<(u64, QuorumClock)>,
@@ -240,7 +277,7 @@ impl<
 
 impl<
         CW: Submit<Crypto, dyn quorum_client::SendCryptoEvent<A>>,
-        U: SendEvent<(u64, QuorumClock)>,
+        U: SendEvent<UpdateOk<QuorumClock>>,
         N,
         A,
     > OnEvent<Verified<AnnounceOk>> for QuorumClient<CW, U, N, A>
@@ -296,45 +333,6 @@ impl<CW, U, N, A> OnTimer for QuorumClient<CW, U, N, A> {
         _: &mut impl crate::event::Timer,
     ) -> anyhow::Result<()> {
         unreachable!()
-    }
-}
-
-pub struct Lamport<E>(pub E, pub u64);
-
-impl<E: SendEvent<SubmitAnnounce>> SendEvent<lamport_mutex::events::Update<QuorumClock>>
-    for Lamport<E>
-{
-    fn send(&mut self, update: lamport_mutex::Update<QuorumClock>) -> anyhow::Result<()> {
-        self.0
-            .send(SubmitAnnounce(update.prev, vec![update.remote], self.1))
-    }
-}
-
-impl<E: SendEvent<lamport_mutex::events::UpdateOk<QuorumClock>>> SendEvent<(u64, QuorumClock)>
-    for Lamport<E>
-{
-    fn send(&mut self, (id, clock): (u64, QuorumClock)) -> anyhow::Result<()> {
-        anyhow::ensure!(id == self.1);
-        self.0.send(lamport_mutex::events::UpdateOk(clock))
-    }
-}
-
-pub struct Cops<E>(pub E);
-
-impl<E: SendEvent<SubmitAnnounce>> SendEvent<cops::events::Update<QuorumClock>> for Cops<E> {
-    fn send(&mut self, update: cops::events::Update<QuorumClock>) -> anyhow::Result<()> {
-        self.0
-            .send(SubmitAnnounce(update.prev, update.deps, update.id))
-    }
-}
-
-impl<E: SendEvent<cops::events::UpdateOk<QuorumClock>>> SendEvent<(u64, QuorumClock)> for Cops<E> {
-    fn send(&mut self, (id, clock): (u64, QuorumClock)) -> anyhow::Result<()> {
-        let update_ok = cops::events::UpdateOk {
-            id,
-            version_deps: clock,
-        };
-        self.0.send(update_ok)
     }
 }
 
@@ -476,7 +474,7 @@ impl VerifyClock for cops::SyncKey<QuorumClock> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 #[derive_where(PartialOrd, PartialEq)]
 pub struct NitroEnclavesClock {
     plain: DefaultVersion,
@@ -529,7 +527,7 @@ impl NitroEnclaves {
         Ok(document)
     }
 
-    pub fn issue(plain: DefaultVersion, id: u64) -> anyhow::Result<NitroEnclavesClock> {
+    fn issue(plain: DefaultVersion, id: u64) -> anyhow::Result<NitroEnclavesClock> {
         let user_data = bincode::options().serialize(&(&plain, id))?;
         let document = Self::process_attestation(user_data)?;
         Ok(NitroEnclavesClock {
@@ -538,6 +536,97 @@ impl NitroEnclaves {
             document: Payload(document),
         })
     }
+
+    pub fn run() -> anyhow::Result<()> {
+        use std::os::fd::AsRawFd;
+
+        use nix::sys::socket::{
+            accept, bind, listen, socket, AddressFamily, Backlog, SockFlag, SockType, VsockAddr,
+        };
+
+        let socket_fd = socket(
+            AddressFamily::Vsock,
+            SockType::Stream,
+            SockFlag::empty(),
+            None,
+        )?;
+        bind(socket_fd.as_raw_fd(), &VsockAddr::new(0xFFFFFFFF, 5005))?;
+        listen(&socket_fd, Backlog::new(128)?)?;
+        let mut buf = Vec::new();
+        loop {
+            let fd = accept(socket_fd.as_raw_fd())?;
+            loop {
+                let len = match nitro_enclaves::recv_u64(fd) {
+                    Ok(len) => len,
+                    Err(err) if err.is::<nitro_enclaves::Closed>() => break,
+                    Err(err) => Err(err)?,
+                };
+                buf.resize(len as _, 0u8);
+                nitro_enclaves::recv_loop(fd, &mut buf)?;
+                // TODO multithreading the following?
+                let Update(prev, merged, id) = deserialize::<Update<NitroEnclavesClock>>(&buf)?;
+                // TODO verify
+                let plain = prev
+                    .plain
+                    .update(merged.iter().map(|clock| &clock.plain), id);
+                let updated = Self::issue(plain, id)?;
+                let buf = bincode::options().serialize(&(id, updated))?;
+                nitro_enclaves::send_u64(fd, buf.len() as _)?;
+                nitro_enclaves::send_loop(fd, &buf)?
+            }
+        }
+    }
 }
 
-// cSpell:words lamport upcall
+mod nitro_enclaves {
+    use std::{mem::size_of, os::fd::RawFd};
+
+    use nix::sys::socket::{recv, send, MsgFlags};
+
+    pub fn send_u64(fd: RawFd, val: u64) -> anyhow::Result<()> {
+        let buf = val.to_le_bytes();
+        send_loop(fd, &buf)?;
+        Ok(())
+    }
+
+    pub fn recv_u64(fd: RawFd) -> anyhow::Result<u64> {
+        let mut buf = [0u8; size_of::<u64>()];
+        recv_loop(fd, &mut buf)?;
+        Ok(u64::from_le_bytes(buf))
+    }
+
+    /// Send `len` bytes from `buf` to a connection-oriented socket
+    pub fn send_loop(fd: RawFd, buf: &[u8]) -> anyhow::Result<()> {
+        let mut send_bytes = 0;
+        while send_bytes < buf.len() {
+            let size = match send(fd, &buf[send_bytes..], MsgFlags::empty()) {
+                Ok(size) => size,
+                Err(nix::Error::EINTR) => 0,
+                Err(err) => Err(err)?,
+            };
+            send_bytes += size
+        }
+        Ok(())
+    }
+
+    #[derive(Debug, derive_more::Display, derive_more::Error)]
+    pub struct Closed;
+
+    /// Receive `len` bytes from a connection-oriented socket
+    pub fn recv_loop(fd: RawFd, buf: &mut [u8]) -> anyhow::Result<()> {
+        let mut recv_bytes = 0;
+        while recv_bytes < buf.len() {
+            let size = match recv(fd, &mut buf[recv_bytes..], MsgFlags::empty()) {
+                Ok(0) => Err(Closed)?,
+                Ok(size) => size,
+                Err(nix::Error::EINTR) => 0,
+                Err(err) => Err(err)?,
+            };
+            recv_bytes += size
+        }
+        Ok(())
+    }
+}
+
+// cSpell:words lamport upcall bincode vsock
+// cSpell:ignore EINTR
