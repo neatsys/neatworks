@@ -1,6 +1,6 @@
-mod boson_cops;
-mod boson_mutex;
-mod boson_quorum;
+mod cops;
+mod mutex;
+mod quorum;
 
 use std::{
     backtrace::BacktraceStatus,
@@ -67,7 +67,7 @@ struct AppState {
 struct AppSession {
     handle: JoinHandle<anyhow::Result<()>>,
     cancel: CancellationToken,
-    event_sender: UnboundedSender<boson_mutex::Event>,
+    event_sender: UnboundedSender<mutex::Event>,
     upcall: UnboundedReceiver<Upcall>,
 }
 
@@ -118,19 +118,19 @@ async fn mutex_start(
         let cancel = CancellationToken::new();
         use boson_control_messages::Variant::*;
         let handle = match &config.variant {
-            Untrusted => tokio::spawn(boson_mutex::untrusted_session(
+            Untrusted => tokio::spawn(mutex::untrusted_session(
                 config,
                 event_receiver,
                 upcall_sender,
                 cancel.clone(),
             )),
-            Replicated(_) => tokio::spawn(boson_mutex::replicated_session(
+            Replicated(_) => tokio::spawn(mutex::replicated_session(
                 config,
                 event_receiver,
                 upcall_sender,
                 cancel.clone(),
             )),
-            Quorum(_) => tokio::spawn(boson_mutex::quorum_session(
+            Quorum(_) => tokio::spawn(mutex::quorum_session(
                 config,
                 event_receiver,
                 upcall_sender,
@@ -178,7 +178,7 @@ async fn mutex_request(State(state): State<AppState>, at: Json<SystemTime>) -> R
             anyhow::bail!("missing session")
         };
         let start = Instant::now();
-        session.event_sender.send(boson_mutex::Event::Request)?;
+        session.event_sender.send(mutex::Event::Request)?;
         // TODO timeout
         let result = session.upcall.recv().await;
         if result.is_none() {
@@ -186,7 +186,7 @@ async fn mutex_request(State(state): State<AppState>, at: Json<SystemTime>) -> R
             anyhow::bail!("unreachable")
         }
         anyhow::ensure!(matches!(result, Some(Upcall::RequestOk(_))), "{result:?}");
-        session.event_sender.send(boson_mutex::Event::Release)?;
+        session.event_sender.send(mutex::Event::Release)?;
         Ok(Json(start.elapsed()))
     };
     match task.await {
@@ -207,9 +207,9 @@ async fn cops_start_client(
         let cancel = CancellationToken::new();
         use boson_control_messages::Variant::*;
         let handle = match &config.variant {
-            Untrusted => tokio::spawn(boson_cops::untrusted_client_session(config, upcall_sender)),
-            Replicated(_) => tokio::spawn(boson_cops::pbft_client_session(config, upcall_sender)),
-            Quorum(_) => tokio::spawn(boson_cops::quorum_client_session(config, upcall_sender)),
+            Untrusted => tokio::spawn(cops::untrusted_client_session(config, upcall_sender)),
+            Replicated(_) => tokio::spawn(cops::pbft_client_session(config, upcall_sender)),
+            Quorum(_) => tokio::spawn(cops::quorum_client_session(config, upcall_sender)),
         };
         *session = Some(AppSession {
             handle,
@@ -265,9 +265,9 @@ async fn cops_start_server(
         let cancel = CancellationToken::new();
         use boson_control_messages::Variant::*;
         let handle = match &config.variant {
-            Untrusted => tokio::spawn(boson_cops::untrusted_server_session(config, cancel.clone())),
-            Replicated(_) => tokio::spawn(boson_cops::pbft_server_session(config, cancel.clone())),
-            Quorum(_) => tokio::spawn(boson_cops::quorum_server_session(config, cancel.clone())),
+            Untrusted => tokio::spawn(cops::untrusted_server_session(config, cancel.clone())),
+            Replicated(_) => tokio::spawn(cops::pbft_server_session(config, cancel.clone())),
+            Quorum(_) => tokio::spawn(cops::quorum_server_session(config, cancel.clone())),
         };
         *session = Some(AppSession {
             handle,
@@ -295,7 +295,7 @@ async fn start_quorum(
         let (event_sender, _) = unbounded_channel();
         let (_, upcall_receiver) = unbounded_channel();
         let cancel = CancellationToken::new();
-        let handle = tokio::spawn(boson_quorum::session(config, cancel.clone()));
+        let handle = tokio::spawn(quorum::session(config, cancel.clone()));
         *session = Some(AppSession {
             handle,
             cancel,

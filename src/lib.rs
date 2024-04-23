@@ -98,11 +98,23 @@ static GLOBAL: Jemalloc = Jemalloc;
 // interfaces between them are built based on HTTP. i believe this isolated
 // design results in good separation of concern
 //
-// for `crates` the story is much simpler. `src/` should be compilable against
-// plain Ubuntu system. and code live in `crates` if they have further system
-// requirements. for example, currently there's `crates/entropy` that requires
-// cmake, llvm-dev, libclang-dev and clang to be present. there may be another
-// crate for dpdk stuff later
+// the root crate comes with features gates. the `all` feature enables the ones
+// that compile under a plain Ubuntu system (demanding a better feature name).
+// this is the default feature enabled by IDE, so that i expect there's no false
+// positive errors for everyone to just clone and view the project in VS Code
+//
+// in the future i may or may not do fine-grained feature based compilation
+// engineering. not sure how meaningful that is, but a no-std support could be
+// attractive even if it is completely useless
+//
+// there are also extreme cases of setting up development e.g. some part of code
+// has dependencies that requires a nightly compiler. i have finally move the 
+// code into a separated repository, since it cannot really share any built
+// artifact with the other code and becomes pointless to stay together. (and
+// also because i don't really like that part of code.) anyway, we are in the
+// new era that i have set up a dedicated GitHub organization around this
+// codebase, which broad the definition of "stay together", so i don't care it
+// as much as before
 //
 // well, not particular useful note, but this codebase can make so much use of
 // trait alias. if some day i irrationally switch to nightly toolchain, this

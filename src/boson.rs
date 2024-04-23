@@ -1,6 +1,5 @@
 use std::{collections::HashMap, sync::OnceLock};
 
-use bincode::Options;
 use derive_where::derive_where;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -13,7 +12,7 @@ use crate::{
     },
     event::{erased::OnEvent, OnTimer, SendEvent},
     lamport_mutex,
-    net::{deserialize, events::Recv, Addr, All, Payload, SendMessage},
+    net::{events::Recv, Addr, All, Payload, SendMessage},
     worker::Submit,
 };
 
@@ -494,9 +493,10 @@ impl DepOrd for NitroEnclavesClock {
     }
 }
 
+#[derive(Debug)]
 pub struct NitroEnclaves(i32);
 
-static NITRO_ENCLAVES_CONTEXT: OnceLock<NitroEnclaves> = OnceLock::new();
+pub static NITRO_ENCLAVES_CONTEXT: OnceLock<NitroEnclaves> = OnceLock::new();
 
 #[cfg(feature = "nitro-enclaves")]
 impl NitroEnclaves {
@@ -527,19 +527,10 @@ impl NitroEnclaves {
         Ok(document)
     }
 
-    fn issue(plain: DefaultVersion, id: u64) -> anyhow::Result<NitroEnclavesClock> {
-        let user_data = bincode::options().serialize(&(&plain, id))?;
-        let document = Self::process_attestation(user_data)?;
-        Ok(NitroEnclavesClock {
-            plain,
-            id,
-            document: Payload(document),
-        })
-    }
-
     pub fn run() -> anyhow::Result<()> {
         use std::os::fd::AsRawFd;
 
+        use bincode::Options;
         use nix::sys::socket::{
             accept, bind, listen, socket, AddressFamily, Backlog, SockFlag, SockType, VsockAddr,
         };
@@ -563,13 +554,22 @@ impl NitroEnclaves {
                 };
                 buf.resize(len as _, 0u8);
                 nitro_enclaves::recv_loop(fd, &mut buf)?;
+
                 // TODO multithreading the following?
-                let Update(prev, merged, id) = deserialize::<Update<NitroEnclavesClock>>(&buf)?;
+                let Update(prev, merged, id) =
+                    crate::net::deserialize::<Update<NitroEnclavesClock>>(&buf)?;
                 // TODO verify
                 let plain = prev
                     .plain
                     .update(merged.iter().map(|clock| &clock.plain), id);
-                let updated = Self::issue(plain, id)?;
+                let user_data = bincode::options().serialize(&(&plain, id))?;
+                let document = Self::process_attestation(user_data)?;
+                let updated = NitroEnclavesClock {
+                    plain,
+                    id,
+                    document: Payload(document),
+                };
+
                 let buf = bincode::options().serialize(&(id, updated))?;
                 nitro_enclaves::send_u64(fd, buf.len() as _)?;
                 nitro_enclaves::send_loop(fd, &buf)?
@@ -578,6 +578,7 @@ impl NitroEnclaves {
     }
 }
 
+#[cfg(feature = "nitro-enclaves")]
 mod nitro_enclaves {
     use std::{mem::size_of, os::fd::RawFd};
 
