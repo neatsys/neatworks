@@ -494,7 +494,7 @@ impl DepOrd for NitroEnclavesClock {
 }
 
 #[derive(Debug)]
-pub struct NitroEnclaves(i32);
+pub struct NitroEnclaves(pub i32);
 
 pub static NITRO_ENCLAVES_CONTEXT: OnceLock<NitroEnclaves> = OnceLock::new();
 
@@ -578,8 +578,7 @@ impl NitroEnclaves {
     }
 }
 
-#[cfg(feature = "nitro-enclaves")]
-mod nitro_enclaves {
+pub mod nitro_enclaves {
     use std::{mem::size_of, os::fd::RawFd};
 
     use nix::sys::socket::{recv, send, MsgFlags};

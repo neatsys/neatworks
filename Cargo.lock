@@ -151,7 +151,6 @@ dependencies = [
  "reqwest",
  "rusqlite",
  "rustc-hash",
- "rustix",
  "rustls",
  "scc",
  "schnorrkel",

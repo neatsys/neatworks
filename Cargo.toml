@@ -54,6 +54,7 @@ crossbeam-queue = "0.3.11"
 derive_more = "0.99.17"
 derive-where = "1.2.7"
 lru = "0.12.2"
+nix = { version = "0.28.0", features = ["socket", "sched", "resource"] }
 primitive-types = { version = "0.12.2", features = ["serde"] }
 quinn = { git = "https://github.com/quinn-rs/quinn", version = "0.11.0" }
 rand = "0.8.5"
@@ -63,7 +64,6 @@ rcgen = { git = "https://github.com/rustls/rcgen", version = "0.13.0", features 
 ] }
 rusqlite = { version = "0.31.0", features = ["bundled"] }
 rustc-hash = "1.1.0"
-rustix = { version = "0.38.31", features = ["process"] }
 rustls = { version = "0.21.0", default-features = false, features = ["quic"] }
 serde = { version = "1.0.195", features = ["derive"] }
 tikv-jemallocator = { version = "0.5.4", optional = true }
@@ -81,7 +81,6 @@ replication-control-messages = { version = "0.1.0", path = "tools/replication-co
 
 boson-control-messages = { version = "0.1.0", path = "tools/boson-control-messages" }
 aws-nitro-enclaves-nsm-api = { version = "0.4.0", optional = true }
-nix = { version = "0.28.0", features = ["socket"] }
 
 entropy-control-messages = { version = "0.1.0", path = "tools/entropy-control-messages" }
 wirehair = { git = "https://github.com/neatsys/wirehair", version = "0.1.2", optional = true }

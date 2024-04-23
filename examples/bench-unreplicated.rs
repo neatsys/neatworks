@@ -288,18 +288,18 @@ async fn main() -> anyhow::Result<()> {
 
         let (mut state_sender, state_receiver) = std::sync::mpsc::channel::<ReplicaEvent<_>>();
         let recv_session = spawn_blocking(move || {
-            let mut cpu_set = rustix::process::CpuSet::new();
-            cpu_set.set(0);
-            rustix::process::sched_setaffinity(None, &cpu_set)?;
+            let mut cpu_set = nix::sched::CpuSet::new();
+            cpu_set.set(0)?;
+            nix::sched::sched_setaffinity(nix::unistd::Pid::from_raw(0), &cpu_set)?;
             raw_net.recv(
                 move |buf| to_replica_on_buf::<SocketAddr>(buf, &mut state_sender),
                 None,
             )
         });
         let state_session = spawn_blocking(move || {
-            let mut cpu_set = rustix::process::CpuSet::new();
-            cpu_set.set(1);
-            rustix::process::sched_setaffinity(None, &cpu_set)?;
+            let mut cpu_set = nix::sched::CpuSet::new();
+            cpu_set.set(1)?;
+            nix::sched::sched_setaffinity(nix::unistd::Pid::from_raw(0), &cpu_set)?;
             blocking::run(state_receiver, &mut state)
         });
         return run(async { recv_session.await? }, async {
