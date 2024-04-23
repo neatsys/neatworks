@@ -1,11 +1,15 @@
 mod client;
 mod replica;
 
-use std::sync::{Arc, Mutex};
+use std::{
+    future::Future,
+    sync::{Arc, Mutex},
+};
 
 use axum::{
     extract::State,
     http::StatusCode,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -44,21 +48,30 @@ struct AppState {
 
 type AppSession = (JoinHandle<anyhow::Result<()>>, CancellationToken);
 
-async fn ok(State(state): State<AppState>) {
-    let mut handle = None;
-    {
-        let mut session = state.session.lock().unwrap();
-        if session
-            .as_ref()
-            .map(|(handle, _)| handle.is_finished())
-            .unwrap_or(false)
-        {
-            handle = Some(session.take().unwrap().0)
+fn take_finished(state: AppState) -> anyhow::Result<Option<JoinHandle<anyhow::Result<()>>>> {
+    let mut session = state
+        .session
+        .lock()
+        .map_err(|err| anyhow::format_err!("{err}"))?;
+    let Some((handle, _)) = session.as_mut() else {
+        return Ok(None); // consider fail for unexpected taking
+    };
+    Ok(if !handle.is_finished() {
+        None
+    } else {
+        Some(session.take().unwrap().0)
+    })
+}
+
+async fn ok(State(state): State<AppState>) -> Response {
+    run(async {
+        if let Some(handle) = take_finished(state)? {
+            handle.await??;
+            anyhow::bail!("unreachable")
         }
-    }
-    if let Some(handle) = handle {
-        handle.await.unwrap().unwrap()
-    }
+        Ok(())
+    })
+    .await
 }
 
 async fn start_client(
@@ -83,21 +96,48 @@ async fn start_client(
     }
 }
 
-async fn take_benchmark_result(State(state): State<AppState>) -> Json<Option<BenchmarkResult>> {
-    let result = state.benchmark_result.lock().unwrap().take();
-    if result.is_some() {
-        let session = { state.session.lock().unwrap().take().unwrap() };
-        session.0.await.unwrap().unwrap()
+async fn take_benchmark_result(State(state): State<AppState>) -> Response {
+    run(async {
+        let result = state
+            .benchmark_result
+            .lock()
+            .map_err(|err| anyhow::format_err!("{err}"))?
+            .take();
+        if result.is_some() {
+            let (session, _) = {
+                state
+                    .session
+                    .lock()
+                    .map_err(|err| anyhow::format_err!("{err}"))?
+                    .take()
+                    .unwrap()
+            };
+            session.await??
+        }
+        anyhow::Ok(Json(result))
+    })
+    .await
+}
+
+async fn run<T: IntoResponse>(task: impl Future<Output = anyhow::Result<T>>) -> Response {
+    match task.await {
+        Ok(result) => result.into_response(),
+        Err(err) => {
+            warn!("{err}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
-    Json(result)
 }
 
 async fn start_replica(
     State(state): State<AppState>,
     Json(config): Json<ReplicaConfig>,
 ) -> StatusCode {
-    let mut session = state.session.lock().unwrap();
     let task = || {
+        let mut session = state
+            .session
+            .lock()
+            .map_err(|err| anyhow::format_err!("{err}"))?;
         let cancel = CancellationToken::new();
         let replaced = session.replace((
             tokio::spawn(replica::session(config, cancel.clone())?),
@@ -115,13 +155,22 @@ async fn start_replica(
     }
 }
 
-async fn stop_replica(State(state): State<AppState>) {
-    let (handle, cancel) = {
-        let mut session = state.session.lock().unwrap();
-        session.take().unwrap()
-    };
-    cancel.cancel();
-    handle.await.unwrap().unwrap()
+async fn stop_replica(State(state): State<AppState>) -> Response {
+    run(async {
+        let (handle, cancel) = {
+            let mut session = state
+                .session
+                .lock()
+                .map_err(|err| anyhow::format_err!("{err}"))?;
+            session
+                .take()
+                .ok_or(anyhow::format_err!("missing session"))?
+        };
+        cancel.cancel();
+        handle.await??;
+        anyhow::Ok(())
+    })
+    .await
 }
 
 // cSpell:words unreplicated pbft upcall ycsb seedable schnorrkel secp256k1
