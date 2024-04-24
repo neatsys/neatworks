@@ -212,7 +212,7 @@ impl<E, P: Protocol<A, B>, A: Addr + Ord, B: Buf, F> Dispatch<E, P, A, B, F> {
         // should we skip backoff if we just removed the old connection?
         let outgoing = OutgoingBackoff(remote.clone());
         let timer_id = timer.set(
-            thread_rng().gen_range(Duration::ZERO..Duration::from_millis(100)),
+            thread_rng().gen_range(Duration::ZERO..Duration::from_millis(200)),
             // + if Some(remote.clone()) >= self.protocol.local_addr() {
             //     Duration::ZERO // lower address always connects first
             // } else {
