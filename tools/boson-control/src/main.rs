@@ -41,8 +41,8 @@ async fn main() -> anyhow::Result<()> {
                 client.clone(),
                 instances,
                 clock_instances,
-                RequestMode::One,
-                Variant::Untrusted,
+                RequestMode::All,
+                Variant::Replicated,
                 4,
             )
             .await?;

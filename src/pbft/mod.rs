@@ -746,10 +746,10 @@ impl<M: ReplicaCommon> OnEvent<Verified<Prepare>> for Replica<M::N, M::CN, M::CW
         Verified(prepare): Verified<Prepare>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        if prepare.view_num != self.view_num {
+        let op_num = prepare.op_num;
+        if prepare.view_num != self.view_num || !self.pending_prepares.contains_key(&op_num) {
             return Ok(());
         }
-        let op_num = prepare.op_num;
         self.insert_prepare(prepare)?;
         loop {
             let Some(pending_prepares) = self.pending_prepares.get_mut(&op_num) else {
@@ -790,6 +790,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
         }
         assert!(entry.prepares.is_empty());
         entry.prepares = self.prepare_quorums.remove(&prepare.op_num).unwrap();
+        self.pending_prepares.remove(&prepare.op_num);
 
         let commit = Commit {
             view_num: self.view_num,
@@ -880,10 +881,10 @@ impl<M: ReplicaCommon> OnEvent<Verified<Commit>> for Replica<M::N, M::CN, M::CW,
         Verified(commit): Verified<Commit>,
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        if commit.view_num != self.view_num {
+        let op_num = commit.op_num;
+        if commit.view_num != self.view_num || !self.pending_commits.contains_key(&op_num) {
             return Ok(());
         }
-        let op_num = commit.op_num;
         self.insert_commit(commit, timer)?;
         loop {
             let Some(pending_commits) = self.pending_commits.get_mut(&op_num) else {
@@ -934,6 +935,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
         }
 
         log_entry.commits = self.commit_quorums.remove(&commit.op_num).unwrap();
+        self.pending_commits.remove(&commit.op_num);
         // println!("[{}] Commit {}", self.id, commit.op_num);
         if is_primary {
             log_entry.progress.unset(timer)?;

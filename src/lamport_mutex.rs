@@ -49,14 +49,14 @@ impl<C: Clock> ClockOrd for C {
         (clock, id): (&Self, u8),
         (other_clock, other_id): (&Self, u8),
     ) -> anyhow::Result<Ordering> {
-        if let Some(ordering) = clock.partial_cmp(other_clock) {
-            if ordering.is_eq() {
-                anyhow::ensure!(id == other_id)
+        match (clock.partial_cmp(other_clock), id.cmp(&other_id)) {
+            (None, Ordering::Equal) => anyhow::bail!("concurrent clock from same id"),
+            // this one is covered by the next case, but explicitly listed because it corresponds to
+            // the only equal case: when a clock is compared to itself
+            (Some(Ordering::Equal), Ordering::Equal) => Ok(Ordering::Equal),
+            (Some(Ordering::Equal), ordering) | (Some(ordering), _) | (None, ordering) => {
+                Ok(ordering)
             }
-            Ok(ordering)
-        } else {
-            anyhow::ensure!(id != other_id);
-            Ok(id.cmp(&other_id))
         }
     }
 }
@@ -399,14 +399,8 @@ impl<CN, U, C: Clock + ClockOrd> Processor<CN, U, C> {
                     .iter()
                     .position(|(_, other_id)| *other_id == id)
                 {
-                    let (clock, _) = self.requests.remove(index);
-                    // not so sure whether faulty processors can cause this break on other processors
-                    // anyway let's go with this for now, since it should always be the case for the
-                    // evaluated path
-                    anyhow::ensure!(matches!(
-                        message.clock.partial_cmp(&clock),
-                        Some(Ordering::Equal)
-                    ));
+                    // really want to assert something on the removed clock, any idea?
+                    self.requests.remove(index);
                 }
             }
         }
