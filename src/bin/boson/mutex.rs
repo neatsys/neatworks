@@ -23,6 +23,14 @@ use rand::thread_rng;
 use tokio::{net::TcpListener, sync::mpsc::UnboundedReceiver};
 use tokio_util::sync::CancellationToken;
 
+fn adjust(addr: SocketAddr) -> SocketAddr {
+    if addr.ip().is_loopback() {
+        addr
+    } else {
+        SocketAddr::from(([0; 4], addr.port()))
+    }
+}
+
 pub enum Event {
     Request,
     Release,
@@ -47,8 +55,7 @@ pub async fn untrusted_session(
     };
     let addr = addrs[id as usize];
 
-    // let tcp_listener = TcpListener::bind(addr).await?;
-    let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], addr.port()))).await?;
+    let tcp_listener = TcpListener::bind(adjust(addr)).await?;
     let mut dispatch_session = event::Session::new();
     let mut processor_session = Session::new();
     let mut causal_net_session = Session::new();
@@ -64,15 +71,15 @@ pub async fn untrusted_session(
     let mut processor = Blanket(Unify(Processor::new(
         id,
         addrs.len(),
-        |id| (0u32, id),
+        0u32,
         Detach(Sender::from(causal_net_session.sender())),
         upcall,
     )));
     let mut causal_net = Blanket(Unify(Causal::new(
-        (0, id),
+        0,
         Box::new(Sender::from(processor_session.sender()))
             as Box<dyn lamport_mutex::SendRecvEvent<LamportClock> + Send + Sync>,
-        Box::new(Lamport(Sender::from(causal_net_session.sender()), id))
+        Box::new(Lamport(Sender::from(causal_net_session.sender())))
             as Box<dyn SendEvent<lamport_mutex::Update<LamportClock>> + Send + Sync>,
         lamport_mutex::MessageNet::<_, LamportClock>::new(IndexNet::new(
             dispatch::Net::from(dispatch_session.sender()),
@@ -135,11 +142,9 @@ pub async fn replicated_session(
     let addr = addrs[id as usize];
     let num_replica = addrs.len();
 
-    // let client_tcp_listener = TcpListener::bind(SocketAddr::from((addr.ip(), 0))).await?;
-    let client_tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?;
+    let client_tcp_listener = TcpListener::bind(adjust(SocketAddr::from((addr.ip(), 0)))).await?;
     let client_addr = SocketAddr::from((addr.ip(), client_tcp_listener.local_addr()?.port()));
-    // let tcp_listener = TcpListener::bind(addr).await?;
-    let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], addr.port()))).await?;
+    let tcp_listener = TcpListener::bind(adjust(addr)).await?;
 
     let mut client_dispatch_session = event::Session::new();
     let mut client_session = Session::new();
@@ -200,7 +205,7 @@ pub async fn replicated_session(
     let mut processor = Blanket(Unify(Processor::new(
         id,
         num_replica,
-        |_| 0u32,
+        0u32,
         augustus::net::MessageNet::<_, lamport_mutex::Message>::new(InvokeNet(Sender::from(
             queue_session.sender(),
         ))),
@@ -267,10 +272,8 @@ pub async fn quorum_session(
     let addr = addrs[id as usize];
     let crypto = Crypto::new_random(&mut thread_rng());
 
-    // let tcp_listener = TcpListener::bind(addr).await?;
-    let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], addr.port()))).await?;
-    // let clock_tcp_listener = TcpListener::bind(SocketAddr::from((addr.ip(), 0))).await?;
-    let clock_tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?;
+    let tcp_listener = TcpListener::bind(adjust(addr)).await?;
+    let clock_tcp_listener = TcpListener::bind(adjust(SocketAddr::from((addr.ip(), 0)))).await?;
     let clock_addr = SocketAddr::from((addr.ip(), clock_tcp_listener.local_addr()?.port()));
 
     let mut dispatch_session = event::Session::new();
@@ -279,6 +282,8 @@ pub async fn quorum_session(
     let mut causal_net_session = Session::new();
     let mut clock_session = Session::new();
     // verify clocked messages sent by other processors before they are received causal net
+    // a spawning backend may cause out of order receiving of messages from a remote processor
+    // hotfix by using inline worker instead, better solution desired
     // let (recv_crypto_worker, mut recv_crypto_executor) = spawning_backend();
     // owned by quorum client
     let (crypto_worker, mut crypto_executor) = spawning_backend();
@@ -310,7 +315,7 @@ pub async fn quorum_session(
         id,
         addrs.len(),
         num_faulty,
-        |_| QuorumClock::default(),
+        QuorumClock::default(),
         Detach(Sender::from(causal_net_session.sender())),
         lamport_mutex::verifiable::SignOrdered::new(processor_crypto_worker),
         upcall,

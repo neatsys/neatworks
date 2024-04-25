@@ -20,14 +20,21 @@ use rand::thread_rng;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+fn adjust(addr: SocketAddr) -> SocketAddr {
+    if addr.ip().is_loopback() {
+        addr
+    } else {
+        SocketAddr::from(([0; 4], addr.port()))
+    }
+}
+
 pub async fn session(
     config: boson_control_messages::QuorumServer,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let addr = config.quorum.addrs[config.index];
     let crypto = Crypto::new_random(&mut thread_rng());
-    // let tcp_listener = TcpListener::bind(addr).await?;
-    let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], addr.port()))).await?;
+    let tcp_listener = TcpListener::bind(adjust(addr)).await?;
 
     let mut dispatch_session = event::Session::new();
     let mut server_session = Session::new();

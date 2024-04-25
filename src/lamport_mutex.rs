@@ -18,7 +18,7 @@
 // last but not least, a modified version of the mutex protocol that is
 // prepared for tolerating arbitrary faulty behaviors is appended. check the
 // note below for details
-use std::{cmp::Ordering, collections::VecDeque, mem::replace};
+use std::{cmp::Ordering, collections::VecDeque, iter::repeat, mem::replace};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -31,20 +31,33 @@ use crate::{
     net::{deserialize, events::Recv, All, SendMessage},
 };
 
-pub trait Clock: PartialOrd + Clone + Send + Sync + 'static {
-    // this is different from just `+ Ord` above: a `+ Ord` (which would nullify the `PartialOrd`)
-    // makes additional restriction on the *same* relation, while what we desired is yet another
-    // relation that has total ordering i.e. the "arbitrary total ordering" that "break ties" in the
-    // original work, hence the method name
-    fn arbitrary_cmp(&self, other: &Self) -> Ordering;
-    // as the original work states this total ordering must be aligned with the `PartialOrd`. for
-    // clock types that have inherent total ordering (e.g. the integer type used by lamport clock),
-    // the two ordering are indeed the same relation, as specified by the following blanket impl
-}
+pub trait Clock: PartialOrd + Clone + Send + Sync + 'static {}
+impl<C: PartialOrd + Clone + Send + Sync + 'static> Clock for C {}
 
-impl<C: Ord + Clone + Send + Sync + 'static> Clock for C {
-    fn arbitrary_cmp(&self, other: &Self) -> Ordering {
-        self.cmp(other)
+// this is different from just blanket `impl Ord` for `impl Clock`, which makes additional promise
+// over the *same* relation
+// the `arbitrary_cmp` here is yet another relation that happens to respect the `PartialOrd` one,
+// i.e. returns `X` (in {Less | Greater}) when partial order returns `Some(X)`.
+// in another word, for clock types that have inherent total ordering (e.g. the integer type used by
+// lamport clock), the two ordering are indeed the same relation, or "behave identical" if you
+// prefer
+pub trait ClockOrd {
+    fn arbitrary_cmp(clock: (&Self, u8), other_clock: (&Self, u8)) -> anyhow::Result<Ordering>;
+}
+impl<C: Clock> ClockOrd for C {
+    fn arbitrary_cmp(
+        (clock, id): (&Self, u8),
+        (other_clock, other_id): (&Self, u8),
+    ) -> anyhow::Result<Ordering> {
+        if let Some(ordering) = clock.partial_cmp(other_clock) {
+            if ordering.is_eq() {
+                anyhow::ensure!(id == other_id)
+            }
+            Ok(ordering)
+        } else {
+            anyhow::ensure!(id != other_id);
+            Ok(id.cmp(&other_id))
+        }
     }
 }
 
@@ -244,21 +257,21 @@ pub struct Update<C> {
 
 pub struct UpdateOk<C>(pub C);
 
-pub struct Lamport<E>(pub E, pub u8);
+pub struct Lamport<E>(pub E);
 
-pub type LamportClock = (u32, u8); // (counter, processor id)
+pub type LamportClock = u32;
 
 impl<E: SendEvent<UpdateOk<LamportClock>>> SendEvent<Update<LamportClock>> for Lamport<E> {
     fn send(&mut self, update: Update<LamportClock>) -> anyhow::Result<()> {
         // IR2. (b) upon receiving a message m, process P_j sets C_j greater than or equal to its
         // present value and greater than T_m
-        // this would sound like `update.prev.0.max(update.remote.0 + 1)`, but the definition of
+        // this would sound like `update.prev.max(update.remote + 1)`, but the definition of
         // `Update` is to "return the clock value of the event happens after observing `remote`
         // based on `prev`", so there is actually an implicit IR1 follows
         // IR1. Each process P_i increments C_i between any two successive events.
         // and this would be a little bit optimization over the naive `_.max(_ + 1) + 1`
-        let counter = update.prev.0.max(update.remote.0) + 1;
-        self.0.send(UpdateOk((counter, self.1)))
+        let counter = update.prev.max(update.remote) + 1;
+        self.0.send(UpdateOk(counter))
     }
 }
 
@@ -280,19 +293,13 @@ pub struct Processor<CN, U, C> {
     upcall: U,
 }
 
-impl<CN, U, C> Processor<CN, U, C> {
-    pub fn new(
-        id: u8,
-        num_processor: usize,
-        clock_zero: impl Fn(u8) -> C,
-        causal_net: CN,
-        upcall: U,
-    ) -> Self {
+impl<CN, U, C: Clone> Processor<CN, U, C> {
+    pub fn new(id: u8, num_processor: usize, clock_zero: C, causal_net: CN, upcall: U) -> Self {
         Self {
             id,
             causal_net,
             upcall,
-            latests: (0..num_processor as u8).map(&clock_zero).collect(),
+            latests: repeat(clock_zero).take(num_processor).collect(),
             requests: Default::default(),
             requesting: false,
         }
@@ -344,7 +351,7 @@ impl<CN: SendMessage<u8, Message>, U: SendEvent<events::RequestOk>, C: Clock>
     }
 }
 
-impl<CN, U, C: Clock> Processor<CN, U, C> {
+impl<CN, U, C: Clock + ClockOrd> Processor<CN, U, C> {
     fn handle_clocked<A>(
         &mut self,
         message: Clocked<Message, C>,
@@ -365,12 +372,23 @@ impl<CN, U, C: Clock> Processor<CN, U, C> {
         self.latests[id as usize] = message.clock.clone();
         match message.inner {
             Message::Request(_) => {
-                if let Err(index) = self
-                    .requests
-                    .binary_search_by(|(clock, _)| clock.arbitrary_cmp(&message.clock))
-                {
+                let mut insert_index = Some(self.requests.len());
+                for (index, (other_clock, other_id)) in self.requests.iter().enumerate() {
+                    match C::arbitrary_cmp((&message.clock, id), (other_clock, *other_id))? {
+                        Ordering::Greater => continue,
+                        Ordering::Equal => {
+                            insert_index = None;
+                            break;
+                        }
+                        Ordering::Less => {
+                            insert_index = Some(index);
+                            break;
+                        }
+                    }
+                }
+                if let Some(index) = insert_index {
                     self.requests.insert(index, (message.clock, id))
-                };
+                }
                 self.causal_net
                     .send(into_addr(id), Message::RequestOk(self.id))?;
             }
@@ -385,7 +403,10 @@ impl<CN, U, C: Clock> Processor<CN, U, C> {
                     // not so sure whether faulty processors can cause this break on other processors
                     // anyway let's go with this for now, since it should always be the case for the
                     // evaluated path
-                    anyhow::ensure!(message.clock.arbitrary_cmp(&clock).is_gt());
+                    anyhow::ensure!(matches!(
+                        message.clock.partial_cmp(&clock),
+                        Some(Ordering::Equal)
+                    ));
                 }
             }
         }
@@ -488,7 +509,7 @@ pub mod verifiable {
         worker::Submit,
     };
 
-    use super::{events, Clock, Clocked};
+    use super::{events, Clock, ClockOrd, Clocked};
 
     #[derive(Debug, Hash, Serialize, Deserialize)]
     pub struct Ordered<C> {
@@ -503,27 +524,28 @@ pub mod verifiable {
         #[deref]
         #[deref_mut]
         inner: super::Processor<CN, U, C>,
-        last_ordered: C,
+        last_ordered: (C, u8),
         proof: HashMap<u8, Verifiable<Ordered<C>>>,
         net: N,
     }
 
-    impl<CN, N, U, C> Processor<CN, N, U, C> {
+    impl<CN, N, U, C: Clone> Processor<CN, N, U, C> {
         pub fn new(
             id: u8,
             num_processor: usize,
             num_faulty: usize,
-            clock_zero: impl Fn(u8) -> C,
+            clock_zero: C,
             causal_net: CN,
             net: N,
             upcall: U,
         ) -> Self {
-            let inner = super::Processor::new(id, num_processor, &clock_zero, causal_net, upcall);
+            let inner =
+                super::Processor::new(id, num_processor, clock_zero.clone(), causal_net, upcall);
             Self {
                 inner,
                 num_faulty,
                 net,
-                last_ordered: clock_zero(id),
+                last_ordered: (clock_zero, u8::MAX),
                 proof: Default::default(),
             }
         }
@@ -559,14 +581,20 @@ pub mod verifiable {
         }
     }
 
-    impl<CN, N: SendMessage<u8, Ordered<C>>, U: SendEvent<events::RequestOk>, C: Clock>
-        Processor<CN, N, U, C>
+    impl<
+            CN,
+            N: SendMessage<u8, Ordered<C>>,
+            U: SendEvent<events::RequestOk>,
+            C: Clock + ClockOrd,
+        > Processor<CN, N, U, C>
     {
         fn check_requested(&mut self) -> anyhow::Result<()> {
             // println!("check requested");
             for (clock, id) in &self.inner.requests {
                 // println!("check requested {id}");
-                if clock.arbitrary_cmp(&self.last_ordered).is_le() {
+                if C::arbitrary_cmp((clock, *id), (&self.last_ordered.0, self.last_ordered.1))?
+                    .is_le()
+                {
                     // println!("skip ordered clock");
                     continue;
                 }
@@ -583,7 +611,7 @@ pub mod verifiable {
                     };
                     // println!("ordered");
                     self.net.send(*id, ordered)?;
-                    self.last_ordered = clock.clone()
+                    self.last_ordered = (clock.clone(), *id)
                 } else {
                     break;
                 }

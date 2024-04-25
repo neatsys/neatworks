@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fmt::Write,
     future::Future,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::Path,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
@@ -21,13 +21,41 @@ async fn main() -> anyhow::Result<()> {
         .timeout(Duration::from_millis(1500))
         .build()?;
     let item = std::env::args().nth(1);
-    let instances = terraform_instances().await?;
     match item.as_deref() {
+        Some("test-mutex") => {
+            let instances = (0..4)
+                .map(|i| TerraformOutputInstance {
+                    public_ip: IpAddr::from([127, 0, 0, i + 1]),
+                    private_ip: IpAddr::from([127, 0, 0, i + 1]),
+                    public_dns: format!("127.0.0.{}", i + 1),
+                })
+                .collect();
+            let clock_instances = (0..2)
+                .map(|i| TerraformOutputInstance {
+                    public_ip: IpAddr::from([127, 0, 0, i + 101]),
+                    private_ip: IpAddr::from([127, 0, 0, i + 101]),
+                    public_dns: format!("127.0.0.{}", i + 101),
+                })
+                .collect();
+            mutex_session(
+                client.clone(),
+                instances,
+                clock_instances,
+                RequestMode::One,
+                Variant::Untrusted,
+                4,
+            )
+            .await?;
+            Ok(())
+        }
         Some("mutex") => {
+            let instances = terraform_instances().await?;
+            let clock_instances = terraform_quorum_instances().await?;
             for n in 1..=20 {
                 mutex_session(
                     client.clone(),
                     instances.clone(),
+                    clock_instances.clone(),
                     RequestMode::One,
                     Variant::Quorum,
                     n,
@@ -38,6 +66,7 @@ async fn main() -> anyhow::Result<()> {
                 mutex_session(
                     client.clone(),
                     instances.clone(),
+                    clock_instances.clone(),
                     RequestMode::One,
                     Variant::Untrusted,
                     n,
@@ -48,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
                 mutex_session(
                     client.clone(),
                     instances.clone(),
+                    clock_instances.clone(),
                     RequestMode::One,
                     Variant::Replicated,
                     n,
@@ -58,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
                 mutex_session(
                     client.clone(),
                     instances.clone(),
+                    clock_instances.clone(),
                     RequestMode::All,
                     Variant::Quorum,
                     n,
@@ -68,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
                 mutex_session(
                     client.clone(),
                     instances.clone(),
+                    clock_instances.clone(),
                     RequestMode::All,
                     Variant::Untrusted,
                     n,
@@ -77,9 +109,12 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("cops") => {
+            let instances = terraform_instances().await?;
+            let clock_instances = terraform_quorum_instances().await?;
             cops_session(
                 client.clone(),
                 instances.clone(),
+                clock_instances.clone(),
                 Variant::Untrusted,
                 1,
                 1,
@@ -90,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
             cops_session(
                 client.clone(),
                 instances.clone(),
+                clock_instances.clone(),
                 Variant::Untrusted,
                 1,
                 1,
@@ -101,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
                 cops_session(
                     client.clone(),
                     instances.clone(),
+                    clock_instances.clone(),
                     Variant::Untrusted,
                     1,
                     2,
@@ -113,6 +150,7 @@ async fn main() -> anyhow::Result<()> {
             cops_session(
                 client.clone(),
                 instances.clone(),
+                clock_instances.clone(),
                 Variant::Quorum,
                 1,
                 1,
@@ -123,6 +161,7 @@ async fn main() -> anyhow::Result<()> {
             cops_session(
                 client.clone(),
                 instances.clone(),
+                clock_instances.clone(),
                 Variant::Quorum,
                 1,
                 1,
@@ -134,6 +173,7 @@ async fn main() -> anyhow::Result<()> {
                 cops_session(
                     client.clone(),
                     instances.clone(),
+                    clock_instances.clone(),
                     Variant::Quorum,
                     1,
                     2,
@@ -147,6 +187,7 @@ async fn main() -> anyhow::Result<()> {
                 cops_session(
                     client.clone(),
                     instances.clone(),
+                    clock_instances.clone(),
                     Variant::Untrusted,
                     1,
                     2,
@@ -158,6 +199,7 @@ async fn main() -> anyhow::Result<()> {
             cops_session(
                 client.clone(),
                 instances.clone(),
+                clock_instances.clone(),
                 Variant::Untrusted,
                 1,
                 2,
@@ -182,6 +224,7 @@ async fn main() -> anyhow::Result<()> {
                 cops_session(
                     client.clone(),
                     instances.clone(),
+                    clock_instances.clone(),
                     Variant::Quorum,
                     1,
                     2,
@@ -194,6 +237,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("cops-replicated") => {
+            let instances = terraform_instances().await?;
             for n in [1].into_iter().chain((2..=20).step_by(2)) {
                 cops_replicated_session(client.clone(), instances.clone(), 5, 1, n * 10, n * 4)
                     .await?
@@ -234,6 +278,7 @@ pub enum Variant {
 async fn mutex_session(
     client: reqwest::Client,
     instances: Vec<TerraformOutputInstance>,
+    clock_instances: Vec<TerraformOutputInstance>,
     mode: RequestMode,
     variant: Variant,
     num_region_processor: usize,
@@ -257,7 +302,6 @@ async fn mutex_session(
         let region_instances = region_instances.into_iter();
         instances.extend(region_instances.take(num_region_processor))
     }
-    let clock_instances = terraform_quorum_instances().await?;
     anyhow::ensure!(clock_instances.len() >= num_region * 2);
     anyhow::ensure!(!instances.is_empty());
 
@@ -434,6 +478,7 @@ async fn mutex_request_session(
 async fn cops_session(
     client: reqwest::Client,
     instances: Vec<TerraformOutputInstance>,
+    clock_instances: Vec<TerraformOutputInstance>,
     variant: Variant,
     num_region_replica: usize,
     num_replica_client: usize,
@@ -459,7 +504,6 @@ async fn cops_session(
         instances.extend((&mut region_instances).take(num_region_replica));
         client_instances.extend(region_instances.take(num_region_client));
     }
-    let clock_instances = terraform_quorum_instances().await?;
     anyhow::ensure!(clock_instances.len() >= num_region * 2);
     anyhow::ensure!(instances.len() == num_region * num_region_replica);
     anyhow::ensure!(client_instances.len() == num_region * num_region_client);

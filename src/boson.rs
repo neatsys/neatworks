@@ -77,8 +77,6 @@ pub struct AnnounceOk {
 pub struct QuorumClock {
     plain: DefaultVersion, // redundant, just for easier use
     #[derive_where(skip)]
-    id: u64, // to break tie in `arbitrary_cmp`, should not consider by `PartialOrd`
-    #[derive_where(skip)]
     cert: Vec<Verifiable<AnnounceOk>>,
 }
 
@@ -89,12 +87,6 @@ impl DepOrd for QuorumClock {
 
     fn deps(&self) -> impl Iterator<Item = crate::cops::KeyId> + '_ {
         self.plain.deps()
-    }
-}
-
-impl lamport_mutex::Clock for QuorumClock {
-    fn arbitrary_cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.plain.reduce(), self.id).cmp(&(other.plain.reduce(), other.id))
     }
 }
 
@@ -301,7 +293,6 @@ impl<
             let announce_ok = announce_ok.into_inner();
             let clock = QuorumClock {
                 plain: announce_ok.plain,
-                id: announce_ok.id,
                 cert: working_state.replies.into_values().collect(),
             };
             self.upcall.send((announce_ok.id, clock))?
@@ -478,8 +469,6 @@ impl VerifyClock for cops::SyncKey<QuorumClock> {
 pub struct NitroEnclavesClock {
     plain: DefaultVersion,
     #[derive_where(skip)]
-    id: u64,
-    #[derive_where(skip)]
     pub document: Payload,
 }
 
@@ -490,6 +479,15 @@ impl DepOrd for NitroEnclavesClock {
 
     fn deps(&self) -> impl Iterator<Item = crate::cops::KeyId> + '_ {
         self.plain.deps()
+    }
+}
+
+impl NitroEnclavesClock {
+    pub fn verify(&self) -> anyhow::Result<()> {
+        // if self.plain.is_empty() {
+        //     return Ok(());
+        // }
+        Ok(())
     }
 }
 
@@ -566,7 +564,6 @@ impl NitroEnclaves {
                 let document = Self::process_attestation(user_data)?;
                 let updated = NitroEnclavesClock {
                     plain,
-                    id,
                     document: Payload(document),
                 };
 
