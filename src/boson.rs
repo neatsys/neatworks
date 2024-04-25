@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::OnceLock};
+use std::{collections::HashMap, sync::OnceLock, time::SystemTime};
 
 use derive_where::derive_where;
 use serde::{Deserialize, Serialize};
@@ -484,9 +484,20 @@ impl DepOrd for NitroEnclavesClock {
 
 impl NitroEnclavesClock {
     pub fn verify(&self) -> anyhow::Result<()> {
-        // if self.plain.is_empty() {
-        //     return Ok(());
-        // }
+        if self.plain == Default::default() {
+            return Ok(());
+        }
+        use aws_nitro_enclaves_attestation::{AttestationProcess as _, AWS_ROOT_CERT};
+        use aws_nitro_enclaves_nsm_api::api::AttestationDoc;
+        let document = AttestationDoc::from_bytes(
+            &self.document,
+            AWS_ROOT_CERT,
+            SystemTime::UNIX_EPOCH.elapsed().unwrap().as_secs(),
+        )?;
+        use bincode::Options as _;
+        anyhow::ensure!(
+            document.user_data.as_deref() == Some(&bincode::options().serialize(&self.plain)?)
+        );
         Ok(())
     }
 }
@@ -505,6 +516,7 @@ impl NitroEnclaves {
     fn process_attestation(user_data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
         use aws_nitro_enclaves_nsm_api::api::Request::Attestation;
         let NitroEnclaves(fd) = NITRO_ENCLAVES_CONTEXT.get_or_init(Self::new);
+        // some silly code to avoid explicitly mention `serde_bytes::ByteBuf`
         let mut request = Attestation {
             user_data: Some(Default::default()),
             nonce: None,
@@ -560,7 +572,7 @@ impl NitroEnclaves {
                 let plain = prev
                     .plain
                     .update(merged.iter().map(|clock| &clock.plain), id);
-                let user_data = bincode::options().serialize(&(&plain, id))?;
+                let user_data = bincode::options().serialize(&plain)?;
                 let document = Self::process_attestation(user_data)?;
                 let updated = NitroEnclavesClock {
                     plain,
