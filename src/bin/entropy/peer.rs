@@ -170,3 +170,5 @@ pub async fn session(
     }
     Err(anyhow::format_err!("unexpected shutdown"))
 }
+
+// cSpell:words kademlia reqwest oneshot upcall ipfs quic rustix seedable

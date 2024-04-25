@@ -1,5 +1,7 @@
 /target
 
+.vscode/settings.json
+
 *.pdf
 
 ## https://github.com/github/gitignore/blob/main/Terraform.gitignore
