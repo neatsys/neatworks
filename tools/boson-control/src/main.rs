@@ -410,16 +410,16 @@ async fn mutex_session(
         result??
     }
     // print!("{lines}");
-    let path = Path::new("tools/boson-control/notebooks");
-    create_dir_all(path).await?;
-    write(
-        path.join(format!(
-            "mutex-{}.txt",
-            SystemTime::UNIX_EPOCH.elapsed()?.as_secs()
-        )),
-        lines,
-    )
-    .await?;
+    // let path = Path::new("tools/boson-control/notebooks");
+    // create_dir_all(path).await?;
+    // write(
+    //     path.join(format!(
+    //         "mutex-{}.txt",
+    //         SystemTime::UNIX_EPOCH.elapsed()?.as_secs()
+    //     )),
+    //     lines,
+    // )
+    // .await?;
     Ok(())
 }
 
@@ -436,11 +436,11 @@ async fn mutex_start_session(
         .error_for_status()?;
     loop {
         sleep(Duration::from_millis(1000)).await;
-        // client
-        //     .get(format!("{url}/ok"))
-        //     .send()
-        //     .await?
-        //     .error_for_status()?;
+        client
+            .get(format!("{url}/ok"))
+            .send()
+            .await?
+            .error_for_status()?;
     }
 }
 

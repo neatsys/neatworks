@@ -49,6 +49,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/stop-quorum", post(stop))
         .with_state(AppState {
             session: Default::default(),
+            channel: Default::default(),
         });
     let ip = std::env::args().nth(1);
     let ip = ip.as_deref().unwrap_or("0.0.0.0");
@@ -62,12 +63,17 @@ async fn main() -> anyhow::Result<()> {
 #[derive(Debug, Clone)]
 struct AppState {
     session: Arc<Mutex<Option<AppSession>>>,
+    channel: Arc<Mutex<Option<AppChannel>>>,
 }
 
 #[derive(Debug)]
 struct AppSession {
     handle: JoinHandle<anyhow::Result<()>>,
     cancel: CancellationToken,
+}
+
+#[derive(Debug)]
+struct AppChannel {
     event_sender: UnboundedSender<mutex::Event>,
     upcall: UnboundedReceiver<Upcall>,
 }
@@ -138,12 +144,12 @@ async fn mutex_start(
                 cancel.clone(),
             )),
         };
-        *session = Some(AppSession {
-            handle,
-            cancel,
+        *session = Some(AppSession { handle, cancel });
+        let replaced = state.channel.lock().await.replace(AppChannel {
             event_sender,
             upcall: upcall_receiver,
         });
+        anyhow::ensure!(replaced.is_none());
         anyhow::Ok(())
     }
     .await
@@ -156,12 +162,16 @@ async fn mutex_start(
 
 async fn stop(State(state): State<AppState>) -> StatusCode {
     if let Err(err) = async {
-        let mut session = state.session.lock().await;
-        let Some(session) = session.take() else {
+        let Some(session) = state.session.lock().await.take() else {
             anyhow::bail!("missing session")
         };
         session.cancel.cancel();
-        session.handle.await?
+        session.handle.await??;
+        let Some(channel) = state.channel.lock().await.take() else {
+            anyhow::bail!("missing channel")
+        };
+        drop(channel);
+        Ok(())
     }
     .await
     {
@@ -174,20 +184,20 @@ async fn stop(State(state): State<AppState>) -> StatusCode {
 async fn mutex_request(State(state): State<AppState>, at: Json<SystemTime>) -> Response {
     let task = async {
         sleep(at.duration_since(SystemTime::now())?).await;
-        let mut state_session = state.session.lock().await;
-        let Some(session) = state_session.as_mut() else {
+        let mut channel = state.channel.lock().await;
+        let Some(channel) = channel.as_mut() else {
             anyhow::bail!("missing session")
         };
         let start = Instant::now();
-        session.event_sender.send(mutex::Event::Request)?;
+        channel.event_sender.send(mutex::Event::Request)?;
         // TODO timeout
-        let result = session.upcall.recv().await;
+        let result = channel.upcall.recv().await;
         if result.is_none() {
-            state_session.take().unwrap().handle.await??;
+            state.session.lock().await.take().unwrap().handle.await??;
             anyhow::bail!("unreachable")
         }
         anyhow::ensure!(matches!(result, Some(Upcall::RequestOk(_))), "{result:?}");
-        session.event_sender.send(mutex::Event::Release)?;
+        channel.event_sender.send(mutex::Event::Release)?;
         Ok(Json(start.elapsed()))
     };
     match task.await {
@@ -212,12 +222,12 @@ async fn cops_start_client(
             Replicated(_) => tokio::spawn(cops::pbft_client_session(config, upcall_sender)),
             Quorum(_) => tokio::spawn(cops::quorum_client_session(config, upcall_sender)),
         };
-        *session = Some(AppSession {
-            handle,
-            cancel,
+        *session = Some(AppSession { handle, cancel });
+        let replaced = state.channel.lock().await.replace(AppChannel {
             event_sender,
             upcall: upcall_receiver,
         });
+        anyhow::ensure!(replaced.is_none());
         anyhow::Ok(())
     }
     .await
@@ -230,21 +240,21 @@ async fn cops_start_client(
 
 async fn cops_poll_results(State(state): State<AppState>) -> Response {
     let task = async {
-        let mut state_session = state.session.lock().await;
-        let Some(session) = state_session.as_mut() else {
+        let mut channel = state.channel.lock().await;
+        let Some(channel) = channel.as_mut() else {
             anyhow::bail!("unimplemented")
         };
-        if !session.upcall.is_closed() {
+        if !channel.upcall.is_closed() {
             Ok(None)
         } else {
             let mut results = Vec::new();
-            while let Ok(result) = session.upcall.try_recv() {
+            while let Ok(result) = channel.upcall.try_recv() {
                 let Upcall::ThroughputLatency(throughput, latency) = result else {
                     anyhow::bail!("unimplemented")
                 };
                 results.push((throughput, latency))
             }
-            state_session.take().unwrap().handle.await??;
+            state.session.lock().await.take().unwrap().handle.await??;
             Ok(Some(results))
         }
     };
@@ -270,12 +280,12 @@ async fn cops_start_server(
             Replicated(_) => tokio::spawn(cops::pbft_server_session(config, cancel.clone())),
             Quorum(_) => tokio::spawn(cops::quorum_server_session(config, cancel.clone())),
         };
-        *session = Some(AppSession {
-            handle,
-            cancel,
+        *session = Some(AppSession { handle, cancel });
+        let replaced = state.channel.lock().await.replace(AppChannel {
             event_sender,
             upcall: upcall_receiver,
         });
+        anyhow::ensure!(replaced.is_none());
         anyhow::Ok(())
     }
     .await
@@ -297,12 +307,12 @@ async fn start_quorum(
         let (_, upcall_receiver) = unbounded_channel();
         let cancel = CancellationToken::new();
         let handle = tokio::spawn(quorum::session(config, cancel.clone()));
-        *session = Some(AppSession {
-            handle,
-            cancel,
+        *session = Some(AppSession { handle, cancel });
+        let replaced = state.channel.lock().await.replace(AppChannel {
             event_sender,
             upcall: upcall_receiver,
         });
+        anyhow::ensure!(replaced.is_none());
         anyhow::Ok(())
     }
     .await
