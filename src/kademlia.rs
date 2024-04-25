@@ -69,6 +69,8 @@ impl<K: Debug, A: Debug> Debug for PeerRecord<K, A> {
 impl<K: DigestHash, A> PeerRecord<K, A> {
     pub fn new(key: K, addr: A) -> Self {
         Self {
+            // an unnecessary hashing for `K == schnorrkel::PublicKey`, which is already 32 bytes
+            // save for now for simple compatibility
             id: key.sha256(),
             key,
             addr,

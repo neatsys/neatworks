@@ -1,5 +1,6 @@
 use std::hash::{Hash, Hasher};
 
+use blake2::Blake2b;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -23,6 +24,12 @@ pub trait DigestHasher {
 }
 
 impl DigestHasher for Sha256 {
+    fn write(&mut self, bytes: &[u8]) {
+        self.update(bytes)
+    }
+}
+
+impl DigestHasher for Blake2b<blake2::digest::consts::U32> {
     fn write(&mut self, bytes: &[u8]) {
         self.update(bytes)
     }
@@ -85,6 +92,12 @@ pub trait DigestHash: Hash {
 
     fn sha256(&self) -> H256 {
         let mut state = Sha256::new();
+        DigestHash::hash(self, &mut state);
+        H256(state.finalize().into())
+    }
+
+    fn blake2(&self) -> H256 {
+        let mut state = Blake2b::<blake2::digest::consts::U32>::new();
         DigestHash::hash(self, &mut state);
         H256(state.finalize().into())
     }

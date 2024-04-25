@@ -85,6 +85,7 @@ aws-nitro-enclaves-nsm-api = { version = "0.4.0", optional = true }
 entropy-control-messages = { version = "0.1.0", path = "tools/entropy-control-messages" }
 wirehair = { git = "https://github.com/neatsys/wirehair", version = "0.1.2", optional = true }
 reqwest = { version = "0.12.4", features = ["json", "multipart"], optional = true }
+blake2 = "0.10.6"
 
 [dev-dependencies]
 proptest = "1.4.0"
