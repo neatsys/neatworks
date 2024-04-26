@@ -113,6 +113,10 @@ resource "aws_instance" "main" {
   vpc_security_group_ids = [resource.aws_security_group.main.id]
   key_name               = "Ephemeral"
 
+  enclave_options {
+    enabled = true
+  }
+
   # root_block_device {
   #   volume_size = 20
   # }

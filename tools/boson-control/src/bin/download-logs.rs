@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use boson_control::terraform_instances;
+use boson_control::terraform_output;
 use tokio::{fs::create_dir_all, process::Command, task::JoinSet, time::sleep};
 
 #[tokio::main(flavor = "current_thread")]
@@ -8,7 +8,7 @@ async fn main() -> anyhow::Result<()> {
     create_dir_all("boson.log").await?;
     println!("Spawning host sessions");
     let mut sessions = JoinSet::new();
-    for instance in terraform_instances().await? {
+    for instance in terraform_output("mutex_instances").await? {
         sessions.spawn(async move { host_session(instance.public_dns).await });
     }
     let result = join_sessions(&mut sessions).await;

@@ -8,7 +8,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use boson_control::{terraform_instances, terraform_quorum_instances, TerraformOutputInstance};
+use boson_control::{terraform_output, TerraformOutputInstance};
 use tokio::{
     fs::{create_dir_all, write},
     task::JoinSet,
@@ -49,8 +49,8 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("mutex") => {
-            let instances = terraform_instances().await?;
-            let clock_instances = terraform_quorum_instances().await?;
+            let instances = terraform_output("mutex_instances").await?;
+            let clock_instances = terraform_output("quorum_instances").await?;
             for n in 1..=20 {
                 mutex_session(
                     client.clone(),
@@ -109,8 +109,8 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("cops") => {
-            let instances = terraform_instances().await?;
-            let clock_instances = terraform_quorum_instances().await?;
+            let instances = terraform_output("cops_instances").await?;
+            let clock_instances = terraform_output("quorum_instances").await?;
             cops_session(
                 client.clone(),
                 instances.clone(),
@@ -237,7 +237,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("cops-replicated") => {
-            let instances = terraform_instances().await?;
+            let instances = terraform_output("cops_instances").await?;
             for n in [1].into_iter().chain((2..=20).step_by(2)) {
                 cops_replicated_session(client.clone(), instances.clone(), 5, 1, n * 10, n * 4)
                     .await?

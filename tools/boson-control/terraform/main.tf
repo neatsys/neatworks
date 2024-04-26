@@ -88,10 +88,14 @@ module "mutex" {
   instance_count = 0
 }
 
-output "instances" {
-  value = concat(
-    module.microbench[*].instances,
-    module.microbench_quorum[*].instances,
-    module.mutex[*].instances,
-  )
+output "microbench_instances" {
+  value = flatten(module.microbench[*].instances)
+}
+
+output "microbench_quorum_instances" {
+  value = flatten(module.microbench_quorum[*].instances)
+}
+
+output "mutex_instances" {
+  value = flatten(module.mutex[*].instances)
 }
