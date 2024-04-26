@@ -18,10 +18,10 @@ use crate::{
 };
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Update<C>(C, Vec<C>, u64);
+pub struct Update<C>(pub C, pub Vec<C>, pub u64);
 
 // feel lazy to define event type for replying
-type UpdateOk<C> = (u64, C);
+pub type UpdateOk<C> = (u64, C);
 
 pub struct Lamport<E>(pub E, pub u64);
 
@@ -497,9 +497,11 @@ impl DepOrd for NitroEnclavesClock {
 
 #[cfg(feature = "nitro-enclaves")]
 impl NitroEnclavesClock {
-    pub fn verify(&self) -> anyhow::Result<()> {
+    pub fn verify(
+        &self,
+    ) -> anyhow::Result<Option<aws_nitro_enclaves_nsm_api::api::AttestationDoc>> {
         if self.plain.is_genesis() {
-            return Ok(());
+            return Ok(None);
         }
         use aws_nitro_enclaves_attestation::{AttestationProcess as _, AWS_ROOT_CERT};
         use aws_nitro_enclaves_nsm_api::api::AttestationDoc;
@@ -515,7 +517,7 @@ impl NitroEnclavesClock {
         anyhow::ensure!(
             document.user_data.as_deref() == Some(&bincode::options().serialize(&self.plain)?)
         );
-        Ok(())
+        Ok(Some(document))
     }
 }
 
@@ -569,7 +571,7 @@ impl NitroSecureModule {
             None,
         )?;
         bind(socket_fd.as_raw_fd(), &VsockAddr::new(0xFFFFFFFF, 5005))?;
-        listen(&socket_fd, Backlog::new(128)?)?;
+        listen(&socket_fd, Backlog::new(64)?)?;
         let mut buf = Vec::new();
         loop {
             let fd = accept(socket_fd.as_raw_fd())?;
@@ -593,7 +595,8 @@ impl NitroSecureModule {
 
             let buf = bincode::options().serialize(&(id, updated))?;
             nitro_enclaves::send_u64(fd, buf.len() as _)?;
-            nitro_enclaves::send_loop(fd, &buf)?
+            nitro_enclaves::send_loop(fd, &buf)?;
+            nix::unistd::close(fd)?;
         }
     }
 }
