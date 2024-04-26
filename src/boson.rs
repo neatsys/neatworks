@@ -1,7 +1,8 @@
-use std::{collections::HashMap, time::SystemTime};
+use std::collections::HashMap;
 
 use derive_where::derive_where;
 use serde::{Deserialize, Serialize};
+use tokio::{sync::mpsc::UnboundedReceiver, task::JoinSet};
 use tracing::{debug, warn};
 
 use crate::{
@@ -17,7 +18,7 @@ use crate::{
 };
 
 #[derive(Debug, Serialize, Deserialize)]
-struct Update<C>(C, Vec<C>, u64);
+pub struct Update<C>(C, Vec<C>, u64);
 
 // feel lazy to define event type for replying
 type UpdateOk<C> = (u64, C);
@@ -92,7 +93,7 @@ impl DepOrd for QuorumClock {
 
 impl QuorumClock {
     pub fn verify(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()> {
-        if self.plain == DefaultVersion::default() {
+        if self.plain.is_genesis() {
             anyhow::ensure!(self.cert.is_empty()); // not necessary, just as sanity check
             return Ok(());
         }
@@ -467,9 +468,21 @@ impl VerifyClock for cops::SyncKey<QuorumClock> {
 #[derive(Debug, Serialize, Deserialize)]
 #[derive_where(PartialOrd, PartialEq)]
 pub struct NitroEnclavesClock {
-    plain: DefaultVersion,
+    pub plain: DefaultVersion,
     #[derive_where(skip)]
     pub document: Payload,
+}
+
+impl TryFrom<DefaultVersion> for NitroEnclavesClock {
+    type Error = anyhow::Error;
+
+    fn try_from(value: DefaultVersion) -> Result<Self, Self::Error> {
+        anyhow::ensure!(value.is_genesis());
+        Ok(Self {
+            plain: value,
+            document: Default::default(),
+        })
+    }
 }
 
 impl DepOrd for NitroEnclavesClock {
@@ -482,9 +495,10 @@ impl DepOrd for NitroEnclavesClock {
     }
 }
 
+#[cfg(feature = "nitro-enclaves")]
 impl NitroEnclavesClock {
     pub fn verify(&self) -> anyhow::Result<()> {
-        if self.plain == Default::default() {
+        if self.plain.is_genesis() {
             return Ok(());
         }
         use aws_nitro_enclaves_attestation::{AttestationProcess as _, AWS_ROOT_CERT};
@@ -492,7 +506,10 @@ impl NitroEnclavesClock {
         let document = AttestationDoc::from_bytes(
             &self.document,
             AWS_ROOT_CERT,
-            SystemTime::UNIX_EPOCH.elapsed().unwrap().as_secs(),
+            std::time::SystemTime::UNIX_EPOCH
+                .elapsed()
+                .unwrap()
+                .as_secs(),
         )?;
         use bincode::Options as _;
         anyhow::ensure!(
@@ -556,33 +573,27 @@ impl NitroSecureModule {
         let mut buf = Vec::new();
         loop {
             let fd = accept(socket_fd.as_raw_fd())?;
-            loop {
-                let len = match nitro_enclaves::recv_u64(fd) {
-                    Ok(len) => len,
-                    Err(err) if err.is::<nitro_enclaves::Closed>() => break,
-                    Err(err) => Err(err)?,
-                };
-                buf.resize(len as _, 0u8);
-                nitro_enclaves::recv_loop(fd, &mut buf)?;
+            let len = nitro_enclaves::recv_u64(fd)?;
+            buf.resize(len as _, 0u8);
+            nitro_enclaves::recv_loop(fd, &mut buf)?;
 
-                // TODO multithreading the following?
-                let Update(prev, merged, id) =
-                    crate::net::deserialize::<Update<NitroEnclavesClock>>(&buf)?;
-                // TODO verify
-                let plain = prev
-                    .plain
-                    .update(merged.iter().map(|clock| &clock.plain), id);
-                let user_data = bincode::options().serialize(&plain)?;
-                let document = nsm.process_attestation(user_data)?;
-                let updated = NitroEnclavesClock {
-                    plain,
-                    document: Payload(document),
-                };
+            // TODO multithreading the following?
+            let Update(prev, merged, id) =
+                bincode::options().deserialize::<Update<NitroEnclavesClock>>(&buf)?;
+            // TODO verify
+            let plain = prev
+                .plain
+                .update(merged.iter().map(|clock| &clock.plain), id);
+            let user_data = bincode::options().serialize(&plain)?;
+            let document = nsm.process_attestation(user_data)?;
+            let updated = NitroEnclavesClock {
+                plain,
+                document: Payload(document),
+            };
 
-                let buf = bincode::options().serialize(&(id, updated))?;
-                nitro_enclaves::send_u64(fd, buf.len() as _)?;
-                nitro_enclaves::send_loop(fd, &buf)?
-            }
+            let buf = bincode::options().serialize(&(id, updated))?;
+            nitro_enclaves::send_u64(fd, buf.len() as _)?;
+            nitro_enclaves::send_loop(fd, &buf)?
         }
     }
 }
@@ -594,7 +605,54 @@ impl Drop for NitroSecureModule {
     }
 }
 
-pub mod nitro_enclaves {
+pub async fn nitro_enclaves_portal_session(
+    cid: u32,
+    mut events: UnboundedReceiver<Update<NitroEnclavesClock>>,
+    sender: impl SendEvent<UpdateOk<NitroEnclavesClock>> + Clone + Send + 'static,
+) -> anyhow::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    use bincode::Options;
+    use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
+
+    let mut sessions = JoinSet::new();
+    loop {
+        enum Select {
+            Recv(Option<Update<NitroEnclavesClock>>),
+            JoinNext(anyhow::Result<()>),
+        }
+        match tokio::select! {
+            recv = events.recv() => Select::Recv(recv),
+            Some(result) = sessions.join_next() => Select::JoinNext(result?),
+        } {
+            Select::Recv(update) => {
+                let Some(update) = update else {
+                    anyhow::bail!("unreachable")
+                };
+                let mut sender = sender.clone();
+                sessions.spawn_blocking(move || {
+                    let fd = socket(
+                        AddressFamily::Vsock,
+                        SockType::Stream,
+                        SockFlag::empty(),
+                        None,
+                    )?;
+                    connect(fd.as_raw_fd(), &VsockAddr::new(cid, 5005))?;
+                    let buf = bincode::options().serialize(&update)?;
+                    nitro_enclaves::send_u64(fd.as_raw_fd(), buf.len() as _)?;
+                    nitro_enclaves::send_loop(fd.as_raw_fd(), &buf)?;
+                    let len = nitro_enclaves::recv_u64(fd.as_raw_fd())?;
+                    let mut buf = vec![0; len as _];
+                    nitro_enclaves::recv_loop(fd.as_raw_fd(), &mut buf)?;
+                    sender.send(bincode::options().deserialize(&buf)?)
+                });
+            }
+            Select::JoinNext(result) => result?,
+        }
+    }
+}
+
+mod nitro_enclaves {
     use std::{mem::size_of, os::fd::RawFd};
 
     use nix::sys::socket::{recv, send, MsgFlags};

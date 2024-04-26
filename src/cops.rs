@@ -593,11 +593,15 @@ pub fn to_replica_on_buf<V: DeserializeOwned, A: DeserializeOwned>(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-pub struct DefaultVersion(BTreeMap<KeyId, u32>);
+pub struct DefaultVersion(pub BTreeMap<KeyId, u32>);
 
 impl DefaultVersion {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn is_genesis(&self) -> bool {
+        self.0.values().all(|n| *n == 0)
     }
 
     fn merge(&self, other: &Self) -> Self {
@@ -672,6 +676,17 @@ impl<E: SendEvent<events::UpdateOk<DefaultVersion>>> SendEvent<events::Update<De
             version_deps: update.prev.update(update.deps.iter(), update.id),
         };
         self.0.send(update_ok)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_is_genesis() -> anyhow::Result<()> {
+        anyhow::ensure!(DefaultVersion::default().is_genesis());
+        Ok(())
     }
 }
 
