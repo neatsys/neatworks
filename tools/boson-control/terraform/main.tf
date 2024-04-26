@@ -45,146 +45,53 @@ variable "state" {
 variable "mode" {
   type = string
   validation {
-    condition     = var.mode == "one" || var.mode == "five"
-    error_message = "Mode must be either 'one' or 'five'."
+    condition     = contains(["mutex", "cops", "microbench"], var.mode)
+    error_message = "Unexpected mode."
   }
 }
 
-variable "instance-count" {
+variable "n" {
   type    = number
   default = 1
 }
 
-module "group-1" {
+module "microbench" {
   source = "./group"
+  count  = var.mode == "microbench" ? 1 : 0
   providers = {
     aws = aws.ap-southeast-1
   }
-
-  instance-state = var.state
-  instance-count = var.mode == "one" ? var.instance-count : 0
+  instance_state = var.state
 }
 
-module "group-5-1" {
+module "microbench_quorum" {
   source = "./group"
+  count  = var.mode == "microbench" ? 1 : 0
   providers = {
-    aws = aws.ap-east-1
+    aws = aws.ap-southeast-1
   }
-
-  instance-count = var.mode == "five" ? var.instance-count : 0
+  instance_state = var.state
+  instance_count = 0
 }
 
-
-module "group-5-2" {
-  source = "./group"
+module "mutex" {
+  source = "./geo_groups"
+  count  = var.mode == "mutex" ? 1 : 0
   providers = {
-    aws = aws.us-west-1
+    aws.ap-east-1    = aws.ap-east-1
+    aws.us-west-1    = aws.us-west-1
+    aws.eu-central-1 = aws.eu-central-1
+    aws.sa-east-1    = aws.sa-east-1
+    aws.af-south-1   = aws.af-south-1
   }
-
-  instance-count = var.mode == "five" ? var.instance-count : 0
-}
-
-module "group-5-3" {
-  source = "./group"
-  providers = {
-    aws = aws.eu-central-1
-  }
-
-  instance-count = var.mode == "five" ? var.instance-count : 0
-}
-
-module "group-5-4" {
-  source = "./group"
-  providers = {
-    aws = aws.sa-east-1
-  }
-
-  instance-count = var.mode == "five" ? var.instance-count : 0
-}
-
-module "group-5-5" {
-  source = "./group"
-  providers = {
-    aws = aws.af-south-1
-  }
-
-  instance-count = var.mode == "five" ? var.instance-count : 0
+  instance_state = var.state
+  instance_count = 0
 }
 
 output "instances" {
   value = concat(
-    module.group-1.instances,
-    module.group-5-1.instances,
-    module.group-5-2.instances,
-    module.group-5-3.instances,
-    module.group-5-4.instances,
-    module.group-5-5.instances,
-  )
-}
-
-
-module "group-5-1-quorum" {
-  source = "./group"
-  providers = {
-    aws = aws.ap-east-1
-  }
-
-  instance-count = var.mode == "five" ? 2 : 0
-  # instance-type = "c5a.16xlarge"
-  instance-type = "c5a.xlarge"
-}
-
-
-module "group-5-2-quorum" {
-  source = "./group"
-  providers = {
-    aws = aws.us-west-1
-  }
-
-  instance-count = var.mode == "five" ? 2 : 0
-  # instance-type = "c5a.16xlarge"
-  instance-type = "c5a.xlarge"
-}
-
-module "group-5-3-quorum" {
-  source = "./group"
-  providers = {
-    aws = aws.eu-central-1
-  }
-
-  instance-count = var.mode == "five" ? 2 : 0
-  # instance-type = "c5a.16xlarge"
-  instance-type = "c5a.xlarge"
-}
-
-module "group-5-4-quorum" {
-  source = "./group"
-  providers = {
-    aws = aws.sa-east-1
-  }
-
-  instance-count = var.mode == "five" ? 2 : 0
-  # instance-type = "c5a.16xlarge"
-  instance-type = "c5a.xlarge"
-}
-
-module "group-5-5-quorum" {
-  source = "./group"
-  providers = {
-    aws = aws.af-south-1
-  }
-
-  instance-count = var.mode == "five" ? 2 : 0
-  # instance-type = "c5a.16xlarge"
-  instance-type = "c5a.xlarge"
-}
-
-output "quorum-instances" {
-  value = concat(
-    module.group-5-1-quorum.instances,
-    module.group-5-2-quorum.instances,
-    module.group-5-3-quorum.instances,
-    module.group-5-4-quorum.instances,
-    module.group-5-5-quorum.instances,
+    module.microbench[*].instances,
+    module.microbench_quorum[*].instances,
+    module.mutex[*].instances,
   )
 }
