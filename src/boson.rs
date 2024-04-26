@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::OnceLock, time::SystemTime};
+use std::{collections::HashMap, time::SystemTime};
 
 use derive_where::derive_where;
 use serde::{Deserialize, Serialize};
@@ -503,19 +503,18 @@ impl NitroEnclavesClock {
 }
 
 #[derive(Debug)]
-pub struct NitroEnclaves(pub i32);
-
-pub static NITRO_ENCLAVES_CONTEXT: OnceLock<NitroEnclaves> = OnceLock::new();
+pub struct NitroSecureModule(pub i32);
 
 #[cfg(feature = "nitro-enclaves")]
-impl NitroEnclaves {
-    fn new() -> Self {
-        Self(aws_nitro_enclaves_nsm_api::driver::nsm_init())
+impl NitroSecureModule {
+    fn new() -> anyhow::Result<Self> {
+        let fd = aws_nitro_enclaves_nsm_api::driver::nsm_init();
+        anyhow::ensure!(fd >= 0);
+        Ok(Self(fd))
     }
 
-    fn process_attestation(user_data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+    fn process_attestation(&self, user_data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
         use aws_nitro_enclaves_nsm_api::api::Request::Attestation;
-        let NitroEnclaves(fd) = NITRO_ENCLAVES_CONTEXT.get_or_init(Self::new);
         // some silly code to avoid explicitly mention `serde_bytes::ByteBuf`
         let mut request = Attestation {
             user_data: Some(Default::default()),
@@ -530,11 +529,11 @@ impl NitroEnclaves {
             unreachable!()
         };
         buf.extend(user_data);
-        let response = aws_nitro_enclaves_nsm_api::driver::nsm_process_request(*fd, request);
-        let aws_nitro_enclaves_nsm_api::api::Response::Attestation { document } = response else {
-            anyhow::bail!("unimplemented")
-        };
-        Ok(document)
+        match aws_nitro_enclaves_nsm_api::driver::nsm_process_request(self.0, request) {
+            aws_nitro_enclaves_nsm_api::api::Response::Attestation { document } => Ok(document),
+            aws_nitro_enclaves_nsm_api::api::Response::Error(err) => anyhow::bail!("{err:?}"),
+            _ => anyhow::bail!("unimplemented"),
+        }
     }
 
     pub fn run() -> anyhow::Result<()> {
@@ -545,6 +544,7 @@ impl NitroEnclaves {
             accept, bind, listen, socket, AddressFamily, Backlog, SockFlag, SockType, VsockAddr,
         };
 
+        let nsm = Self::new()?;
         let socket_fd = socket(
             AddressFamily::Vsock,
             SockType::Stream,
@@ -573,7 +573,7 @@ impl NitroEnclaves {
                     .plain
                     .update(merged.iter().map(|clock| &clock.plain), id);
                 let user_data = bincode::options().serialize(&plain)?;
-                let document = Self::process_attestation(user_data)?;
+                let document = nsm.process_attestation(user_data)?;
                 let updated = NitroEnclavesClock {
                     plain,
                     document: Payload(document),
@@ -584,6 +584,13 @@ impl NitroEnclaves {
                 nitro_enclaves::send_loop(fd, &buf)?
             }
         }
+    }
+}
+
+#[cfg(feature = "nitro-enclaves")]
+impl Drop for NitroSecureModule {
+    fn drop(&mut self) {
+        aws_nitro_enclaves_nsm_api::driver::nsm_exit(self.0)
     }
 }
 
