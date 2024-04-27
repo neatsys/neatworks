@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
             "--profile",
             "artifact",
             "--features",
-            "nitro-enclaves",
+            "nitro-enclaves,tikv-jemallocator",
             "--example",
             "nitro-enclaves-clock-validator",
         ])

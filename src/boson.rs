@@ -465,7 +465,7 @@ impl VerifyClock for cops::SyncKey<QuorumClock> {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[derive_where(PartialOrd, PartialEq)]
 pub struct NitroEnclavesClock {
     pub plain: DefaultVersion,
@@ -556,6 +556,16 @@ impl NitroSecureModule {
         }
     }
 
+    fn describe_pcr(&self, index: u16) -> anyhow::Result<Vec<u8>> {
+        use aws_nitro_enclaves_nsm_api::api::Request::DescribePCR;
+        match aws_nitro_enclaves_nsm_api::driver::nsm_process_request(self.0, DescribePCR { index })
+        {
+            aws_nitro_enclaves_nsm_api::api::Response::DescribePCR { lock: _, data } => Ok(data),
+            aws_nitro_enclaves_nsm_api::api::Response::Error(err) => anyhow::bail!("{err:?}"),
+            _ => anyhow::bail!("unimplemented"),
+        }
+    }
+
     pub async fn run() -> anyhow::Result<()> {
         use std::os::fd::AsRawFd;
 
@@ -567,6 +577,12 @@ impl NitroSecureModule {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let nsm = std::sync::Arc::new(Self::new()?);
+        let pcrs = [
+            nsm.describe_pcr(0)?,
+            nsm.describe_pcr(1)?,
+            nsm.describe_pcr(2)?,
+        ];
+
         let socket_fd = socket(
             AddressFamily::Vsock,
             SockType::Stream,
@@ -593,13 +609,22 @@ impl NitroSecureModule {
             } {
                 Select::Accept((mut stream, _)) => {
                     let nsm = nsm.clone();
+                    let pcrs = pcrs.clone();
                     sessions.spawn(async move {
                         let len = stream.read_u64_le().await?;
                         let mut buf = vec![0; len as _];
                         stream.read_exact(&mut buf).await?;
                         let Update(prev, merged, id) =
                             bincode::options().deserialize::<Update<NitroEnclavesClock>>(&buf)?;
-                        // TODO verify
+                        for clock in [&prev].into_iter().chain(&merged) {
+                            if let Some(document) = clock.verify()? {
+                                for (i, pcr) in pcrs.iter().enumerate() {
+                                    anyhow::ensure!(
+                                        document.pcrs.get(&i).map(|pcr| &**pcr) == Some(pcr)
+                                    )
+                                }
+                            }
+                        }
                         let plain = prev
                             .plain
                             .update(merged.iter().map(|clock| &clock.plain), id);
