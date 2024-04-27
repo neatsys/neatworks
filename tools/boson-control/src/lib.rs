@@ -1,7 +1,7 @@
-use std::{collections::HashMap, net::IpAddr};
+use std::{collections::HashMap, future::Future, net::IpAddr};
 
 use serde::Deserialize;
-use tokio::process::Command;
+use tokio::{process::Command, task::JoinSet};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TerraformOutputInstance {
@@ -43,4 +43,18 @@ pub fn retain_instances(
         }
     }
     region_instances.into_values().collect::<Vec<_>>().concat()
+}
+
+pub async fn instance_sessions<F: Future<Output = anyhow::Result<()>> + Send + 'static>(
+    instances: &[TerraformOutputInstance],
+    session: impl Fn(String) -> F,
+) -> anyhow::Result<()> {
+    let mut sessions = JoinSet::new();
+    for instance in instances {
+        sessions.spawn(session(instance.public_dns.clone()));
+    }
+    while let Some(result) = sessions.join_next().await {
+        result??
+    }
+    Ok(())
 }

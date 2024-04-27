@@ -1,37 +1,34 @@
-use std::env::args;
-
 use augustus::{
     boson::{nitro_enclaves_portal_session, NitroEnclavesClock, Update, UpdateOk},
     cops::DefaultVersion,
 };
 use tokio::{sync::mpsc::unbounded_channel, time::Instant};
 
+const CID: u32 = 16;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cid = args()
-        .nth(1)
-        .ok_or(anyhow::format_err!("missing cid"))?
-        .parse()?;
     let (update_sender, update_receiver) = unbounded_channel();
     let (update_ok_sender, mut update_ok_receiver) = unbounded_channel::<UpdateOk<_>>();
     let portal_session = tokio::spawn(nitro_enclaves_portal_session(
-        cid,
+        CID,
         update_receiver,
         update_ok_sender,
     ));
     let session = async move {
-        let start = Instant::now();
-        update_sender.send(Update(
-            NitroEnclavesClock::try_from(DefaultVersion::default())?,
-            Default::default(),
-            0,
-        ))?;
-        let Some((_, clock)) = update_ok_receiver.recv().await else {
-            anyhow::bail!("missing UpdateOk")
-        };
-        println!("{:?}", start.elapsed());
-        let document = clock.verify()?;
-        println!("{document:?}");
+        let mut clock = NitroEnclavesClock::try_from(DefaultVersion::default())?;
+        for i in 0..4 {
+            let start = Instant::now();
+            update_sender.send(Update(clock, Default::default(), i))?;
+            let Some((_, updated_clock)) = update_ok_receiver.recv().await else {
+                anyhow::bail!("missing UpdateOk")
+            };
+            println!("{:?}", start.elapsed());
+            let document = updated_clock.verify()?;
+            anyhow::ensure!(document.is_some());
+            // println!("{document:?}");
+            clock = updated_clock
+        }
         anyhow::Ok(())
     };
     'select: {

@@ -17,11 +17,8 @@ pub mod workload;
 pub mod entropy;
 
 #[cfg(all(not(target_env = "msvc"), feature = "tikv-jemallocator"))]
-use tikv_jemallocator::Jemalloc;
-
-#[cfg(all(not(target_env = "msvc"), feature = "tikv-jemallocator"))]
 #[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 // develop notes that does not apply to any specific code
 // (start writing dev docs usually follows by a complete code rewriting, hope
@@ -108,7 +105,7 @@ static GLOBAL: Jemalloc = Jemalloc;
 // attractive even if it is completely useless
 //
 // there are also extreme cases of setting up development e.g. some part of code
-// has dependencies that requires a nightly compiler. i have finally move the 
+// has dependencies that requires a nightly compiler. i have finally move the
 // code into a separated repository, since it cannot really share any built
 // artifact with the other code and becomes pointless to stay together. (and
 // also because i don't really like that part of code.) anyway, we are in the
