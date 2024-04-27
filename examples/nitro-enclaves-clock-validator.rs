@@ -1,5 +1,6 @@
 use augustus::boson::NitroSecureModule;
 
-fn main() -> anyhow::Result<()> {
-    NitroSecureModule::run()
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    NitroSecureModule::run().await
 }

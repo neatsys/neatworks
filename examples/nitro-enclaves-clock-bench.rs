@@ -17,13 +17,14 @@ async fn main() -> anyhow::Result<()> {
     ));
     let session = async move {
         let mut clock = NitroEnclavesClock::try_from(DefaultVersion::default())?;
-        for i in 0..4 {
+        for i in 0..1 << 17 {
             let start = Instant::now();
-            update_sender.send(Update(clock, Default::default(), i))?;
+            // update_sender.send(Update(clock, Default::default(), i))?;
+            update_sender.send(Update(clock, Default::default(), 0))?;
             let Some((_, updated_clock)) = update_ok_receiver.recv().await else {
                 anyhow::bail!("missing UpdateOk")
             };
-            println!("{:?}", start.elapsed());
+            println!("{i:8} {:?}", start.elapsed());
             let document = updated_clock.verify()?;
             anyhow::ensure!(document.is_some());
             // println!("{document:?}");

@@ -513,9 +513,10 @@ impl NitroEnclavesClock {
                 .unwrap()
                 .as_secs(),
         )?;
-        use bincode::Options as _;
+        use crate::crypto::DigestHash as _;
         anyhow::ensure!(
-            document.user_data.as_deref() == Some(&bincode::options().serialize(&self.plain)?)
+            document.user_data.as_ref().map(|user_data| &***user_data)
+                == Some(&self.plain.sha256().to_fixed_bytes()[..])
         );
         Ok(Some(document))
     }
@@ -555,15 +556,17 @@ impl NitroSecureModule {
         }
     }
 
-    pub fn run() -> anyhow::Result<()> {
+    pub async fn run() -> anyhow::Result<()> {
         use std::os::fd::AsRawFd;
 
+        use crate::crypto::DigestHash as _;
         use bincode::Options;
         use nix::sys::socket::{
-            accept, bind, listen, socket, AddressFamily, Backlog, SockFlag, SockType, VsockAddr,
+            bind, listen, socket, AddressFamily, Backlog, SockFlag, SockType, VsockAddr,
         };
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-        let nsm = Self::new()?;
+        let nsm = std::sync::Arc::new(Self::new()?);
         let socket_fd = socket(
             AddressFamily::Vsock,
             SockType::Stream,
@@ -571,32 +574,55 @@ impl NitroSecureModule {
             None,
         )?;
         bind(socket_fd.as_raw_fd(), &VsockAddr::new(0xFFFFFFFF, 5005))?;
+        // theoratically this is the earliest point to entering Tokio world, but i don't want to go
+        // unsafe with `FromRawFd`, and Tokio don't have a `From<OwnedFd>` yet
         listen(&socket_fd, Backlog::new(64)?)?;
-        let mut buf = Vec::new();
+        let socket = std::os::unix::net::UnixListener::from(socket_fd);
+        socket.set_nonblocking(true)?;
+        let socket = tokio::net::UnixListener::from_std(socket)?;
+        // let mut buf = Vec::new();
+        let mut sessions = JoinSet::new();
         loop {
-            let fd = accept(socket_fd.as_raw_fd())?;
-            let len = nitro_enclaves::recv_u64(fd)?;
-            buf.resize(len as _, 0u8);
-            nitro_enclaves::recv_loop(fd, &mut buf)?;
-
-            // TODO multithreading the following?
-            let Update(prev, merged, id) =
-                bincode::options().deserialize::<Update<NitroEnclavesClock>>(&buf)?;
-            // TODO verify
-            let plain = prev
-                .plain
-                .update(merged.iter().map(|clock| &clock.plain), id);
-            let user_data = bincode::options().serialize(&plain)?;
-            let document = nsm.process_attestation(user_data)?;
-            let updated = NitroEnclavesClock {
-                plain,
-                document: Payload(document),
-            };
-
-            let buf = bincode::options().serialize(&(id, updated))?;
-            nitro_enclaves::send_u64(fd, buf.len() as _)?;
-            nitro_enclaves::send_loop(fd, &buf)?;
-            nix::unistd::close(fd)?;
+            enum Select {
+                Accept((tokio::net::UnixStream, tokio::net::unix::SocketAddr)),
+                JoinNext(Result<anyhow::Result<()>, tokio::task::JoinError>),
+            }
+            match tokio::select! {
+                accept = socket.accept() => Select::Accept(accept?),
+                Some(result) = sessions.join_next() => Select::JoinNext(result),
+            } {
+                Select::Accept((mut stream, _)) => {
+                    let nsm = nsm.clone();
+                    sessions.spawn(async move {
+                        let len = stream.read_u64_le().await?;
+                        let mut buf = vec![0; len as _];
+                        stream.read_exact(&mut buf).await?;
+                        let Update(prev, merged, id) =
+                            bincode::options().deserialize::<Update<NitroEnclavesClock>>(&buf)?;
+                        // TODO verify
+                        let plain = prev
+                            .plain
+                            .update(merged.iter().map(|clock| &clock.plain), id);
+                        // relies on the fact that different clocks always hash into different
+                        // digests, hopefully true
+                        let user_data = plain.sha256().to_fixed_bytes().to_vec();
+                        let document = nsm.process_attestation(user_data)?;
+                        let updated = NitroEnclavesClock {
+                            plain,
+                            document: Payload(document),
+                        };
+                        let buf = bincode::options().serialize(&(id, updated))?;
+                        stream.write_u64_le(buf.len() as _).await?;
+                        stream.write_all(&buf).await?;
+                        Ok(())
+                    });
+                }
+                Select::JoinNext(result) => {
+                    if let Err(err) = result.map_err(Into::into).and_then(std::convert::identity) {
+                        warn!("{err}")
+                    }
+                }
+            }
         }
     }
 }
@@ -617,6 +643,7 @@ pub async fn nitro_enclaves_portal_session(
 
     use bincode::Options;
     use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     let mut sessions = JoinSet::new();
     loop {
@@ -633,75 +660,29 @@ pub async fn nitro_enclaves_portal_session(
                     anyhow::bail!("unreachable")
                 };
                 let mut sender = sender.clone();
-                sessions.spawn_blocking(move || {
+                sessions.spawn(async move {
                     let fd = socket(
                         AddressFamily::Vsock,
                         SockType::Stream,
                         SockFlag::empty(),
                         None,
                     )?;
+                    // this one is blocking, but should be instant, hopefully
                     connect(fd.as_raw_fd(), &VsockAddr::new(cid, 5005))?;
+                    let socket = std::os::unix::net::UnixStream::from(fd);
+                    socket.set_nonblocking(true)?;
+                    let mut socket = tokio::net::UnixStream::from_std(socket)?;
                     let buf = bincode::options().serialize(&update)?;
-                    nitro_enclaves::send_u64(fd.as_raw_fd(), buf.len() as _)?;
-                    nitro_enclaves::send_loop(fd.as_raw_fd(), &buf)?;
-                    let len = nitro_enclaves::recv_u64(fd.as_raw_fd())?;
+                    socket.write_u64_le(buf.len() as _).await?;
+                    socket.write_all(&buf).await?;
+                    let len = socket.read_u64_le().await?;
                     let mut buf = vec![0; len as _];
-                    nitro_enclaves::recv_loop(fd.as_raw_fd(), &mut buf)?;
+                    socket.read_exact(&mut buf).await?;
                     sender.send(bincode::options().deserialize(&buf)?)
                 });
             }
             Select::JoinNext(result) => result?,
         }
-    }
-}
-
-mod nitro_enclaves {
-    use std::{mem::size_of, os::fd::RawFd};
-
-    use nix::sys::socket::{recv, send, MsgFlags};
-
-    pub fn send_u64(fd: RawFd, val: u64) -> anyhow::Result<()> {
-        let buf = val.to_le_bytes();
-        send_loop(fd, &buf)?;
-        Ok(())
-    }
-
-    pub fn recv_u64(fd: RawFd) -> anyhow::Result<u64> {
-        let mut buf = [0u8; size_of::<u64>()];
-        recv_loop(fd, &mut buf)?;
-        Ok(u64::from_le_bytes(buf))
-    }
-
-    /// Send `len` bytes from `buf` to a connection-oriented socket
-    pub fn send_loop(fd: RawFd, buf: &[u8]) -> anyhow::Result<()> {
-        let mut send_bytes = 0;
-        while send_bytes < buf.len() {
-            let size = match send(fd, &buf[send_bytes..], MsgFlags::empty()) {
-                Ok(size) => size,
-                Err(nix::Error::EINTR) => 0,
-                Err(err) => Err(err)?,
-            };
-            send_bytes += size
-        }
-        Ok(())
-    }
-
-    #[derive(Debug, derive_more::Display, derive_more::Error)]
-    pub struct Closed;
-
-    /// Receive `len` bytes from a connection-oriented socket
-    pub fn recv_loop(fd: RawFd, buf: &mut [u8]) -> anyhow::Result<()> {
-        let mut recv_bytes = 0;
-        while recv_bytes < buf.len() {
-            let size = match recv(fd, &mut buf[recv_bytes..], MsgFlags::empty()) {
-                Ok(0) => Err(Closed)?,
-                Ok(size) => size,
-                Err(nix::Error::EINTR) => 0,
-                Err(err) => Err(err)?,
-            };
-            recv_bytes += size
-        }
-        Ok(())
     }
 }
 
