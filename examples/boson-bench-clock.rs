@@ -1,4 +1,10 @@
-use std::{env::args, fmt::Write, future::pending, net::SocketAddr, time::SystemTime};
+use std::{
+    env::args,
+    fmt::Write,
+    future::pending,
+    net::SocketAddr,
+    time::{Duration, SystemTime},
+};
 
 use augustus::{
     boson::{
@@ -27,7 +33,7 @@ use tokio::{
     io::AsyncReadExt as _,
     net::TcpListener,
     sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-    time::Instant,
+    time::{sleep, Instant},
 };
 
 const CID: u32 = 16;
@@ -171,6 +177,7 @@ where
         anyhow::bail!("missing UpdateOk")
     };
     for _ in 0..10 {
+        sleep(Duration::from_millis(100)).await;
         let update = Update(clock.clone(), vec![clock.clone(); num_merged], 0);
         let start = Instant::now();
         update_sender.send(update)?;

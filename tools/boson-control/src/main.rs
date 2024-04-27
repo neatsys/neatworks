@@ -4,6 +4,7 @@ use std::{
     future::Future,
     net::{IpAddr, SocketAddr},
     path::Path,
+    process::Stdio,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
@@ -11,6 +12,9 @@ use std::{
 use boson_control::{terraform_output, TerraformOutputInstance};
 use tokio::{
     fs::{create_dir_all, write},
+    io::AsyncWriteExt,
+    net::TcpStream,
+    process::Command,
     task::JoinSet,
     time::sleep,
 };
@@ -246,6 +250,10 @@ async fn main() -> anyhow::Result<()> {
                 cops_replicated_session(client.clone(), instances.clone(), 5, 1, 200, n).await?
             }
             Ok(())
+        }
+        Some("quorum") => {
+            let instance = terraform_output("microbench_instances").await?.remove(0);
+            bench_quorum_session(client, &instance.public_dns, instance.public_ip).await
         }
         _ => Ok(()),
     }
@@ -700,36 +708,6 @@ async fn cops_client_session(
     }
 }
 
-async fn start_quorum_session(
-    client: reqwest::Client,
-    url: String,
-    config: boson_control_messages::QuorumServer,
-) -> anyhow::Result<()> {
-    client
-        .post(format!("{url}/start-quorum"))
-        .json(&config)
-        .send()
-        .await?
-        .error_for_status()?;
-    loop {
-        sleep(Duration::from_millis(1000)).await;
-        client
-            .get(format!("{url}/ok"))
-            .send()
-            .await?
-            .error_for_status()?;
-    }
-}
-
-async fn stop_quorum_session(client: reqwest::Client, url: String) -> anyhow::Result<()> {
-    client
-        .post(format!("{url}/stop-quorum"))
-        .send()
-        .await?
-        .error_for_status()?;
-    Ok(())
-}
-
 async fn cops_replicated_session(
     client: reqwest::Client,
     instances: Vec<TerraformOutputInstance>,
@@ -863,6 +841,96 @@ async fn cops_replicated_session(
         ),
     )
     .await?;
+    Ok(())
+}
+
+async fn bench_quorum_session(
+    client: reqwest::Client,
+    host: &str,
+    ip: IpAddr,
+) -> anyhow::Result<()> {
+    let clock_instances = terraform_output("micro_quorum_instances").await?;
+    let clock_urls = clock_instances
+        .iter()
+        .map(|instance| format!("http://{}:3000", instance.public_dns))
+        .collect::<Vec<_>>();
+    let clock_addrs = clock_instances
+        .iter()
+        .map(|instance| SocketAddr::from((instance.public_ip, 5000)))
+        .collect::<Vec<_>>();
+    for num_faulty in 0..4 {
+        let quorum = boson_control_messages::Quorum {
+            addrs: clock_addrs.clone(),
+            num_faulty,
+        };
+
+        println!("Start clock services");
+        let mut watchdog_sessions = JoinSet::new();
+        for (i, url) in clock_urls.iter().enumerate() {
+            let config = boson_control_messages::QuorumServer {
+                quorum: quorum.clone(),
+                index: i,
+            };
+            watchdog_sessions.spawn(start_quorum_session(client.clone(), url.clone(), config));
+        }
+
+        while_ok(&mut watchdog_sessions, async move {
+            let command = Command::new("ssh")
+                .arg(format!("ec2-user@{host}"))
+                .arg(format!("./boson-bench-clock {ip}"))
+                .stdout(Stdio::piped())
+                .spawn()?;
+            sleep(Duration::from_millis(1000)).await;
+            let buf = serde_json::to_vec(&quorum)?;
+            TcpStream::connect((host, 3000))
+                .await?
+                .write_all(&buf)
+                .await?;
+            let output = command.wait_with_output().await?;
+            anyhow::ensure!(output.status.success());
+            anyhow::Ok(())
+        })
+        .await??;
+
+        watchdog_sessions.shutdown().await;
+        let mut stop_sessions = JoinSet::new();
+        for url in &clock_urls {
+            stop_sessions.spawn(stop_quorum_session(client.clone(), url.clone()));
+        }
+        while let Some(result) = stop_sessions.join_next().await {
+            result??
+        }
+    }
+    Ok(())
+}
+
+async fn start_quorum_session(
+    client: reqwest::Client,
+    url: String,
+    config: boson_control_messages::QuorumServer,
+) -> anyhow::Result<()> {
+    client
+        .post(format!("{url}/start-quorum"))
+        .json(&config)
+        .send()
+        .await?
+        .error_for_status()?;
+    loop {
+        sleep(Duration::from_millis(1000)).await;
+        client
+            .get(format!("{url}/ok"))
+            .send()
+            .await?
+            .error_for_status()?;
+    }
+}
+
+async fn stop_quorum_session(client: reqwest::Client, url: String) -> anyhow::Result<()> {
+    client
+        .post(format!("{url}/stop-quorum"))
+        .send()
+        .await?
+        .error_for_status()?;
     Ok(())
 }
 
