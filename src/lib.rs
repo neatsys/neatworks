@@ -13,7 +13,7 @@ pub mod unreplicated;
 pub mod worker;
 pub mod workload;
 
-#[cfg(feature = "entropy")]
+#[cfg(feature = "wirehair")]
 pub mod entropy;
 
 #[cfg(all(not(target_env = "msvc"), feature = "tikv-jemallocator"))]

@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    fmt::Debug,
     mem::replace,
     num::NonZeroUsize,
     sync::Arc,
@@ -147,6 +146,7 @@ pub struct DownloadOk(pub Chunk, pub u32, pub Payload);
 pub trait BulkService: bulk::Service<PeerId, SendFragment, DownloadOk> {}
 impl<T: bulk::Service<PeerId, SendFragment, DownloadOk>> BulkService for T {}
 
+#[derive(Debug)]
 pub struct Peer<N, BS, U, CW, F, K, M = (N, BS, U, CW, F, K)> {
     id: PeerId,
     fragment_len: u32,
@@ -230,12 +230,6 @@ enum PersistStatus {
     Recovering(RecoverState),
     Storing,
     Available,
-}
-
-impl<N, BS, U, CW, F, K> Debug for Peer<N, BS, U, CW, F, K> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Peer").finish_non_exhaustive()
-    }
 }
 
 impl<N, BS, U, CW, F, K> Peer<N, BS, U, CW, F, K> {
@@ -812,11 +806,10 @@ pub fn on_buf<A: Addr>(
     }
 }
 
-// TODO generalize and lift into workspace crate
-// the problem arise when justify upcall design
-// possibly follows blob design if that works well
+// TODO generalize and implement the universal key value store abstraction
+// (after that abstraction has been invented)
 pub mod fs {
-    use std::{fmt::Debug, path::Path};
+    use std::path::Path;
 
     use tokio::{
         fs::{create_dir, read, remove_dir_all, write},

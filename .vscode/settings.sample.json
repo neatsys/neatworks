@@ -1,7 +1,7 @@
 {
     "rust-analyzer.cargo.features": [
         "all",
-        // "entropy",
+        // "wirehair",
     ],
     "rust-analyzer.server.extraEnv": {
         "CHALK_OVERFLOW_DEPTH": "100000000",
