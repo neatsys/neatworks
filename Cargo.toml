@@ -45,7 +45,7 @@ name = "nitro-enclaves-clock-validator"
 required-features = ["nitro-enclaves"]
 
 [[example]]
-name = "nitro-enclaves-clock-bench"
+name = "boson-bench-clock"
 required-features = ["nitro-enclaves"]
 
 [dependencies]

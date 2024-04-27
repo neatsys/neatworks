@@ -309,7 +309,7 @@ pub async fn quorum_session(
             let mut sender = Sender::from(clock_session.sender());
             move |buf: &_| sender.send(Recv(deserialize::<Verifiable<boson::AnnounceOk>>(buf)?))
         },
-        Once(dispatch_session.sender()),
+        Once(clock_dispatch_session.sender()),
     )?));
     let mut processor = Blanket(Unify(Processor::new(
         id,

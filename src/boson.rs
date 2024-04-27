@@ -81,6 +81,18 @@ pub struct QuorumClock {
     cert: Vec<Verifiable<AnnounceOk>>,
 }
 
+impl TryFrom<DefaultVersion> for QuorumClock {
+    type Error = anyhow::Error;
+
+    fn try_from(value: DefaultVersion) -> Result<Self, Self::Error> {
+        anyhow::ensure!(value.is_genesis());
+        Ok(Self {
+            plain: value,
+            cert: Default::default(),
+        })
+    }
+}
+
 impl DepOrd for QuorumClock {
     fn dep_cmp(&self, other: &Self, id: crate::cops::KeyId) -> std::cmp::Ordering {
         self.plain.dep_cmp(&other.plain, id)
@@ -681,9 +693,7 @@ pub async fn nitro_enclaves_portal_session(
             Some(result) = sessions.join_next() => Select::JoinNext(result?),
         } {
             Select::Recv(update) => {
-                let Some(update) = update else {
-                    anyhow::bail!("unreachable")
-                };
+                let Some(update) = update else { return Ok(()) };
                 let mut sender = sender.clone();
                 sessions.spawn(async move {
                     let fd = socket(
