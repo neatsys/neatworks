@@ -130,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
                 tokio::spawn(async move {
                     let mut lines = String::new();
                     bench_session(
-                        1024,
+                        1 << 10,
                         0,
                         &update_sender,
                         &mut update_ok_receiver,
@@ -138,6 +138,33 @@ async fn main() -> anyhow::Result<()> {
                         &mut lines,
                     )
                     .await?;
+                    if num_faulty == 1 {
+                        for size in (0..=16).step_by(2).map(|n| 1 << n) {
+                            if size == 1 << 10 {
+                                continue;
+                            }
+                            bench_session(
+                                size,
+                                0,
+                                &update_sender,
+                                &mut update_ok_receiver,
+                                |clock| clock.verify(num_faulty, &crypto),
+                                &mut lines,
+                            )
+                            .await?
+                        }
+                        for num_merged in 1..=15 {
+                            bench_session(
+                                1 << 10,
+                                num_merged,
+                                &update_sender,
+                                &mut update_ok_receiver,
+                                |clock| clock.verify(num_faulty, &crypto),
+                                &mut lines,
+                            )
+                            .await?
+                        }
+                    }
                     let lines = lines
                         .split_whitespace()
                         .map(|line| format!("{num_faulty},{line}"))
