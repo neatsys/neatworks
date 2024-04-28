@@ -1,7 +1,7 @@
-use std::{env::args, time::Duration};
+use std::env::args;
 
-use boson_control::terraform_output;
-use tokio::{process::Command, task::JoinSet, time::sleep};
+use boson_control::{instance_sessions, terraform_output};
+use tokio::process::Command;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
@@ -11,10 +11,11 @@ async fn main() -> anyhow::Result<()> {
         println!("Building boson artifact");
         let status = Command::new("cargo")
             .args([
-                "--quiet",
                 "build",
                 "--profile",
                 "artifact",
+                "--features",
+                "nitro-enclaves",
                 "--bin",
                 "boson",
             ])
@@ -23,27 +24,13 @@ async fn main() -> anyhow::Result<()> {
         anyhow::ensure!(status.success(), "Command `cargo build` exit with {status}");
     }
 
-    println!("Spawning host sessions");
-    let mut sessions = JoinSet::new();
-    for instance in terraform_output("mutex_instances").await? {
-        sessions.spawn(async move { host_session(instance.public_dns, sync).await });
-    }
-    let result = join_sessions(&mut sessions).await;
-    sessions.shutdown().await;
-    if result.is_err() {
-        sleep(Duration::from_secs(1)).await
-    }
-    result
-}
-
-async fn join_sessions(sessions: &mut JoinSet<anyhow::Result<()>>) -> anyhow::Result<()> {
-    while let Some(result) = sessions.join_next().await {
-        result??
-    }
-    Ok(())
+    let mut instances = terraform_output("microbench_quorum_instances").await?;
+    instances.extend(terraform_output("mutex_instances").await?);
+    instance_sessions(&instances, |host| host_session(host, sync)).await
 }
 
 async fn host_session(ssh_host: String, sync: bool) -> anyhow::Result<()> {
+    let ssh_host = format!("ec2-user@{ssh_host}");
     // println!("{ssh_host}");
     if sync {
         let status = Command::new("rsync")

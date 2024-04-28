@@ -648,9 +648,12 @@ impl DepOrd for DefaultVersion {
     fn dep_cmp(&self, other: &Self, id: KeyId) -> Ordering {
         match (self.0.get(&id), other.0.get(&id)) {
             // handy sanity check
-            (Some(0), _) | (_, Some(0)) => {
-                unimplemented!("invalid dependency compare: {self:?} vs {other:?} @ {id}")
-            }
+            // (Some(0), _) | (_, Some(0)) => {
+            //     unimplemented!("invalid dependency compare: {self:?} vs {other:?} @ {id}")
+            // }
+            // disabling this check after the definition of genesis clock has been extended
+            // haven't revealed any bug with this assertion before, hopefully disabling it will not
+            // hide any bug in the future as well
             (None, Some(_)) => Ordering::Less,
             (Some(_), None) => Ordering::Greater,
             // this can happen on the startup insertion

@@ -251,10 +251,7 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Some("quorum") => {
-            let instance = terraform_output("microbench_instances").await?.remove(0);
-            bench_quorum_session(client, &instance.public_dns, instance.public_ip).await
-        }
+        Some("quorum") => bench_quorum_session(client).await,
         _ => Ok(()),
     }
 }
@@ -844,12 +841,9 @@ async fn cops_replicated_session(
     Ok(())
 }
 
-async fn bench_quorum_session(
-    client: reqwest::Client,
-    host: &str,
-    ip: IpAddr,
-) -> anyhow::Result<()> {
-    let clock_instances = terraform_output("micro_quorum_instances").await?;
+async fn bench_quorum_session(client: reqwest::Client) -> anyhow::Result<()> {
+    let instance = terraform_output("microbench_instances").await?.remove(0);
+    let clock_instances = terraform_output("microbench_quorum_instances").await?;
     let clock_urls = clock_instances
         .iter()
         .map(|instance| format!("http://{}:3000", instance.public_dns))
@@ -858,7 +852,8 @@ async fn bench_quorum_session(
         .iter()
         .map(|instance| SocketAddr::from((instance.public_ip, 5000)))
         .collect::<Vec<_>>();
-    for num_faulty in 0..4 {
+    let mut lines = Vec::new();
+    for num_faulty in 0..10 {
         let quorum = boson_control_messages::Quorum {
             addrs: clock_addrs.clone(),
             num_faulty,
@@ -874,20 +869,21 @@ async fn bench_quorum_session(
             watchdog_sessions.spawn(start_quorum_session(client.clone(), url.clone(), config));
         }
 
-        while_ok(&mut watchdog_sessions, async move {
+        while_ok(&mut watchdog_sessions, async {
             let command = Command::new("ssh")
-                .arg(format!("ec2-user@{host}"))
-                .arg(format!("./boson-bench-clock {ip}"))
+                .arg(format!("ec2-user@{}", instance.public_dns))
+                .arg(format!("./boson-bench-clock quorum {}", instance.public_ip))
                 .stdout(Stdio::piped())
                 .spawn()?;
             sleep(Duration::from_millis(1000)).await;
             let buf = serde_json::to_vec(&quorum)?;
-            TcpStream::connect((host, 3000))
+            TcpStream::connect((&*instance.public_dns, 3000))
                 .await?
                 .write_all(&buf)
                 .await?;
             let output = command.wait_with_output().await?;
             anyhow::ensure!(output.status.success());
+            lines.extend(output.stdout);
             anyhow::Ok(())
         })
         .await??;
@@ -901,6 +897,14 @@ async fn bench_quorum_session(
             result??
         }
     }
+    write(
+        format!(
+            "tools/boson-control/notebooks/clock-quorum-{}.txt",
+            SystemTime::UNIX_EPOCH.elapsed()?.as_secs()
+        ),
+        lines,
+    )
+    .await?;
     Ok(())
 }
 
