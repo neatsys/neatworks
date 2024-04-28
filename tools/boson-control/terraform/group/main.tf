@@ -100,7 +100,7 @@ data "aws_ami" "al2023" {
     values = ["hvm"]
   }
 
-  owners = ["137112412989"] # amazon
+  owners = ["137112412989", "910595266909", "210953353124"] # amazon
 }
 
 resource "aws_instance" "main" {

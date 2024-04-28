@@ -25,6 +25,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut instances = terraform_output("microbench_quorum_instances").await?;
+    instances.extend(terraform_output("quorum_instances").await?);
     instances.extend(terraform_output("mutex_instances").await?);
     instance_sessions(&instances, |host| host_session(host, sync)).await
 }
@@ -35,6 +36,7 @@ async fn host_session(ssh_host: String, sync: bool) -> anyhow::Result<()> {
     if sync {
         let status = Command::new("rsync")
             .arg("target/artifact/boson")
+            .arg("app.eif")
             // .arg("target/debug/boson")
             .arg(format!("{ssh_host}:"))
             .status()

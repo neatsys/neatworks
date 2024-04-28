@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fmt::Write,
     future::Future,
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     path::Path,
     process::Stdio,
     sync::{Arc, Mutex},
@@ -27,27 +27,29 @@ async fn main() -> anyhow::Result<()> {
     let item = std::env::args().nth(1);
     match item.as_deref() {
         Some("test-mutex") => {
-            let instances = (0..4)
-                .map(|i| TerraformOutputInstance {
-                    public_ip: IpAddr::from([127, 0, 0, i + 1]),
-                    private_ip: IpAddr::from([127, 0, 0, i + 1]),
-                    public_dns: format!("127.0.0.{}", i + 1),
-                })
-                .collect();
-            let clock_instances = (0..2)
-                .map(|i| TerraformOutputInstance {
-                    public_ip: IpAddr::from([127, 0, 0, i + 101]),
-                    private_ip: IpAddr::from([127, 0, 0, i + 101]),
-                    public_dns: format!("127.0.0.{}", i + 101),
-                })
-                .collect();
+            // let instances = (0..4)
+            //     .map(|i| TerraformOutputInstance {
+            //         public_ip: IpAddr::from([127, 0, 0, i + 1]),
+            //         private_ip: IpAddr::from([127, 0, 0, i + 1]),
+            //         public_dns: format!("127.0.0.{}", i + 1),
+            //     })
+            //     .collect();
+            // let clock_instances = (0..2)
+            //     .map(|i| TerraformOutputInstance {
+            //         public_ip: IpAddr::from([127, 0, 0, i + 101]),
+            //         private_ip: IpAddr::from([127, 0, 0, i + 101]),
+            //         public_dns: format!("127.0.0.{}", i + 101),
+            //     })
+            //     .collect();
+            let instances = terraform_output("mutex_instances").await?;
+            let clock_instances = terraform_output("quorum_instances").await?;
             mutex_session(
                 client.clone(),
                 instances,
                 clock_instances,
                 RequestMode::All,
-                Variant::Replicated,
-                4,
+                Variant::NitroEnclaves,
+                1,
             )
             .await?;
             Ok(())
@@ -278,6 +280,7 @@ pub enum Variant {
     Untrusted,
     Replicated,
     Quorum,
+    NitroEnclaves,
 }
 
 async fn mutex_session(
@@ -350,6 +353,7 @@ async fn mutex_session(
             num_faulty: num_region_processor - 1,
         }),
         Variant::Quorum => Quorum(quorum),
+        Variant::NitroEnclaves => NitroEnclaves,
     };
     for (index, url) in urls.iter().enumerate() {
         let config = boson_control_messages::Mutex {
@@ -415,16 +419,16 @@ async fn mutex_session(
         result??
     }
     // print!("{lines}");
-    // let path = Path::new("tools/boson-control/notebooks");
-    // create_dir_all(path).await?;
-    // write(
-    //     path.join(format!(
-    //         "mutex-{}.txt",
-    //         SystemTime::UNIX_EPOCH.elapsed()?.as_secs()
-    //     )),
-    //     lines,
-    // )
-    // .await?;
+    let path = Path::new("tools/boson-control/notebooks/mutex");
+    create_dir_all(path).await?;
+    write(
+        path.join(format!(
+            "{}.txt",
+            SystemTime::UNIX_EPOCH.elapsed()?.as_secs()
+        )),
+        lines,
+    )
+    .await?;
     Ok(())
 }
 
@@ -555,6 +559,7 @@ async fn cops_session(
         Variant::Untrusted => Untrusted,
         Variant::Replicated => anyhow::bail!("unimplemented"),
         Variant::Quorum => Quorum(quorum),
+        Variant::NitroEnclaves => NitroEnclaves,
     };
     println!("Start servers");
     let record_count = 1000;

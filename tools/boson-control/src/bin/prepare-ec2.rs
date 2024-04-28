@@ -5,8 +5,8 @@ use tokio::process::Command;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let instances = terraform_output("microbench_quorum_instances").await?;
-    // TODO extend other quorums
+    let mut instances = terraform_output("microbench_quorum_instances").await?;
+    instances.extend(terraform_output("quorum_instances").await?);
     instance_sessions(&instances, |host| async move {
         let host = format!("ec2-user@{host}");
         let status = Command::new("ssh")
@@ -19,6 +19,28 @@ async fn main() -> anyhow::Result<()> {
         Ok(())
     })
     .await?;
-    // TODO install tmux and nitro cli on mutex/cops instances
+
+    let instances = terraform_output("mutex_instances").await?;
+    // TODO extend cops instances
+    instance_sessions(&instances, |host| async move {
+        let host = format!("ec2-user@{host}");
+        let status = Command::new("ssh")
+            .arg(&host)
+            .arg(
+                String::from(
+                    "sudo dnf install -y tmux docker-24.0.5-1.amzn2023.0.3 aws-nitro-enclaves-cli",
+                ) + " && sudo usermod -aG ne ec2-user"
+                    + " && sudo usermod -aG docker ec2-user"
+                    + " && sudo systemctl enable --now nitro-enclaves-allocator.service"
+                    + " && sudo systemctl enable --now docker",
+            )
+            .stdout(Stdio::null())
+            .status()
+            .await?;
+        anyhow::ensure!(status.success());
+        Ok(())
+    })
+    .await?;
+
     Ok(())
 }
