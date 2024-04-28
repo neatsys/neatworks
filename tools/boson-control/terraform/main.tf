@@ -62,6 +62,7 @@ module "microbench" {
     aws = aws.ap-southeast-1
   }
   instance_state = var.state
+  instance_type  = "c5a.2xlarge"
 }
 
 module "microbench_quorum" {
@@ -71,7 +72,7 @@ module "microbench_quorum" {
     aws = aws.ap-southeast-1
   }
   instance_state = var.state
-  instance_count = 0
+  instance_count = 10
 }
 
 module "mutex" {
