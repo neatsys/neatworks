@@ -425,8 +425,8 @@ pub async fn nitro_enclaves_session(
     let boson_control_messages::Mutex {
         id,
         addrs,
-        num_faulty,
         variant: boson_control_messages::Variant::NitroEnclaves,
+        num_faulty,
     } = config
     else {
         anyhow::bail!("unimplemented")
@@ -435,18 +435,24 @@ pub async fn nitro_enclaves_session(
     let crypto = Crypto::new_random(&mut thread_rng());
 
     let tcp_listener = TcpListener::bind(adjust(addr)).await?;
+
     let mut dispatch_session = event::Session::new();
     let mut processor_session = Session::new();
     let mut causal_net_session = Session::new();
-    let (portal_sender, portal_receiver) = unbounded_channel();
+    // verify clocked messages sent by other processors before they are received causal net
+    // a spawning backend may cause out of order receiving of messages from a remote processor
+    // hotfix by using inline worker instead, better solution desired
+    // let (recv_crypto_worker, mut recv_crypto_executor) = spawning_backend();
+    // sign Ordered messages
     let (processor_crypto_worker, mut processor_crypto_executor) = spawning_backend();
+    let (clock_sender, clock_receiver) = unbounded_channel();
 
     let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
         Tcp::new(addr)?,
         {
             // let mut clocked_sender = VerifyQuorumClock::new(config.num_faulty, recv_crypto_worker);
             let mut clocked_sender = VerifyClock::new(
-                config.num_faulty,
+                0,
                 Worker::Inline((), Sender::from(causal_net_session.sender())),
             );
             let mut sender = Sender::from(processor_session.sender());
@@ -467,14 +473,15 @@ pub async fn nitro_enclaves_session(
         NitroEnclavesClock::try_from(OrdinaryVersion::default())?,
         Box::new(Sender::from(processor_session.sender()))
             as Box<dyn lamport_mutex::SendRecvEvent<NitroEnclavesClock> + Send + Sync>,
-        boson::Lamport(portal_sender, id),
-        lamport_mutex::MessageNet::<_, NitroEnclavesClock>::new(IndexNet::new(
+        boson::Lamport(clock_sender, id),
+        lamport_mutex::verifiable::MessageNet::<_, NitroEnclavesClock>::new(IndexNet::new(
             dispatch::Net::from(dispatch_session.sender()),
             addrs.clone(),
             // intentionally sending loopback messages as expected by processor protocol
             None,
         )),
     )?));
+
     Sender::from(causal_net_session.sender()).send(Init)?;
 
     let event_session = {
@@ -490,6 +497,8 @@ pub async fn nitro_enclaves_session(
         }
     };
     let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
+    // let recv_crypto_session =
+    //     recv_crypto_executor.run(crypto.clone(), Sender::from(causal_net_session.sender()));
     let processor_crypto_session = processor_crypto_executor.run(
         crypto,
         lamport_mutex::verifiable::MessageNet::<_, NitroEnclavesClock>::new(IndexNet::new(
@@ -500,12 +509,13 @@ pub async fn nitro_enclaves_session(
     );
     let dispatch_session = dispatch_session.run(&mut dispatch);
     let processor_session = processor_session.run(&mut processor);
-    let portal_session = nitro_enclaves_portal_session(
+    let clock_session = nitro_enclaves_portal_session(
         16,
-        portal_receiver,
+        clock_receiver,
         boson::Lamport(Sender::from(causal_net_session.sender()), id),
     );
     let causal_net_session = causal_net_session.run(&mut causal_net);
+
     tokio::select! {
         () = cancel.cancelled() => return Ok(()),
         result = event_session => result?,
@@ -513,8 +523,9 @@ pub async fn nitro_enclaves_session(
         result = dispatch_session => result?,
         result = processor_session => result?,
         result = causal_net_session => result?,
-        result = portal_session => result?,
+        // result = recv_crypto_session => result?,
         result = processor_crypto_session => result?,
+        result = clock_session => result?,
     }
     anyhow::bail!("unreachable")
 }

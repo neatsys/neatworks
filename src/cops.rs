@@ -627,7 +627,7 @@ impl OrdinaryVersion {
         updated
     }
 
-    pub fn reduce(&self) -> u32 {
+    pub fn reduce(&self) -> crate::lamport_mutex::LamportClock {
         self.0.values().copied().sum()
     }
 }

@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
                 clock_instances,
                 RequestMode::All,
                 Variant::NitroEnclaves,
-                1,
+                8,
             )
             .await?;
             Ok(())
@@ -84,8 +84,8 @@ async fn main() -> anyhow::Result<()> {
                 for n in if matches!(variant, Variant::Replicated) {
                     1..=4
                 } else {
-                    1..=16
-                    // 16..=16
+                    // 1..=16
+                    1..=1
                 }
                 .rev()
                 {

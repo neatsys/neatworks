@@ -42,7 +42,7 @@ impl<C: PartialOrd + Clone + Send + Sync + 'static> Clock for C {}
 // lamport clock), the two ordering are indeed the same relation, or "behave identical" if you
 // prefer
 pub trait ClockOrd {
-    fn arbitrary_cmp(clock: (&Self, u8), other_clock: (&Self, u8)) -> anyhow::Result<Ordering>;
+    fn arbitrary_cmp(lhs: (&Self, u8), rhs: (&Self, u8)) -> anyhow::Result<Ordering>;
 }
 impl<C: Clock> ClockOrd for C {
     fn arbitrary_cmp(
@@ -54,12 +54,19 @@ impl<C: Clock> ClockOrd for C {
             // this one is covered by the next case, but explicitly listed because it corresponds to
             // the only equal case: when a clock is compared to itself
             (Some(Ordering::Equal), Ordering::Equal) => Ok(Ordering::Equal),
-            (Some(Ordering::Equal), ordering) | (Some(ordering), _) | (None, ordering) => {
-                Ok(ordering)
-            }
+            (Some(Ordering::Equal) | None, ordering) | (Some(ordering), _) => Ok(ordering),
         }
     }
 }
+
+// impl ClockOrd for LamportClock {
+//     fn arbitrary_cmp(
+//         (clock, id): (&Self, u8),
+//         (other_clock, other_id): (&Self, u8),
+//     ) -> anyhow::Result<Ordering> {
+//         Ok((clock, id).cmp(&(other_clock, other_id)))
+//     }
+// }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Clocked<M, C> {
@@ -334,7 +341,7 @@ impl<CN: SendMessage<All, Message>, U, C> OnEvent<events::Request> for Processor
     }
 }
 
-impl<CN: SendMessage<u8, Message>, U: SendEvent<events::RequestOk>, C: Clock>
+impl<CN: SendMessage<u8, Message>, U: SendEvent<events::RequestOk>, C: Clock + ClockOrd>
     OnEvent<Recv<Clocked<Message, C>>> for Processor<CN, U, C>
 {
     fn on_event(
@@ -573,7 +580,7 @@ pub mod verifiable {
             CN: SendMessage<All, super::Message>,
             N: SendMessage<u8, Ordered<C>>,
             U: SendEvent<events::RequestOk>,
-            C: Clock,
+            C: Clock + ClockOrd,
         > OnEvent<Recv<Clocked<super::Message, C>>> for Processor<CN, N, U, C>
     {
         fn on_event(
