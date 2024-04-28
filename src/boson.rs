@@ -391,34 +391,34 @@ impl<CW, N> OnTimer for QuorumServer<CW, N> {
     }
 }
 
-#[derive_where(Debug, Clone; CW)]
-pub struct VerifyQuorumClock<CW, E> {
+#[derive_where(Debug, Clone; W)]
+pub struct VerifyClock<W, S, E> {
     num_faulty: usize,
-    crypto_worker: CW,
-    _m: std::marker::PhantomData<E>,
+    worker: W,
+    _m: std::marker::PhantomData<(S, E)>,
 }
 
-impl<CW, E> VerifyQuorumClock<CW, E> {
-    pub fn new(num_faulty: usize, crypto_worker: CW) -> Self {
+impl<W, S, E> VerifyClock<W, S, E> {
+    pub fn new(num_faulty: usize, worker: W) -> Self {
         Self {
             num_faulty,
-            crypto_worker,
+            worker,
             _m: Default::default(),
         }
     }
 }
 
-trait VerifyClock: Send + Sync + 'static {
-    fn verify_clock(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()>;
+trait Verify<S>: Send + Sync + 'static {
+    fn verify_clock(&self, num_faulty: usize, state: &S) -> anyhow::Result<()>;
 }
 
-impl<CW: Submit<Crypto, E>, E: SendEvent<Recv<M>>, M: VerifyClock> SendEvent<Recv<M>>
-    for VerifyQuorumClock<CW, E>
+impl<W: Submit<S, E>, S, E: SendEvent<Recv<M>>, M: Verify<S>> SendEvent<Recv<M>>
+    for VerifyClock<W, S, E>
 {
     fn send(&mut self, Recv(message): Recv<M>) -> anyhow::Result<()> {
         let num_faulty = self.num_faulty;
-        self.crypto_worker.submit(Box::new(move |crypto, sender| {
-            if message.verify_clock(num_faulty, crypto).is_ok() {
+        self.worker.submit(Box::new(move |state, sender| {
+            if message.verify_clock(num_faulty, state).is_ok() {
                 sender.send(Recv(message))
             } else {
                 warn!("clock verification failed");
@@ -428,7 +428,7 @@ impl<CW: Submit<Crypto, E>, E: SendEvent<Recv<M>>, M: VerifyClock> SendEvent<Rec
     }
 }
 
-impl<A: Addr> VerifyClock for Verifiable<Announce<A>> {
+impl<A: Addr> Verify<Crypto> for Verifiable<Announce<A>> {
     fn verify_clock(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()> {
         crypto.verify(&self.key, self)?;
         self.prev.verify(num_faulty, crypto)?;
@@ -439,25 +439,25 @@ impl<A: Addr> VerifyClock for Verifiable<Announce<A>> {
     }
 }
 
-impl<M: Send + Sync + 'static> VerifyClock for lamport_mutex::Clocked<M, QuorumClock> {
+impl<M: Send + Sync + 'static> Verify<Crypto> for lamport_mutex::Clocked<M, QuorumClock> {
     fn verify_clock(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()> {
         self.clock.verify(num_faulty, crypto)
     }
 }
 
-impl VerifyClock for cops::PutOk<QuorumClock> {
+impl Verify<Crypto> for cops::PutOk<QuorumClock> {
     fn verify_clock(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()> {
         self.version_deps.verify(num_faulty, crypto)
     }
 }
 
-impl VerifyClock for cops::GetOk<QuorumClock> {
+impl Verify<Crypto> for cops::GetOk<QuorumClock> {
     fn verify_clock(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()> {
         self.version_deps.verify(num_faulty, crypto)
     }
 }
 
-impl<A: Addr> VerifyClock for cops::Put<QuorumClock, A> {
+impl<A: Addr> Verify<Crypto> for cops::Put<QuorumClock, A> {
     fn verify_clock(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()> {
         for clock in self.deps.values() {
             clock.verify(num_faulty, crypto)?
@@ -466,19 +466,19 @@ impl<A: Addr> VerifyClock for cops::Put<QuorumClock, A> {
     }
 }
 
-impl<A: Addr> VerifyClock for cops::Get<A> {
+impl<A: Addr> Verify<Crypto> for cops::Get<A> {
     fn verify_clock(&self, _: usize, _: &Crypto) -> anyhow::Result<()> {
         Ok(())
     }
 }
 
-impl VerifyClock for cops::SyncKey<QuorumClock> {
+impl Verify<Crypto> for cops::SyncKey<QuorumClock> {
     fn verify_clock(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()> {
         self.version_deps.verify(num_faulty, crypto)
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
 #[derive_where(PartialOrd, PartialEq)]
 pub struct NitroEnclavesClock {
     pub plain: OrdinaryVersion,
@@ -719,6 +719,49 @@ pub async fn nitro_enclaves_portal_session(
             }
             Select::JoinNext(result) => result?,
         }
+    }
+}
+
+impl<M: Send + Sync + 'static> Verify<()> for lamport_mutex::Clocked<M, NitroEnclavesClock> {
+    fn verify_clock(&self, _: usize, (): &()) -> anyhow::Result<()> {
+        self.clock.verify()?;
+        Ok(())
+    }
+}
+
+impl Verify<()> for cops::PutOk<NitroEnclavesClock> {
+    fn verify_clock(&self, _: usize, (): &()) -> anyhow::Result<()> {
+        self.version_deps.verify()?;
+        Ok(())
+    }
+}
+
+impl Verify<()> for cops::GetOk<NitroEnclavesClock> {
+    fn verify_clock(&self, _: usize, (): &()) -> anyhow::Result<()> {
+        self.version_deps.verify()?;
+        Ok(())
+    }
+}
+
+impl<A: Addr> Verify<()> for cops::Put<NitroEnclavesClock, A> {
+    fn verify_clock(&self, _: usize, (): &()) -> anyhow::Result<()> {
+        for clock in self.deps.values() {
+            clock.verify()?;
+        }
+        Ok(())
+    }
+}
+
+impl<A: Addr> Verify<()> for cops::Get<A> {
+    fn verify_clock(&self, _: usize, _: &()) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+impl Verify<()> for cops::SyncKey<NitroEnclavesClock> {
+    fn verify_clock(&self, _: usize, (): &()) -> anyhow::Result<()> {
+        self.version_deps.verify()?;
+        Ok(())
     }
 }
 

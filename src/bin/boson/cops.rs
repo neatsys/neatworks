@@ -2,7 +2,7 @@ use std::{mem::take, net::SocketAddr, ops::Range, time::Duration};
 
 use augustus::{
     app::{self, ycsb, App},
-    boson::{self, QuorumClient, QuorumClock, VerifyQuorumClock},
+    boson::{self, QuorumClient, QuorumClock, VerifyClock},
     cops::{self, OrdinaryVersion, DefaultVersionService},
     event::{
         self,
@@ -530,7 +530,7 @@ pub async fn quorum_server_session(
     let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
         Tcp::new(addr)?,
         {
-            let mut sender = VerifyQuorumClock::new(config.num_faulty, client_crypto_worker);
+            let mut sender = VerifyClock::new(config.num_faulty, client_crypto_worker);
             move |buf: &_| cops::to_replica_on_buf(buf, &mut sender)
         },
         Once(dispatch_session.sender()),

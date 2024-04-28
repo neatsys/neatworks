@@ -12,7 +12,7 @@ async fn session(host: String) -> anyhow::Result<()> {
     let host = format!("ec2-user@{host}");
     let status = Command::new("ssh")
         .arg(host)
-        .arg("nitro-cli terminate-enclave --enclave-name app")
+        .arg("nitro-cli terminate-enclave --all")
         .status()
         .await?;
     anyhow::ensure!(status.success());

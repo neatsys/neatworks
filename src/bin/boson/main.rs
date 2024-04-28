@@ -96,16 +96,14 @@ fn log_exit(err: anyhow::Error) -> StatusCode {
 }
 
 async fn ok(State(state): State<AppState>) -> StatusCode {
-    let mut session = state.session.lock().await;
-    {
-        let Some(session) = &mut *session else {
-            return StatusCode::NOT_FOUND;
-        };
-        if !session.handle.is_finished() {
-            return StatusCode::OK;
-        }
+    let mut state_session = state.session.lock().await;
+    let Some(session) = &mut *state_session else {
+        return StatusCode::NOT_FOUND;
+    };
+    if !session.handle.is_finished() {
+        return StatusCode::OK;
     }
-    match session.take().unwrap().handle.await {
+    match state_session.take().unwrap().handle.await {
         Err(err) => warn!("{err}"),
         Ok(Err(err)) => return log_exit(err),
         Ok(Ok(())) => warn!("unexpected peer exit"),
@@ -199,7 +197,7 @@ async fn mutex_request(State(state): State<AppState>, at: Json<SystemTime>) -> R
         // TODO timeout
         let result = channel.upcall.recv().await;
         if result.is_none() {
-            state.session.lock().await.take().unwrap().handle.await??;
+            // state.session.lock().await.take().unwrap().handle.await??;
             anyhow::bail!("unreachable")
         }
         anyhow::ensure!(matches!(result, Some(Upcall::RequestOk(_))), "{result:?}");

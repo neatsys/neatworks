@@ -4,7 +4,7 @@ use augustus::{
     app,
     boson::{
         self, nitro_enclaves_portal_session, NitroEnclavesClock, QuorumClient, QuorumClock,
-        VerifyQuorumClock,
+        VerifyClock,
     },
     cops::OrdinaryVersion,
     event::{
@@ -301,7 +301,7 @@ pub async fn quorum_session(
         Tcp::new(addr)?,
         {
             // let mut clocked_sender = VerifyQuorumClock::new(config.num_faulty, recv_crypto_worker);
-            let mut clocked_sender = VerifyQuorumClock::new(
+            let mut clocked_sender = VerifyClock::new(
                 config.num_faulty,
                 Worker::Inline(crypto.clone(), Sender::from(causal_net_session.sender())),
             );
@@ -420,38 +420,47 @@ pub async fn nitro_enclaves_session(
     upcall: impl SendEvent<RequestOk> + Send + Sync + 'static,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    use lamport_mutex::Processor;
+    use augustus::{crypto::peer::Crypto, lamport_mutex::verifiable::Processor};
 
     let boson_control_messages::Mutex {
         id,
         addrs,
+        num_faulty,
         variant: boson_control_messages::Variant::NitroEnclaves,
-        ..
     } = config
     else {
         anyhow::bail!("unimplemented")
     };
     let addr = addrs[id as usize];
+    let crypto = Crypto::new_random(&mut thread_rng());
 
     let tcp_listener = TcpListener::bind(adjust(addr)).await?;
     let mut dispatch_session = event::Session::new();
     let mut processor_session = Session::new();
     let mut causal_net_session = Session::new();
     let (portal_sender, portal_receiver) = unbounded_channel();
+    let (processor_crypto_worker, mut processor_crypto_executor) = spawning_backend();
 
     let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
         Tcp::new(addr)?,
         {
-            let mut sender = Sender::from(causal_net_session.sender());
-            move |buf: &_| lamport_mutex::on_buf(buf, &mut sender)
+            // let mut clocked_sender = VerifyQuorumClock::new(config.num_faulty, recv_crypto_worker);
+            let mut clocked_sender = VerifyClock::new(
+                config.num_faulty,
+                Worker::Inline((), Sender::from(causal_net_session.sender())),
+            );
+            let mut sender = Sender::from(processor_session.sender());
+            move |buf: &_| lamport_mutex::verifiable::on_buf(buf, &mut clocked_sender, &mut sender)
         },
         Once(dispatch_session.sender()),
     )?));
     let mut processor = Blanket(Unify(Processor::new(
         id,
         addrs.len(),
+        num_faulty,
         NitroEnclavesClock::try_from(OrdinaryVersion::default())?,
         Detach(Sender::from(causal_net_session.sender())),
+        lamport_mutex::verifiable::SignOrdered::new(processor_crypto_worker),
         upcall,
     )));
     let mut causal_net = Blanket(Unify(Causal::new(
@@ -461,7 +470,7 @@ pub async fn nitro_enclaves_session(
         boson::Lamport(portal_sender, id),
         lamport_mutex::MessageNet::<_, NitroEnclavesClock>::new(IndexNet::new(
             dispatch::Net::from(dispatch_session.sender()),
-            addrs,
+            addrs.clone(),
             // intentionally sending loopback messages as expected by processor protocol
             None,
         )),
@@ -481,6 +490,14 @@ pub async fn nitro_enclaves_session(
         }
     };
     let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
+    let processor_crypto_session = processor_crypto_executor.run(
+        crypto,
+        lamport_mutex::verifiable::MessageNet::<_, NitroEnclavesClock>::new(IndexNet::new(
+            dispatch::Net::from(dispatch_session.sender()),
+            addrs,
+            None,
+        )),
+    );
     let dispatch_session = dispatch_session.run(&mut dispatch);
     let processor_session = processor_session.run(&mut processor);
     let portal_session = nitro_enclaves_portal_session(
@@ -489,7 +506,6 @@ pub async fn nitro_enclaves_session(
         boson::Lamport(Sender::from(causal_net_session.sender()), id),
     );
     let causal_net_session = causal_net_session.run(&mut causal_net);
-
     tokio::select! {
         () = cancel.cancelled() => return Ok(()),
         result = event_session => result?,
@@ -498,6 +514,7 @@ pub async fn nitro_enclaves_session(
         result = processor_session => result?,
         result = causal_net_session => result?,
         result = portal_session => result?,
+        result = processor_crypto_session => result?,
     }
     anyhow::bail!("unreachable")
 }

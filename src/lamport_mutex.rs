@@ -557,6 +557,18 @@ pub mod verifiable {
         }
     }
 
+    impl<CN: SendMessage<All, super::Message>, N, U, C> OnEvent<events::Release>
+        for Processor<CN, N, U, C>
+    {
+        fn on_event(
+            &mut self,
+            events::Release: events::Release,
+            timer: &mut impl Timer,
+        ) -> anyhow::Result<()> {
+            self.inner.on_event(events::Release, timer)
+        }
+    }
+
     impl<
             CN: SendMessage<All, super::Message>,
             N: SendMessage<u8, Ordered<C>>,
@@ -629,18 +641,6 @@ pub mod verifiable {
                 }
             }
             Ok(())
-        }
-    }
-
-    impl<CN: SendMessage<All, super::Message>, N, U, C> OnEvent<events::Release>
-        for Processor<CN, N, U, C>
-    {
-        fn on_event(
-            &mut self,
-            events::Release: events::Release,
-            timer: &mut impl Timer,
-        ) -> anyhow::Result<()> {
-            self.inner.on_event(events::Release, timer)
         }
     }
 

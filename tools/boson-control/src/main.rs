@@ -57,60 +57,48 @@ async fn main() -> anyhow::Result<()> {
         Some("mutex") => {
             let instances = terraform_output("mutex_instances").await?;
             let clock_instances = terraform_output("quorum_instances").await?;
-            for n in 1..=20 {
-                mutex_session(
-                    client.clone(),
-                    instances.clone(),
-                    clock_instances.clone(),
-                    RequestMode::One,
-                    Variant::Quorum,
-                    n,
-                )
-                .await?
-            }
-            for n in 1..=20 {
-                mutex_session(
-                    client.clone(),
-                    instances.clone(),
-                    clock_instances.clone(),
-                    RequestMode::One,
-                    Variant::Untrusted,
-                    n,
-                )
-                .await?
-            }
-            for n in 1..=20 {
-                mutex_session(
-                    client.clone(),
-                    instances.clone(),
-                    clock_instances.clone(),
-                    RequestMode::One,
-                    Variant::Replicated,
-                    n,
-                )
-                .await?
-            }
-            for n in 1..=16 {
-                mutex_session(
-                    client.clone(),
-                    instances.clone(),
-                    clock_instances.clone(),
-                    RequestMode::All,
-                    Variant::Quorum,
-                    n,
-                )
-                .await?
-            }
-            for n in 1..=16 {
-                mutex_session(
-                    client.clone(),
-                    instances.clone(),
-                    clock_instances.clone(),
-                    RequestMode::All,
-                    Variant::Untrusted,
-                    n,
-                )
-                .await?
+            // for variant in [
+            //     Variant::Untrusted,
+            //     Variant::Replicated,
+            //     Variant::Quorum,
+            //     Variant::NitroEnclaves,
+            // ] {
+            //     for n in 1..=20 {
+            //         mutex_session(
+            //             client.clone(),
+            //             instances.clone(),
+            //             clock_instances.clone(),
+            //             RequestMode::One,
+            //             variant,
+            //             n,
+            //         )
+            //         .await?
+            //     }
+            // }
+            for variant in [
+                // Variant::Replicated,
+                Variant::NitroEnclaves,
+                // Variant::Quorum,
+                // Variant::Untrusted,
+            ] {
+                for n in if matches!(variant, Variant::Replicated) {
+                    1..=4
+                } else {
+                    1..=16
+                    // 16..=16
+                }
+                .rev()
+                {
+                    mutex_session(
+                        client.clone(),
+                        instances.clone(),
+                        clock_instances.clone(),
+                        RequestMode::All,
+                        variant,
+                        n,
+                    )
+                    .await?
+                }
             }
             Ok(())
         }
@@ -275,7 +263,7 @@ pub enum RequestMode {
     All,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum Variant {
     Untrusted,
     Replicated,
@@ -343,7 +331,7 @@ async fn mutex_session(
             quorum: quorum.clone(),
             index: i,
         };
-        watchdog_sessions.spawn(start_quorum_session(client.clone(), url.clone(), config));
+        watchdog_sessions.spawn(quorum_start_session(client.clone(), url.clone(), config));
     }
     while_ok(&mut watchdog_sessions, sleep(Duration::from_millis(5000))).await?;
     use boson_control_messages::Variant::*;
@@ -406,6 +394,7 @@ async fn mutex_session(
                 )?
             }
         }
+        // sleep(Duration::from_millis(10000)).await
     }
     watchdog_sessions.shutdown().await;
     let mut stop_sessions = JoinSet::new();
@@ -413,7 +402,7 @@ async fn mutex_session(
         stop_sessions.spawn(mutex_stop_session(client.clone(), url));
     }
     for url in clock_urls {
-        stop_sessions.spawn(stop_quorum_session(client.clone(), url));
+        stop_sessions.spawn(quorum_stop_session(client.clone(), url));
     }
     while let Some(result) = stop_sessions.join_next().await {
         result??
@@ -471,7 +460,7 @@ async fn mutex_request_session(
     let latency = client
         .post(format!("{url}/mutex/request"))
         .json(&at)
-        .timeout(Duration::from_millis(30000))
+        .timeout(Duration::from_millis(40000))
         .send()
         .await?
         .error_for_status()?
@@ -552,7 +541,7 @@ async fn cops_session(
             quorum: quorum.clone(),
             index: i,
         };
-        watchdog_sessions.spawn(start_quorum_session(client.clone(), url.clone(), config));
+        watchdog_sessions.spawn(quorum_start_session(client.clone(), url.clone(), config));
     }
     use boson_control_messages::Variant::*;
     let variant_config = match variant {
@@ -615,7 +604,7 @@ async fn cops_session(
         stop_sessions.spawn(cops_stop_server_session(client.clone(), url));
     }
     for url in clock_urls {
-        stop_sessions.spawn(stop_quorum_session(client.clone(), url));
+        stop_sessions.spawn(quorum_stop_session(client.clone(), url));
     }
     while let Some(result) = stop_sessions.join_next().await {
         result??
@@ -871,7 +860,7 @@ async fn bench_quorum_session(client: reqwest::Client) -> anyhow::Result<()> {
                 quorum: quorum.clone(),
                 index: i,
             };
-            watchdog_sessions.spawn(start_quorum_session(client.clone(), url.clone(), config));
+            watchdog_sessions.spawn(quorum_start_session(client.clone(), url.clone(), config));
         }
 
         while_ok(&mut watchdog_sessions, async {
@@ -896,7 +885,7 @@ async fn bench_quorum_session(client: reqwest::Client) -> anyhow::Result<()> {
         watchdog_sessions.shutdown().await;
         let mut stop_sessions = JoinSet::new();
         for url in &clock_urls {
-            stop_sessions.spawn(stop_quorum_session(client.clone(), url.clone()));
+            stop_sessions.spawn(quorum_stop_session(client.clone(), url.clone()));
         }
         while let Some(result) = stop_sessions.join_next().await {
             result??
@@ -913,7 +902,7 @@ async fn bench_quorum_session(client: reqwest::Client) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn start_quorum_session(
+async fn quorum_start_session(
     client: reqwest::Client,
     url: String,
     config: boson_control_messages::QuorumServer,
@@ -934,7 +923,7 @@ async fn start_quorum_session(
     }
 }
 
-async fn stop_quorum_session(client: reqwest::Client, url: String) -> anyhow::Result<()> {
+async fn quorum_stop_session(client: reqwest::Client, url: String) -> anyhow::Result<()> {
     client
         .post(format!("{url}/stop-quorum"))
         .send()
