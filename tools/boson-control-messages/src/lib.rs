@@ -38,6 +38,7 @@ pub enum Variant {
     Untrusted,
     Replicated(Replicated),
     Quorum(Quorum),
+    NitroEnclaves,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

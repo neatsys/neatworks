@@ -6,7 +6,7 @@ use tokio::{sync::mpsc::UnboundedReceiver, task::JoinSet};
 use tracing::{debug, warn};
 
 use crate::{
-    cops::{self, DefaultVersion, DepOrd},
+    cops::{self, DepOrd, OrdinaryVersion},
     crypto::peer::{
         events::{Signed, Verified},
         Crypto, PublicKey, Verifiable,
@@ -23,18 +23,19 @@ pub struct Update<C>(pub C, pub Vec<C>, pub u64);
 // feel lazy to define event type for replying
 pub type UpdateOk<C> = (u64, C);
 
-pub struct Lamport<E>(pub E, pub u64);
+#[derive(Debug, Clone)]
+pub struct Lamport<E>(pub E, pub u8);
 
 impl<E: SendEvent<Update<C>>, C> SendEvent<lamport_mutex::events::Update<C>> for Lamport<E> {
     fn send(&mut self, update: lamport_mutex::Update<C>) -> anyhow::Result<()> {
         self.0
-            .send(Update(update.prev, vec![update.remote], self.1))
+            .send(Update(update.prev, vec![update.remote], self.1 as _))
     }
 }
 
 impl<E: SendEvent<lamport_mutex::events::UpdateOk<C>>, C> SendEvent<UpdateOk<C>> for Lamport<E> {
     fn send(&mut self, (id, clock): (u64, C)) -> anyhow::Result<()> {
-        anyhow::ensure!(id == self.1);
+        anyhow::ensure!(id == self.1 as u64);
         self.0.send(lamport_mutex::events::UpdateOk(clock))
     }
 }
@@ -68,7 +69,7 @@ pub struct Announce<A> {
 
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]
 pub struct AnnounceOk {
-    plain: DefaultVersion,
+    plain: OrdinaryVersion,
     id: u64,
     key: PublicKey,
 }
@@ -76,15 +77,15 @@ pub struct AnnounceOk {
 #[derive(Debug, Clone, Hash, Default, Serialize, Deserialize)]
 #[derive_where(PartialOrd, PartialEq)]
 pub struct QuorumClock {
-    plain: DefaultVersion, // redundant, just for easier use
+    plain: OrdinaryVersion, // redundant, just for easier use
     #[derive_where(skip)]
     cert: Vec<Verifiable<AnnounceOk>>,
 }
 
-impl TryFrom<DefaultVersion> for QuorumClock {
+impl TryFrom<OrdinaryVersion> for QuorumClock {
     type Error = anyhow::Error;
 
-    fn try_from(value: DefaultVersion) -> Result<Self, Self::Error> {
+    fn try_from(value: OrdinaryVersion) -> Result<Self, Self::Error> {
         anyhow::ensure!(value.is_genesis());
         Ok(Self {
             plain: value,
@@ -173,7 +174,7 @@ pub struct QuorumClient<CW, U, N, A> {
 }
 
 struct WorkingAnnounce {
-    prev_plain: DefaultVersion,
+    prev_plain: OrdinaryVersion,
     replies: HashMap<PublicKey, Verifiable<AnnounceOk>>,
     pending: Option<Vec<Verifiable<AnnounceOk>>>,
 }
@@ -480,15 +481,15 @@ impl VerifyClock for cops::SyncKey<QuorumClock> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[derive_where(PartialOrd, PartialEq)]
 pub struct NitroEnclavesClock {
-    pub plain: DefaultVersion,
+    pub plain: OrdinaryVersion,
     #[derive_where(skip)]
     pub document: Payload,
 }
 
-impl TryFrom<DefaultVersion> for NitroEnclavesClock {
+impl TryFrom<OrdinaryVersion> for NitroEnclavesClock {
     type Error = anyhow::Error;
 
-    fn try_from(value: DefaultVersion) -> Result<Self, Self::Error> {
+    fn try_from(value: OrdinaryVersion) -> Result<Self, Self::Error> {
         anyhow::ensure!(value.is_genesis());
         Ok(Self {
             plain: value,

@@ -3,7 +3,7 @@ use std::{mem::take, net::SocketAddr, ops::Range, time::Duration};
 use augustus::{
     app::{self, ycsb, App},
     boson::{self, QuorumClient, QuorumClock, VerifyQuorumClock},
-    cops::{self, DefaultVersion, DefaultVersionService},
+    cops::{self, OrdinaryVersion, DefaultVersionService},
     event::{
         self,
         erased::{events::Init, session::Sender, Blanket, Buffered, Session, Unify},
@@ -272,7 +272,7 @@ pub async fn untrusted_client_session(
             Once(dispatch_session.sender()),
         )?));
         let mut client = Blanket(Buffered::from(
-            cops::Client::<_, _, DefaultVersion, _>::new(
+            cops::Client::<_, _, OrdinaryVersion, _>::new(
                 addr,
                 replica_addr,
                 cops::ToReplicaMessageNet::new(dispatch::Net::from(dispatch_session.sender())),
@@ -356,7 +356,7 @@ pub async fn untrusted_server_session(
     )?));
     let mut replica = Blanket(Buffered::from(
         cops::Replica::<_, _, _, _, SocketAddr>::new(
-            DefaultVersion::default(),
+            OrdinaryVersion::default(),
             cops::ToReplicaMessageNet::<_, _, SocketAddr>::new(IndexNet::new(
                 dispatch::Net::from(dispatch_session.sender()),
                 addrs,
@@ -364,7 +364,7 @@ pub async fn untrusted_server_session(
             )),
             cops::ToClientMessageNet::new(dispatch::Net::from(dispatch_session.sender())),
             DefaultVersionService(Box::new(Sender::from(replica_session.sender()))
-                as Box<dyn SendEvent<cops::events::UpdateOk<DefaultVersion>> + Send + Sync>),
+                as Box<dyn SendEvent<cops::events::UpdateOk<OrdinaryVersion>> + Send + Sync>),
         ),
     ));
     {

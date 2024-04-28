@@ -143,6 +143,12 @@ async fn mutex_start(
                 upcall_sender,
                 cancel.clone(),
             )),
+            NitroEnclaves => tokio::spawn(mutex::nitro_enclaves_session(
+                config,
+                event_receiver,
+                upcall_sender,
+                cancel.clone(),
+            )),
         };
         *session = Some(AppSession { handle, cancel });
         let replaced = state.channel.lock().await.replace(AppChannel {
@@ -221,6 +227,7 @@ async fn cops_start_client(
             Untrusted => tokio::spawn(cops::untrusted_client_session(config, upcall_sender)),
             Replicated(_) => tokio::spawn(cops::pbft_client_session(config, upcall_sender)),
             Quorum(_) => tokio::spawn(cops::quorum_client_session(config, upcall_sender)),
+            NitroEnclaves => todo!(),
         };
         *session = Some(AppSession { handle, cancel });
         let replaced = state.channel.lock().await.replace(AppChannel {
@@ -279,6 +286,7 @@ async fn cops_start_server(
             Untrusted => tokio::spawn(cops::untrusted_server_session(config, cancel.clone())),
             Replicated(_) => tokio::spawn(cops::pbft_server_session(config, cancel.clone())),
             Quorum(_) => tokio::spawn(cops::quorum_server_session(config, cancel.clone())),
+            NitroEnclaves => todo!(),
         };
         *session = Some(AppSession { handle, cancel });
         let replaced = state.channel.lock().await.replace(AppChannel {

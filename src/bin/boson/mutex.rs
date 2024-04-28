@@ -2,7 +2,11 @@ use std::net::SocketAddr;
 
 use augustus::{
     app,
-    boson::{self, QuorumClient, QuorumClock, VerifyQuorumClock},
+    boson::{
+        self, nitro_enclaves_portal_session, NitroEnclavesClock, QuorumClient, QuorumClock,
+        VerifyQuorumClock,
+    },
+    cops::OrdinaryVersion,
     event::{
         self,
         erased::{events::Init, session::Sender, Blanket, Buffered, Session, Unify},
@@ -20,7 +24,10 @@ use augustus::{
     workload::{events::InvokeOk, Queue},
 };
 use rand::thread_rng;
-use tokio::{net::TcpListener, sync::mpsc::UnboundedReceiver};
+use tokio::{
+    net::TcpListener,
+    sync::mpsc::{unbounded_channel, UnboundedReceiver},
+};
 use tokio_util::sync::CancellationToken;
 
 fn adjust(addr: SocketAddr) -> SocketAddr {
@@ -324,7 +331,7 @@ pub async fn quorum_session(
         QuorumClock::default(),
         Box::new(Sender::from(processor_session.sender()))
             as Box<dyn lamport_mutex::SendRecvEvent<QuorumClock> + Send + Sync>,
-        boson::Lamport(Sender::from(clock_session.sender()), id as _),
+        boson::Lamport(Sender::from(clock_session.sender()), id),
         lamport_mutex::verifiable::MessageNet::<_, QuorumClock>::new(IndexNet::new(
             dispatch::Net::from(dispatch_session.sender()),
             addrs.clone(),
@@ -345,7 +352,7 @@ pub async fn quorum_session(
         boson::Lamport(
             Box::new(Sender::from(causal_net_session.sender()))
                 as Box<dyn SendEvent<lamport_mutex::events::UpdateOk<QuorumClock>> + Send + Sync>,
-            id as _,
+            id,
         ),
         augustus::net::MessageNet::<_, Verifiable<boson::Announce<SocketAddr>>>::new(
             IndexNet::new(
@@ -403,6 +410,94 @@ pub async fn quorum_session(
         result = crypto_session => result?,
         result = processor_crypto_session => result?,
         result = clock_session => result?,
+    }
+    anyhow::bail!("unreachable")
+}
+
+pub async fn nitro_enclaves_session(
+    config: boson_control_messages::Mutex,
+    mut events: UnboundedReceiver<Event>,
+    upcall: impl SendEvent<RequestOk> + Send + Sync + 'static,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
+    use lamport_mutex::Processor;
+
+    let boson_control_messages::Mutex {
+        id,
+        addrs,
+        variant: boson_control_messages::Variant::NitroEnclaves,
+        ..
+    } = config
+    else {
+        anyhow::bail!("unimplemented")
+    };
+    let addr = addrs[id as usize];
+
+    let tcp_listener = TcpListener::bind(adjust(addr)).await?;
+    let mut dispatch_session = event::Session::new();
+    let mut processor_session = Session::new();
+    let mut causal_net_session = Session::new();
+    let (portal_sender, portal_receiver) = unbounded_channel();
+
+    let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
+        Tcp::new(addr)?,
+        {
+            let mut sender = Sender::from(causal_net_session.sender());
+            move |buf: &_| lamport_mutex::on_buf(buf, &mut sender)
+        },
+        Once(dispatch_session.sender()),
+    )?));
+    let mut processor = Blanket(Unify(Processor::new(
+        id,
+        addrs.len(),
+        NitroEnclavesClock::try_from(OrdinaryVersion::default())?,
+        Detach(Sender::from(causal_net_session.sender())),
+        upcall,
+    )));
+    let mut causal_net = Blanket(Unify(Causal::new(
+        NitroEnclavesClock::try_from(OrdinaryVersion::default())?,
+        Box::new(Sender::from(processor_session.sender()))
+            as Box<dyn lamport_mutex::SendRecvEvent<NitroEnclavesClock> + Send + Sync>,
+        boson::Lamport(portal_sender, id),
+        lamport_mutex::MessageNet::<_, NitroEnclavesClock>::new(IndexNet::new(
+            dispatch::Net::from(dispatch_session.sender()),
+            addrs,
+            // intentionally sending loopback messages as expected by processor protocol
+            None,
+        )),
+    )?));
+    Sender::from(causal_net_session.sender()).send(Init)?;
+
+    let event_session = {
+        let mut sender = Sender::from(processor_session.sender());
+        async move {
+            while let Some(event) = events.recv().await {
+                match event {
+                    Event::Request => sender.send(lamport_mutex::events::Request)?,
+                    Event::Release => sender.send(lamport_mutex::events::Release)?,
+                }
+            }
+            anyhow::Ok(())
+        }
+    };
+    let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
+    let dispatch_session = dispatch_session.run(&mut dispatch);
+    let processor_session = processor_session.run(&mut processor);
+    let portal_session = nitro_enclaves_portal_session(
+        16,
+        portal_receiver,
+        boson::Lamport(Sender::from(causal_net_session.sender()), id),
+    );
+    let causal_net_session = causal_net_session.run(&mut causal_net);
+
+    tokio::select! {
+        () = cancel.cancelled() => return Ok(()),
+        result = event_session => result?,
+        result = tcp_accept_session => result?,
+        result = dispatch_session => result?,
+        result = processor_session => result?,
+        result = causal_net_session => result?,
+        result = portal_session => result?,
     }
     anyhow::bail!("unreachable")
 }

@@ -593,9 +593,9 @@ pub fn to_replica_on_buf<V: DeserializeOwned, A: DeserializeOwned>(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-pub struct DefaultVersion(pub BTreeMap<KeyId, u32>);
+pub struct OrdinaryVersion(pub BTreeMap<KeyId, u32>);
 
-impl DefaultVersion {
+impl OrdinaryVersion {
     pub fn new() -> Self {
         Self::default()
     }
@@ -632,7 +632,7 @@ impl DefaultVersion {
     }
 }
 
-impl PartialOrd for DefaultVersion {
+impl PartialOrd for OrdinaryVersion {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         let merged = self.merge(other);
         match (merged == *self, merged == *other) {
@@ -644,7 +644,7 @@ impl PartialOrd for DefaultVersion {
     }
 }
 
-impl DepOrd for DefaultVersion {
+impl DepOrd for OrdinaryVersion {
     fn dep_cmp(&self, other: &Self, id: KeyId) -> Ordering {
         match (self.0.get(&id), other.0.get(&id)) {
             // handy sanity check
@@ -670,10 +670,10 @@ impl DepOrd for DefaultVersion {
 #[derive(Debug)]
 pub struct DefaultVersionService<E>(pub E);
 
-impl<E: SendEvent<events::UpdateOk<DefaultVersion>>> SendEvent<events::Update<DefaultVersion>>
+impl<E: SendEvent<events::UpdateOk<OrdinaryVersion>>> SendEvent<events::Update<OrdinaryVersion>>
     for DefaultVersionService<E>
 {
-    fn send(&mut self, update: events::Update<DefaultVersion>) -> anyhow::Result<()> {
+    fn send(&mut self, update: events::Update<OrdinaryVersion>) -> anyhow::Result<()> {
         let update_ok = events::UpdateOk {
             id: update.id,
             version_deps: update.prev.update(update.deps.iter(), update.id),
@@ -688,7 +688,7 @@ mod tests {
 
     #[test]
     fn default_is_genesis() -> anyhow::Result<()> {
-        anyhow::ensure!(DefaultVersion::default().is_genesis());
+        anyhow::ensure!(OrdinaryVersion::default().is_genesis());
         Ok(())
     }
 }

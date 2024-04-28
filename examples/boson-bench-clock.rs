@@ -11,7 +11,7 @@ use augustus::{
         self, nitro_enclaves_portal_session, NitroEnclavesClock, QuorumClient, QuorumClock, Update,
         UpdateOk,
     },
-    cops::DefaultVersion,
+    cops::OrdinaryVersion,
     crypto::peer::{Crypto, Verifiable},
     event::{
         self,
@@ -186,7 +186,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn bench_session<C: TryFrom<DefaultVersion> + Clone + Send + Sync + 'static>(
+async fn bench_session<C: TryFrom<OrdinaryVersion> + Clone + Send + Sync + 'static>(
     size: usize,
     num_merged: usize,
     update_sender: &UnboundedSender<Update<C>>,
@@ -197,7 +197,7 @@ async fn bench_session<C: TryFrom<DefaultVersion> + Clone + Send + Sync + 'stati
 where
     C::Error: Into<anyhow::Error>,
 {
-    let clock = C::try_from(DefaultVersion((0..size).map(|i| (i as _, 0)).collect()))
+    let clock = C::try_from(OrdinaryVersion((0..size).map(|i| (i as _, 0)).collect()))
         .map_err(Into::into)?;
     update_sender.send(Update(clock, Default::default(), 0))?;
     let Some((_, clock)) = update_ok_receiver.recv().await else {
