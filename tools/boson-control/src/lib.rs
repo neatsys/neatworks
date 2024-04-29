@@ -53,8 +53,9 @@ pub async fn instance_sessions<F: Future<Output = anyhow::Result<()>> + Send + '
     for instance in instances {
         sessions.spawn(session(instance.public_dns.clone()));
     }
+    let mut the_result = Ok(());
     while let Some(result) = sessions.join_next().await {
-        result??
+        the_result = the_result.and_then(|_| anyhow::Ok(result??))
     }
-    Ok(())
+    the_result
 }

@@ -20,7 +20,8 @@ async fn main() -> anyhow::Result<()> {
     })
     .await?;
 
-    let instances = terraform_output("mutex_instances").await?;
+    let mut instances = terraform_output("microbench_instances").await?;
+    instances.extend(terraform_output("mutex_instances").await?);
     // TODO extend cops instances
     instance_sessions(&instances, |host| async move {
         let host = format!("ec2-user@{host}");
@@ -31,13 +32,14 @@ async fn main() -> anyhow::Result<()> {
                     "sudo dnf install -y tmux docker-24.0.5-1.amzn2023.0.3 aws-nitro-enclaves-cli",
                 ) + " && sudo usermod -aG ne ec2-user"
                     + " && sudo usermod -aG docker ec2-user"
-                    + " && sudo systemctl enable --now nitro-enclaves-allocator.service"
-                    + " && sudo systemctl enable --now docker",
+                    + " && echo -e \"---\nmemory_mib: 2048\\ncpu_count: 4\" | sudo tee /etc/nitro_enclaves/allocator.yaml"
+                    + " && sudo systemctl restart nitro-enclaves-allocator.service"
+                    + " && sudo systemctl restart docker",
             )
             .stdout(Stdio::null())
             .status()
             .await?;
-        anyhow::ensure!(status.success());
+        anyhow::ensure!(status.success(), "{host}");
         Ok(())
     })
     .await?;

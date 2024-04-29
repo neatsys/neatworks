@@ -121,10 +121,12 @@ impl<E: SendEvent<Recv<Clocked<M, u32>>>, M> SendEvent<Recv<M>> for Replicated<E
 // execution order i.e. partial ordering across processors are not shown
 // this middleware guarantees to provide real time correspondence of the
 // timeline above to the network user. for example, if a processors is observed
-// to have the timeline above, then it must have send all three messages before
-// processing the second receiving message, the other cases e.g. it sends one
-// of the three messages after the second receiving, but a stalled clock value
-// is assigned to that message, are guaranteed to be impossible
+// to have the timeline above, then the three messages must be sent after under
+// the *influence* of the first receiving message. notice that because of the
+// causal network runs asynchronously to the processor state machine, so the
+// assigned clock value may be unnecessarily high e.g. false positively stating
+// the sent messages also depend on the second receiving message, but it's
+// always impossible to have the other way around false negative
 pub struct Causal<E, CS, N, C, M> {
     clock: C,
     pending_recv: Option<VecDeque<Clocked<M, C>>>,
@@ -295,6 +297,7 @@ pub struct Processor<CN, U, C> {
     latests: Vec<C>,
     requests: Vec<(C, u8)>,
     requesting: bool,
+    requests_cleared: bool,
 
     causal_net: CN,
     upcall: U,
@@ -309,6 +312,7 @@ impl<CN, U, C: Clone> Processor<CN, U, C> {
             latests: repeat(clock_zero).take(num_processor).collect(),
             requests: Default::default(),
             requesting: false,
+            requests_cleared: true,
         }
     }
 }
@@ -335,6 +339,8 @@ impl<CN: SendMessage<All, Message>, U, C> OnEvent<events::Request> for Processor
     ) -> anyhow::Result<()> {
         let replaced = replace(&mut self.requesting, true);
         anyhow::ensure!(!replaced, "concurrent request");
+        let replaced = replace(&mut self.requests_cleared, false);
+        anyhow::ensure!(replaced, "requests never cleared since last request");
         // in this protocol we always expect to loopback `Recv(_)` our own messages
         // the Request will be added into ourselves queue there
         self.causal_net.send(All, Message::Request(self.id))
@@ -408,6 +414,9 @@ impl<CN, U, C: Clock + ClockOrd> Processor<CN, U, C> {
                 {
                     // really want to assert something on the removed clock, any idea?
                     self.requests.remove(index);
+                    if self.requests.is_empty() {
+                        self.requests_cleared = true
+                    }
                 }
             }
         }
@@ -643,6 +652,7 @@ pub mod verifiable {
                             > self.num_faulty
                     {
                         self.requesting = false;
+                        self.proof.clear(); // TODO transfer to whoever cares
                         self.upcall.send(events::RequestOk)?
                     }
                 }
@@ -660,6 +670,9 @@ pub mod verifiable {
             _: &mut impl Timer,
         ) -> anyhow::Result<()> {
             // println!("recv ordered");
+            if !self.requesting {
+                return Ok(());
+            }
             if let Some(other_ordered) = self.proof.get(&ordered.id) {
                 if matches!(
                     other_ordered.clock.partial_cmp(&ordered.clock),

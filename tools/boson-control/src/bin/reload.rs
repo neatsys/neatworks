@@ -37,7 +37,6 @@ async fn host_session(ssh_host: String, sync: bool) -> anyhow::Result<()> {
         let status = Command::new("rsync")
             .arg("-a")
             .arg("target/artifact/boson")
-            .arg("app.eif")
             // .arg("target/debug/boson")
             .arg(format!("{ssh_host}:"))
             .status()

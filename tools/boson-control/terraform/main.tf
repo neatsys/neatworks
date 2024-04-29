@@ -86,7 +86,8 @@ module "mutex" {
     aws.af-south-1   = aws.af-south-1
   }
   instance_state = var.state
-  instance_count = 20
+  instance_type = "c5a.2xlarge"
+  instance_count = 16
 }
 
 module "quorum" {

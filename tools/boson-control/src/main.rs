@@ -48,8 +48,8 @@ async fn main() -> anyhow::Result<()> {
                 instances,
                 clock_instances,
                 RequestMode::All,
-                Variant::NitroEnclaves,
-                8,
+                Variant::Replicated,
+                6,
             )
             .await?;
             Ok(())
@@ -81,11 +81,10 @@ async fn main() -> anyhow::Result<()> {
                 // Variant::Quorum,
                 // Variant::Untrusted,
             ] {
-                for n in if matches!(variant, Variant::Replicated) {
-                    1..=4
-                } else {
-                    // 1..=16
-                    1..=1
+                for n in match variant {
+                    Variant::Replicated => 1..=5,
+                    Variant::NitroEnclaves => 1..=12,
+                    _ => 1..=16,
                 }
                 .rev()
                 {
@@ -434,11 +433,16 @@ async fn mutex_start_session(
         .error_for_status()?;
     loop {
         sleep(Duration::from_millis(1000)).await;
+        let start = tokio::time::Instant::now();
         client
             .get(format!("{url}/ok"))
             .send()
             .await?
             .error_for_status()?;
+        let elapsed = start.elapsed();
+        if elapsed > Duration::from_millis(1000) {
+            println!("! Slow responded {url}/ok: {elapsed:?}")
+        }
     }
 }
 
@@ -460,7 +464,7 @@ async fn mutex_request_session(
     let latency = client
         .post(format!("{url}/mutex/request"))
         .json(&at)
-        .timeout(Duration::from_millis(40000))
+        .timeout(Duration::from_millis(60000))
         .send()
         .await?
         .error_for_status()?
