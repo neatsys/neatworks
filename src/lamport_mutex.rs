@@ -26,7 +26,7 @@ use tracing::{debug, warn};
 use crate::{
     event::{
         erased::{events::Init, OnEvent},
-        OnTimer, SendEvent, Timer,
+        OnTimer, SendEvent, Timer, TimerId,
     },
     net::{deserialize, events::Recv, All, SendMessage},
 };
@@ -129,7 +129,7 @@ impl<E: SendEvent<Recv<Clocked<M, u32>>>, M> SendEvent<Recv<M>> for Replicated<E
 // always impossible to have the other way around false negative
 pub struct Causal<E, CS, N, C, M> {
     clock: C,
-    pending_recv: Option<VecDeque<Clocked<M, C>>>,
+    pending_recv: Option<PendingRecv<M, C>>,
     // erasing address type
     // this is definitely wrong, at least not right
     // sadly i cannot think out any other thing that works by now
@@ -140,6 +140,11 @@ pub struct Causal<E, CS, N, C, M> {
     recv_sender: E,
     clock_service: CS,
     net: N,
+}
+
+struct PendingRecv<M, C> {
+    messages: VecDeque<Clocked<M, C>>,
+    slow_update: TimerId,
 }
 
 impl<E, CS: SendEvent<Update<C>>, N, C: Clone, M> Causal<E, CS, N, C, M> {
@@ -156,14 +161,20 @@ impl<E, CS: SendEvent<Update<C>>, N, C: Clone, M> Causal<E, CS, N, C, M> {
     }
 }
 
+const SLOW_UPDATE_DURATION: std::time::Duration = std::time::Duration::from_millis(100);
+
 impl<E, CS: SendEvent<Update<C>>, N, C: Clone, M> OnEvent<Init> for Causal<E, CS, N, C, M> {
-    fn on_event(&mut self, Init: Init, _: &mut impl Timer) -> anyhow::Result<()> {
+    fn on_event(&mut self, Init: Init, timer: &mut impl Timer) -> anyhow::Result<()> {
         let update = Update {
             prev: self.clock.clone(),
             remote: self.clock.clone(),
         };
         self.clock_service.send(update)?;
-        self.pending_recv = Some(Default::default());
+        self.pending_recv = Some(PendingRecv {
+            messages: Default::default(),
+            // for Dispatch net's random backoff
+            slow_update: timer.set(SLOW_UPDATE_DURATION + std::time::Duration::from_millis(500))?,
+        });
         Ok(())
     }
 }
@@ -174,20 +185,25 @@ impl<E: SendEvent<Recv<Clocked<M, C>>>, CS: SendEvent<Update<C>>, N, C: Clone, M
     fn on_event(
         &mut self,
         Recv(clocked): Recv<Clocked<M, C>>,
-        _: &mut impl Timer,
+        timer: &mut impl Timer,
     ) -> anyhow::Result<()> {
         debug!("recv clocked");
         if let Some(pending_recv) = &mut self.pending_recv {
             debug!("recv clocked pending");
-            pending_recv.push_back(clocked);
+            pending_recv.messages.push_back(clocked);
             return Ok(());
         }
-        self.pending_recv = Some(Default::default());
+        anyhow::ensure!(self.pending_send.is_empty());
+        self.pending_recv = Some(PendingRecv {
+            messages: Default::default(),
+            slow_update: timer.set(SLOW_UPDATE_DURATION)?,
+        });
         let update = Update {
             prev: self.clock.clone(),
             remote: clocked.clock.clone(),
         };
         self.clock_service.send(update)?;
+
         debug!("forward recv clocked");
         self.recv_sender.send(Recv(clocked))
     }
@@ -203,29 +219,31 @@ impl<
     > SendMessage<A, M> for Causal<E, CS, N, C, M>
 {
     fn send(&mut self, dest: A, message: M) -> anyhow::Result<()> {
-        if self.pending_recv.is_some() {
-            self.pending_send.push(Box::new(move |clock, net| {
-                let clocked = Clocked {
-                    inner: message,
-                    clock,
-                };
-                net.send(dest, clocked)
-            }));
-            return Ok(());
-        }
-        let clocked = Clocked {
-            clock: self.clock.clone(),
-            inner: message,
+        let send = move |clock, net: &mut N| {
+            let clocked = Clocked {
+                inner: message,
+                clock,
+            };
+            net.send(dest, clocked)
         };
-        debug!("send clocked");
-        self.net.send(dest, clocked)
+        if self.pending_recv.is_some() {
+            self.pending_send.push(Box::new(send))
+        } else {
+            debug!("send clocked");
+            send(self.clock.clone(), &mut self.net)?
+        }
+        Ok(())
     }
 }
 
 impl<E: SendEvent<Recv<Clocked<M, C>>>, M, CS: SendEvent<Update<C>>, N, C: Clock>
     OnEvent<UpdateOk<C>> for Causal<E, CS, N, C, M>
 {
-    fn on_event(&mut self, UpdateOk(clock): UpdateOk<C>, _: &mut impl Timer) -> anyhow::Result<()> {
+    fn on_event(
+        &mut self,
+        UpdateOk(clock): UpdateOk<C>,
+        timer: &mut impl Timer,
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(matches!(
             clock.partial_cmp(&self.clock),
             Some(Ordering::Greater)
@@ -234,17 +252,19 @@ impl<E: SendEvent<Recv<Clocked<M, C>>>, M, CS: SendEvent<Update<C>>, N, C: Clock
         let Some(pending_recv) = &mut self.pending_recv else {
             anyhow::bail!("missing pending recv queue")
         };
-        if let Some(clocked) = pending_recv.pop_front() {
+        if let Some(clocked) = pending_recv.messages.pop_front() {
             debug!("pended recv clocked popped");
             let update = Update {
                 prev: self.clock.clone(),
                 remote: clocked.clock.clone(),
             };
             self.clock_service.send(update)?;
-            self.recv_sender.send(Recv(clocked))?
+            self.recv_sender.send(Recv(clocked))?;
+            let slow_update = timer.set(SLOW_UPDATE_DURATION)?;
+            timer.unset(replace(&mut pending_recv.slow_update, slow_update))?;
         } else {
             debug!("pended recv clock cleared");
-            self.pending_recv = None
+            timer.unset(self.pending_recv.take().unwrap().slow_update)?
         }
         for send in self.pending_send.drain(..) {
             send(self.clock.clone(), &mut self.net)?
@@ -254,8 +274,12 @@ impl<E: SendEvent<Recv<Clocked<M, C>>>, M, CS: SendEvent<Update<C>>, N, C: Clock
 }
 
 impl<E, CS, N, C, M> OnTimer for Causal<E, CS, N, C, M> {
-    fn on_timer(&mut self, _: crate::event::TimerId, _: &mut impl Timer) -> anyhow::Result<()> {
-        unreachable!()
+    fn on_timer(
+        &mut self,
+        timer_id: crate::event::TimerId,
+        _: &mut impl Timer,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("slow update: {timer_id:?}")
     }
 }
 
@@ -339,6 +363,7 @@ impl<CN: SendMessage<All, Message>, U, C> OnEvent<events::Request> for Processor
     ) -> anyhow::Result<()> {
         let replaced = replace(&mut self.requesting, true);
         anyhow::ensure!(!replaced, "concurrent request");
+        // this is just for boson evaluation, not a universal invariant
         let replaced = replace(&mut self.requests_cleared, false);
         anyhow::ensure!(replaced, "requests never cleared since last request");
         // in this protocol we always expect to loopback `Recv(_)` our own messages
@@ -373,9 +398,8 @@ impl<CN, U, C: Clock + ClockOrd> Processor<CN, U, C> {
     where
         CN: SendMessage<A, Message>,
     {
-        let id = match &message.inner {
-            Message::Request(id) | Message::RequestOk(id) | Message::Release(id) => *id,
-        };
+        let &(Message::Request(id) | Message::RequestOk(id) | Message::Release(id)) =
+            &message.inner;
         let Some(Ordering::Greater | Ordering::Equal) =
             message.clock.partial_cmp(&self.latests[id as usize])
         else {

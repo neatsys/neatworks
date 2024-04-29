@@ -27,7 +27,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let rlimit = nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_NOFILE)?;
@@ -36,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
         rlimit.1,
         rlimit.1,
     )?;
+    let runtime = tokio::runtime::Runtime::new()?;
     let app = Router::new()
         .route("/ok", get(ok))
         .route("/mutex/start", post(mutex_start))
@@ -50,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(AppState {
             session: Default::default(),
             channel: Default::default(),
+            handle: runtime.handle().clone(),
         });
     let ip = std::env::args().nth(1);
     let ip = ip.as_deref().unwrap_or("0.0.0.0");
@@ -57,6 +59,7 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(async { ctrl_c().await.unwrap() })
         .await?;
+    runtime.shutdown_background();
     Ok(())
 }
 
@@ -64,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
 struct AppState {
     session: Arc<Mutex<Option<AppSession>>>,
     channel: Arc<Mutex<Option<AppChannel>>>,
+    handle: tokio::runtime::Handle,
 }
 
 #[derive(Debug)]
@@ -123,25 +127,25 @@ async fn mutex_start(
         let cancel = CancellationToken::new();
         use boson_control_messages::Variant::*;
         let handle = match &config.variant {
-            Untrusted => tokio::spawn(mutex::untrusted_session(
+            Untrusted => state.handle.spawn(mutex::untrusted_session(
                 config,
                 event_receiver,
                 upcall_sender,
                 cancel.clone(),
             )),
-            Replicated(_) => tokio::spawn(mutex::replicated_session(
+            Replicated(_) => state.handle.spawn(mutex::replicated_session(
                 config,
                 event_receiver,
                 upcall_sender,
                 cancel.clone(),
             )),
-            Quorum(_) => tokio::spawn(mutex::quorum_session(
+            Quorum(_) => state.handle.spawn(mutex::quorum_session(
                 config,
                 event_receiver,
                 upcall_sender,
                 cancel.clone(),
             )),
-            NitroEnclaves => tokio::spawn(mutex::nitro_enclaves_session(
+            NitroEnclaves => state.handle.spawn(mutex::nitro_enclaves_session(
                 config,
                 event_receiver,
                 upcall_sender,
@@ -222,9 +226,15 @@ async fn cops_start_client(
         let cancel = CancellationToken::new();
         use boson_control_messages::Variant::*;
         let handle = match &config.variant {
-            Untrusted => tokio::spawn(cops::untrusted_client_session(config, upcall_sender)),
-            Replicated(_) => tokio::spawn(cops::pbft_client_session(config, upcall_sender)),
-            Quorum(_) => tokio::spawn(cops::quorum_client_session(config, upcall_sender)),
+            Untrusted => state
+                .handle
+                .spawn(cops::untrusted_client_session(config, upcall_sender)),
+            Replicated(_) => state
+                .handle
+                .spawn(cops::pbft_client_session(config, upcall_sender)),
+            Quorum(_) => state
+                .handle
+                .spawn(cops::quorum_client_session(config, upcall_sender)),
             NitroEnclaves => todo!(),
         };
         *session = Some(AppSession { handle, cancel });
@@ -281,9 +291,15 @@ async fn cops_start_server(
         let cancel = CancellationToken::new();
         use boson_control_messages::Variant::*;
         let handle = match &config.variant {
-            Untrusted => tokio::spawn(cops::untrusted_server_session(config, cancel.clone())),
-            Replicated(_) => tokio::spawn(cops::pbft_server_session(config, cancel.clone())),
-            Quorum(_) => tokio::spawn(cops::quorum_server_session(config, cancel.clone())),
+            Untrusted => state
+                .handle
+                .spawn(cops::untrusted_server_session(config, cancel.clone())),
+            Replicated(_) => state
+                .handle
+                .spawn(cops::pbft_server_session(config, cancel.clone())),
+            Quorum(_) => state
+                .handle
+                .spawn(cops::quorum_server_session(config, cancel.clone())),
             NitroEnclaves => todo!(),
         };
         *session = Some(AppSession { handle, cancel });
@@ -312,7 +328,7 @@ async fn start_quorum(
         let (event_sender, _) = unbounded_channel();
         let (_, upcall_receiver) = unbounded_channel();
         let cancel = CancellationToken::new();
-        let handle = tokio::spawn(quorum::session(config, cancel.clone()));
+        let handle = state.handle.spawn(quorum::session(config, cancel.clone()));
         *session = Some(AppSession { handle, cancel });
         let replaced = state.channel.lock().await.replace(AppChannel {
             event_sender,
@@ -330,3 +346,4 @@ async fn start_quorum(
 }
 
 // cSpell:words upcall lamport pbft
+// cSpell:ignore rlimit setrlimit getrlimit nofile

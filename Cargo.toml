@@ -40,6 +40,10 @@ nitro-enclaves = ["aws-nitro-enclaves-nsm-api", "aws-nitro-enclaves-attestation"
 name = "entropy"
 required-features = ["wirehair", "reqwest"]
 
+[[bin]]
+name = "boson"
+required-features = ["nitro-enclaves"]
+
 [[example]]
 name = "nitro-enclaves-clock-validator"
 required-features = ["nitro-enclaves"]

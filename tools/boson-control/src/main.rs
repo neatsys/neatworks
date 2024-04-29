@@ -48,8 +48,8 @@ async fn main() -> anyhow::Result<()> {
                 instances,
                 clock_instances,
                 RequestMode::All,
-                Variant::Replicated,
-                6,
+                Variant::Quorum,
+                12,
             )
             .await?;
             Ok(())
