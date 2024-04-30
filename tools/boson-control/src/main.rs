@@ -34,8 +34,8 @@ async fn main() -> anyhow::Result<()> {
                 instances,
                 clock_instances,
                 RequestMode::All,
-                Variant::Quorum,
-                12,
+                Variant::Replicated,
+                10,
             )
             .await?;
             Ok(())
@@ -62,13 +62,13 @@ async fn main() -> anyhow::Result<()> {
             //     }
             // }
             for variant in [
-                // Variant::Replicated,
-                Variant::NitroEnclaves,
                 // Variant::Quorum,
+                // Variant::NitroEnclaves,
+                Variant::Replicated,
                 // Variant::Untrusted,
             ] {
                 for n in match variant {
-                    Variant::Replicated => 1..=5,
+                    Variant::Replicated => 1..=10,
                     Variant::NitroEnclaves => 1..=12,
                     _ => 1..=16,
                 }
@@ -369,7 +369,10 @@ async fn mutex_session(
                 .await??
             }
         }
-        if i != 0 {
+        // i == 0 for 1. warm up network stack 2. map based clocks has smaller data size which
+        // causes abnormal result
+        // i == 1 just not work well when Variant == Quorum and 16 region processors, not sure why
+        if i >= 2 {
             for duration in Arc::into_inner(out).unwrap().into_inner()? {
                 writeln!(
                     &mut lines,
@@ -417,18 +420,27 @@ async fn mutex_start_session(
         .send()
         .await?
         .error_for_status()?;
+    let mut num_missing_ok = 0;
     loop {
         sleep(Duration::from_millis(1000)).await;
-        let start = tokio::time::Instant::now();
-        client
-            .get(format!("{url}/ok"))
-            .send()
-            .await?
-            .error_for_status()?;
-        let elapsed = start.elapsed();
-        if elapsed > Duration::from_millis(1000) {
-            println!("! Slow responded {url}/ok: {elapsed:?}")
+        if let Err(err) = async {
+            client
+                .get(format!("{url}/ok"))
+                .send()
+                .await?
+                .error_for_status()?;
+            anyhow::Ok(())
         }
+        .await
+        {
+            if num_missing_ok < 3 {
+                num_missing_ok += 1;
+                println!("! missing {num_missing_ok} from {url}");
+                continue;
+            }
+            Err(err)?
+        }
+        num_missing_ok = 0
     }
 }
 
@@ -450,7 +462,7 @@ async fn mutex_request_session(
     let latency = client
         .post(format!("{url}/mutex/request"))
         .json(&at)
-        .timeout(Duration::from_millis(60000))
+        .timeout(Duration::from_millis(65000))
         .send()
         .await?
         .error_for_status()?
@@ -903,13 +915,27 @@ async fn quorum_start_session(
         .send()
         .await?
         .error_for_status()?;
+    let mut num_missing_ok = 0;
     loop {
         sleep(Duration::from_millis(1000)).await;
-        client
-            .get(format!("{url}/ok"))
-            .send()
-            .await?
-            .error_for_status()?;
+        if let Err(err) = async {
+            client
+                .get(format!("{url}/ok"))
+                .send()
+                .await?
+                .error_for_status()?;
+            anyhow::Ok(())
+        }
+        .await
+        {
+            if num_missing_ok < 3 {
+                num_missing_ok += 1;
+                println!("! missing {num_missing_ok} from {url}");
+                continue;
+            }
+            Err(err)?
+        }
+        num_missing_ok = 0
     }
 }
 

@@ -110,18 +110,30 @@ pub async fn untrusted_session(
         }
     };
     let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
-    let dispatch_session = dispatch_session.run(&mut dispatch);
-    let processor_session = processor_session.run(&mut processor);
-    let causal_net_session = causal_net_session.run(&mut causal_net);
+    let dispatch_session = async move { dispatch_session.run(&mut dispatch).await };
+    let processor_session = async move { processor_session.run(&mut processor).await };
+    let causal_net_session = async move { causal_net_session.run(&mut causal_net).await };
 
+    // tokio::select! {
+    //     () = cancel.cancelled() => return Ok(()),
+    //     result = event_session => result?,
+    //     result = tcp_accept_session => result?,
+    //     result = dispatch_session => result?,
+    //     result = processor_session => result?,
+    //     result = causal_net_session => result?,
+    // }
+
+    let mut sessions = tokio::task::JoinSet::new();
+    sessions.spawn(event_session);
+    sessions.spawn(tcp_accept_session);
+    sessions.spawn(dispatch_session);
+    sessions.spawn(processor_session);
+    sessions.spawn(causal_net_session);
     tokio::select! {
         () = cancel.cancelled() => return Ok(()),
-        result = event_session => result?,
-        result = tcp_accept_session => result?,
-        result = dispatch_session => result?,
-        result = processor_session => result?,
-        result = causal_net_session => result?,
+        Some(result) = sessions.join_next() => result??,
     }
+
     anyhow::bail!("unreachable")
 }
 
@@ -148,6 +160,7 @@ pub async fn replicated_session(
     let num_faulty = config.num_faulty;
     let addr = addrs[id as usize];
     let num_replica = addrs.len();
+    let crypto = Crypto::new_hardcoded(num_replica, id, CryptoFlavor::Schnorrkel)?;
 
     let client_tcp_listener = TcpListener::bind(adjust(SocketAddr::from((addr.ip(), 0)))).await?;
     let client_addr = SocketAddr::from((addr.ip(), client_tcp_listener.local_addr()?.port()));
@@ -159,6 +172,7 @@ pub async fn replicated_session(
     let mut replica_session = Session::new();
     let mut queue_session = Session::new();
     let mut processor_session = Session::new();
+    let (crypto_worker, mut crypto_executor) = spawning_backend();
 
     let mut client_dispatch = event::Unify(event::Buffered::from(Dispatch::new(
         Tcp::new(client_addr)?,
@@ -201,10 +215,8 @@ pub async fn replicated_session(
             id as usize,
         )),
         pbft::ToClientMessageNet::new(dispatch::Net::from(dispatch_session.sender())),
-        Box::new(pbft::CryptoWorker::from(Worker::Inline(
-            Crypto::new_hardcoded(num_replica, id, CryptoFlavor::Schnorrkel)?,
-            Sender::from(replica_session.sender()),
-        ))) as Box<dyn Submit<Crypto, dyn pbft::SendCryptoEvent<SocketAddr>> + Send + Sync>,
+        Box::new(pbft::CryptoWorker::from(crypto_worker))
+            as Box<dyn Submit<Crypto, dyn pbft::SendCryptoEvent<SocketAddr>> + Send + Sync>,
         num_replica,
         num_faulty,
     )));
@@ -234,25 +246,47 @@ pub async fn replicated_session(
     let client_tcp_accept_session =
         tcp::accept_session(client_tcp_listener, client_dispatch_session.sender());
     let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
-    let client_dispatch_session = client_dispatch_session.run(&mut client_dispatch);
-    let dispatch_session = dispatch_session.run(&mut dispatch);
-    let client_session = client_session.run(&mut client);
-    let replica_session = replica_session.run(&mut replica);
-    let queue_session = queue_session.run(&mut queue);
-    let processor_session = processor_session.run(&mut processor);
+    let client_dispatch_session =
+        async move { client_dispatch_session.run(&mut client_dispatch).await };
+    let dispatch_session = async move { dispatch_session.run(&mut dispatch).await };
+    let client_session = async move { client_session.run(&mut client).await };
+    let crypto_session = {
+        let replica_session_sender = Sender::from(replica_session.sender());
+        async move { crypto_executor.run(crypto, replica_session_sender).await }
+    };
+    let replica_session = async move { replica_session.run(&mut replica).await };
+    let queue_session = async move { queue_session.run(&mut queue).await };
+    let processor_session = async move { processor_session.run(&mut processor).await };
 
+    // tokio::select! {
+    //     () = cancel.cancelled() => return Ok(()),
+    //     result = event_session => result?,
+    //     result = client_tcp_accept_session => result?,
+    //     result = client_dispatch_session => result?,
+    //     result = tcp_accept_session => result?,
+    //     result = dispatch_session => result?,
+    //     result = client_session => result?,
+    //     result = replica_session => result?,
+    //     result = queue_session => result?,
+    //     result = processor_session => result?,
+    // }
+
+    let mut sessions = tokio::task::JoinSet::new();
+    sessions.spawn(event_session);
+    sessions.spawn(tcp_accept_session);
+    sessions.spawn(client_tcp_accept_session);
+    sessions.spawn(dispatch_session);
+    sessions.spawn(client_dispatch_session);
+    sessions.spawn(processor_session);
+    sessions.spawn(queue_session);
+    sessions.spawn(crypto_session);
+    sessions.spawn(client_session);
+    sessions.spawn(replica_session);
     tokio::select! {
         () = cancel.cancelled() => return Ok(()),
-        result = event_session => result?,
-        result = client_tcp_accept_session => result?,
-        result = client_dispatch_session => result?,
-        result = tcp_accept_session => result?,
-        result = dispatch_session => result?,
-        result = client_session => result?,
-        result = replica_session => result?,
-        result = queue_session => result?,
-        result = processor_session => result?,
+        Some(result) = sessions.join_next() => result??,
     }
+
     anyhow::bail!("unreachable")
 }
 

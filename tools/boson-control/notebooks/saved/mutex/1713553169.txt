@@ -1,9 +1,0 @@
-One,Quorum,70,0.33926708
-One,Quorum,70,0.33862156
-One,Quorum,70,0.33833683
-One,Quorum,70,0.34008947
-One,Quorum,70,0.33751
-One,Quorum,70,0.33982804
-One,Quorum,70,0.3380117
-One,Quorum,70,0.3378736
-One,Quorum,70,0.3389035

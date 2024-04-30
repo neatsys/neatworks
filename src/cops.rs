@@ -630,8 +630,29 @@ impl OrdinaryVersion {
 
 impl PartialOrd for OrdinaryVersion {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        let merged = self.merge(other);
-        match (merged == *self, merged == *other) {
+        // this is way more elegant, but probably also significant slower :(
+        // let merged = self.merge(other);
+        // match (merged == *self, merged == *other) {
+        //     (true, true) => Some(Ordering::Equal),
+        //     (true, false) => Some(Ordering::Greater),
+        //     (false, true) => Some(Ordering::Less),
+        //     (false, false) => None,
+        // }
+        fn ge(clock: &OrdinaryVersion, other_clock: &OrdinaryVersion) -> bool {
+            for (other_id, other_n) in &other_clock.0 {
+                if *other_n == 0 {
+                    continue;
+                }
+                let Some(n) = clock.0.get(other_id) else {
+                    return false;
+                };
+                if n < other_n {
+                    return false;
+                }
+            }
+            true
+        }
+        match (ge(self, other), ge(other, self)) {
             (true, true) => Some(Ordering::Equal),
             (true, false) => Some(Ordering::Greater),
             (false, true) => Some(Ordering::Less),

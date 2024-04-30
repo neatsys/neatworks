@@ -282,13 +282,16 @@ impl<E: SendEvent<UpdateOk<LamportClock>>> SendEvent<Update<LamportClock>> for L
     }
 }
 
-// this is different from just blanket `impl Ord` for `impl Clock`, which makes additional promise
-// over the *same* relation
-// the `arbitrary_cmp` here is yet another relation that happens to respect the `PartialOrd` one,
-// i.e. returns `X` (in {Less | Greater}) when partial order returns `Some(X)`.
-// in another word, for clock types that have inherent total ordering (e.g. the integer type used by
-// lamport clock), the two ordering are indeed the same relation, or "behave identical" if you
-// prefer
+// the "arbitrary total ordering" described in the "Ordering the Events Totally"
+// section
+// this is different from just blanket `impl Ord` for `impl Clock`, which makes
+// additional promise over the *same* relation (and supersedes the `PartialOrd`
+// one)
+// the `arbitrary_cmp` here is yet another relation that happens to respect the
+// `PartialOrd` one, i.e. returns `X` (in {Less | Greater}) when partial order
+// returns `Some(X)`. in another word, for clock types that have inherent total
+// ordering (e.g. the integer type used by lamport clock), the two ordering are
+// indeed the same relation, or "behave identical" if you prefer
 // pub trait ClockOrd {
 //     fn arbitrary_cmp(lhs: (&Self, u8), rhs: (&Self, u8)) -> anyhow::Result<Ordering>;
 // }
@@ -306,11 +309,25 @@ impl<E: SendEvent<UpdateOk<LamportClock>>> SendEvent<Update<LamportClock>> for L
 //         }
 //     }
 // }
+// the above attempt to define `arbitrary_cmp` to all partial ordering i.e.
+// `impl Clock`, does not work, because the returned `Ordering` has no ordering
+// properties
+// for example, suppose three clock values A, B and C where A concurrent to B,
+// B concurrent to C, C < A, and three id a, b and c where a < b < c, then we
+// have:
+// <<A, a>> less than <<B, b>> (by comparing id)
+// <<B, b>> less than <<C, c>> (by comparing id)
+// <<C, c>> less than <<A, a>> (by partial ordering)
+// thus either asymmetry or transitivity is broken, depends on your preference
+// the conclusion is that `arbitrary_cmp` can only be sensibly defined against
+// lamport clock. any other general partial ordering must first be "reduced"
+// into a lamport clock before it can be arbitrary compared and be used in the
+// following mutex protocol
 fn arbitrary_cmp(
     (clock, id): (LamportClock, u8),
     (other_clock, other_id): (LamportClock, u8),
-) -> anyhow::Result<Ordering> {
-    Ok((clock, id).cmp(&(other_clock, other_id)))
+) -> Ordering {
+    (clock, id).cmp(&(other_clock, other_id))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -422,7 +439,6 @@ impl<CN, U, C: Clock> Processor<CN, U, C> {
                         (other_clock.reduce(), *other_id),
                         (message.clock.reduce(), id),
                     )
-                    .unwrap()
                 }) {
                     self.requests.insert(index, (message.clock, id))
                 }
