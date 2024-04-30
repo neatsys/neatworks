@@ -1,0 +1,8 @@
+One,Quorum,30,0.37517375
+One,Quorum,30,0.37416095
+One,Quorum,30,0.3745451
+One,Quorum,30,0.37456983
+One,Quorum,30,0.3753256
+One,Quorum,30,0.3753621
+One,Quorum,30,0.37402007
+One,Quorum,30,0.37533146

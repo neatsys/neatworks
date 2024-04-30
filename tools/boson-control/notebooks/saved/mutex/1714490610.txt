@@ -1,0 +1,8 @@
+One,Replicated,60,1.5713629
+One,Replicated,60,1.5749934
+One,Replicated,60,1.5771286
+One,Replicated,60,1.5704836
+One,Replicated,60,1.5669458
+One,Replicated,60,1.5759431
+One,Replicated,60,1.5667584
+One,Replicated,60,1.5659865

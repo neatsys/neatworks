@@ -11,6 +11,7 @@ async fn main() -> anyhow::Result<()> {
 async fn session(host: String) -> anyhow::Result<()> {
     let host = format!("ec2-user@{host}");
     let status = Command::new("rsync")
+        .arg("-az")
         .arg("app.eif")
         .arg(format!("{host}:"))
         .status()

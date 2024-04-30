@@ -43,48 +43,48 @@ async fn main() -> anyhow::Result<()> {
         Some("mutex") => {
             let instances = terraform_output("mutex_instances").await?;
             let clock_instances = terraform_output("quorum_instances").await?;
-            // for variant in [
-            //     Variant::Untrusted,
-            //     Variant::Replicated,
-            //     Variant::Quorum,
-            //     Variant::NitroEnclaves,
-            // ] {
-            //     for n in 1..=20 {
-            //         mutex_session(
-            //             client.clone(),
-            //             instances.clone(),
-            //             clock_instances.clone(),
-            //             RequestMode::One,
-            //             variant,
-            //             n,
-            //         )
-            //         .await?
-            //     }
-            // }
             for variant in [
-                // Variant::Quorum,
-                // Variant::NitroEnclaves,
+                Variant::Untrusted,
                 Variant::Replicated,
-                // Variant::Untrusted,
+                Variant::Quorum,
+                Variant::NitroEnclaves,
             ] {
-                for n in match variant {
-                    Variant::Replicated => 1..=10,
-                    Variant::NitroEnclaves => 1..=12,
-                    _ => 1..=16,
-                }
-                .rev()
-                {
+                for n in 1..=20 {
                     mutex_session(
                         client.clone(),
                         instances.clone(),
                         clock_instances.clone(),
-                        RequestMode::All,
+                        RequestMode::One,
                         variant,
                         n,
                     )
                     .await?
                 }
             }
+            // for variant in [
+            //     Variant::Quorum,
+            //     Variant::NitroEnclaves,
+            //     Variant::Replicated,
+            //     Variant::Untrusted,
+            // ] {
+            //     for n in match variant {
+            //         Variant::Replicated => 1..=10,
+            //         Variant::NitroEnclaves => 1..=12,
+            //         _ => 1..=16,
+            //     }
+            //     .rev()
+            //     {
+            //         mutex_session(
+            //             client.clone(),
+            //             instances.clone(),
+            //             clock_instances.clone(),
+            //             RequestMode::All,
+            //             variant,
+            //             n,
+            //         )
+            //         .await?
+            //     }
+            // }
             Ok(())
         }
         Some("cops") => {

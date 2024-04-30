@@ -1,0 +1,8 @@
+One,Quorum,5,0.35699347
+One,Quorum,5,0.3569996
+One,Quorum,5,0.3570311
+One,Quorum,5,0.35719046
+One,Quorum,5,0.357189
+One,Quorum,5,0.35742894
+One,Quorum,5,0.357076
+One,Quorum,5,0.35733715

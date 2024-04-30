@@ -87,7 +87,7 @@ module "mutex" {
   }
   instance_state = var.state
   instance_type = "c5a.2xlarge"
-  instance_count = 16
+  instance_count = 20
 }
 
 module "quorum" {
