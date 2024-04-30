@@ -626,10 +626,6 @@ impl OrdinaryVersion {
         *updated.0.entry(id).or_default() += 1;
         updated
     }
-
-    pub fn reduce(&self) -> crate::lamport_mutex::LamportClock {
-        self.0.values().copied().sum()
-    }
 }
 
 impl PartialOrd for OrdinaryVersion {
@@ -667,11 +663,17 @@ impl DepOrd for OrdinaryVersion {
     }
 }
 
+impl crate::lamport_mutex::Clock for OrdinaryVersion {
+    fn reduce(&self) -> crate::lamport_mutex::LamportClock {
+        self.0.values().copied().sum()
+    }
+}
+
 #[derive(Debug)]
-pub struct DefaultVersionService<E>(pub E);
+pub struct OrdinaryVersionService<E>(pub E);
 
 impl<E: SendEvent<events::UpdateOk<OrdinaryVersion>>> SendEvent<events::Update<OrdinaryVersion>>
-    for DefaultVersionService<E>
+    for OrdinaryVersionService<E>
 {
     fn send(&mut self, update: events::Update<OrdinaryVersion>) -> anyhow::Result<()> {
         let update_ok = events::UpdateOk {

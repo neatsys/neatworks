@@ -3,7 +3,7 @@ use std::{mem::take, net::SocketAddr, ops::Range, time::Duration};
 use augustus::{
     app::{self, ycsb, App},
     boson::{self, QuorumClient, QuorumClock, VerifyClock},
-    cops::{self, OrdinaryVersion, DefaultVersionService},
+    cops::{self, OrdinaryVersion, OrdinaryVersionService},
     event::{
         self,
         erased::{events::Init, session::Sender, Blanket, Buffered, Session, Unify},
@@ -363,7 +363,7 @@ pub async fn untrusted_server_session(
                 id as usize,
             )),
             cops::ToClientMessageNet::new(dispatch::Net::from(dispatch_session.sender())),
-            DefaultVersionService(Box::new(Sender::from(replica_session.sender()))
+            OrdinaryVersionService(Box::new(Sender::from(replica_session.sender()))
                 as Box<dyn SendEvent<cops::events::UpdateOk<OrdinaryVersion>> + Send + Sync>),
         ),
     ));

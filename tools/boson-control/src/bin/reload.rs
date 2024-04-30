@@ -35,7 +35,7 @@ async fn host_session(ssh_host: String, sync: bool) -> anyhow::Result<()> {
     // println!("{ssh_host}");
     if sync {
         let status = Command::new("rsync")
-            .arg("-a")
+            .arg("-az")
             .arg("target/artifact/boson")
             // .arg("target/debug/boson")
             .arg(format!("{ssh_host}:"))
@@ -46,7 +46,7 @@ async fn host_session(ssh_host: String, sync: bool) -> anyhow::Result<()> {
     let status = Command::new("ssh")
         .arg(ssh_host)
         .arg("pkill -x boson; sleep 1; tmux new -d -s boson \"./boson >boson.log\"")
-        // .arg("pkill -x boson; sleep 1; tmux new -d -s boson \"RUST_LOG=info,augustus::boson=debug ./boson >boson.log\"")
+        // .arg("pkill -x boson; sleep 1; tmux new -d -s boson \"RUST_LOG=info,augustus::lamport_mutex::verifiable=debug ./boson >boson.log\"")
         // .arg("pkill -x boson; sleep 1; tmux new -d -s boson \"RUST_BACKTRACE=1 ./boson >boson.log\"")
         .status()
         .await?;

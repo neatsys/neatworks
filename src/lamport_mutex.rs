@@ -31,42 +31,9 @@ use crate::{
     net::{deserialize, events::Recv, All, SendMessage},
 };
 
-pub trait Clock: PartialOrd + Clone + Send + Sync + 'static {}
-impl<C: PartialOrd + Clone + Send + Sync + 'static> Clock for C {}
-
-// this is different from just blanket `impl Ord` for `impl Clock`, which makes additional promise
-// over the *same* relation
-// the `arbitrary_cmp` here is yet another relation that happens to respect the `PartialOrd` one,
-// i.e. returns `X` (in {Less | Greater}) when partial order returns `Some(X)`.
-// in another word, for clock types that have inherent total ordering (e.g. the integer type used by
-// lamport clock), the two ordering are indeed the same relation, or "behave identical" if you
-// prefer
-pub trait ClockOrd {
-    fn arbitrary_cmp(lhs: (&Self, u8), rhs: (&Self, u8)) -> anyhow::Result<Ordering>;
+pub trait Clock: PartialOrd + Clone + Send + Sync + 'static {
+    fn reduce(&self) -> LamportClock;
 }
-impl<C: Clock> ClockOrd for C {
-    fn arbitrary_cmp(
-        (clock, id): (&Self, u8),
-        (other_clock, other_id): (&Self, u8),
-    ) -> anyhow::Result<Ordering> {
-        match (clock.partial_cmp(other_clock), id.cmp(&other_id)) {
-            (None, Ordering::Equal) => anyhow::bail!("concurrent clock from same id"),
-            // this one is covered by the next case, but explicitly listed because it corresponds to
-            // the only equal case: when a clock is compared to itself
-            (Some(Ordering::Equal), Ordering::Equal) => Ok(Ordering::Equal),
-            (Some(Ordering::Equal) | None, ordering) | (Some(ordering), _) => Ok(ordering),
-        }
-    }
-}
-
-// impl ClockOrd for LamportClock {
-//     fn arbitrary_cmp(
-//         (clock, id): (&Self, u8),
-//         (other_clock, other_id): (&Self, u8),
-//     ) -> anyhow::Result<Ordering> {
-//         Ok((clock, id).cmp(&(other_clock, other_id)))
-//     }
-// }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Clocked<M, C> {
@@ -186,9 +153,7 @@ impl<E: SendEvent<Recv<Clocked<M, C>>>, CS: SendEvent<Update<C>>, N, C: Clone, M
         Recv(clocked): Recv<Clocked<M, C>>,
         timer: &mut impl Timer,
     ) -> anyhow::Result<()> {
-        debug!("recv clocked");
         if let Some(pending_recv) = &mut self.pending_recv {
-            debug!("recv clocked pending");
             pending_recv.messages.push_back(clocked);
             return Ok(());
         }
@@ -203,7 +168,6 @@ impl<E: SendEvent<Recv<Clocked<M, C>>>, CS: SendEvent<Update<C>>, N, C: Clone, M
         };
         self.clock_service.send(update)?;
 
-        debug!("forward recv clocked");
         self.recv_sender.send(Recv(clocked))
     }
 }
@@ -228,7 +192,6 @@ impl<
         if self.pending_recv.is_some() {
             self.pending_send.push(Box::new(send))
         } else {
-            debug!("send clocked");
             send(self.clock.clone(), &mut self.net)?
         }
         Ok(())
@@ -252,7 +215,6 @@ impl<E: SendEvent<Recv<Clocked<M, C>>>, M, CS: SendEvent<Update<C>>, N, C: Clock
             anyhow::bail!("missing pending recv queue")
         };
         if let Some(clocked) = pending_recv.messages.pop_front() {
-            debug!("pended recv clocked popped");
             let update = Update {
                 prev: self.clock.clone(),
                 remote: clocked.clock.clone(),
@@ -262,7 +224,6 @@ impl<E: SendEvent<Recv<Clocked<M, C>>>, M, CS: SendEvent<Update<C>>, N, C: Clock
             let slow_update = timer.set(SLOW_UPDATE_DURATION)?;
             timer.unset(replace(&mut pending_recv.slow_update, slow_update))?;
         } else {
-            debug!("pended recv clock cleared");
             timer.unset(self.pending_recv.take().unwrap().slow_update)?
         }
         for send in self.pending_send.drain(..) {
@@ -297,9 +258,15 @@ pub struct Update<C> {
 
 pub struct UpdateOk<C>(pub C);
 
-pub struct Lamport<E>(pub E);
-
 pub type LamportClock = u32;
+
+impl Clock for LamportClock {
+    fn reduce(&self) -> LamportClock {
+        *self
+    }
+}
+
+pub struct Lamport<E>(pub E);
 
 impl<E: SendEvent<UpdateOk<LamportClock>>> SendEvent<Update<LamportClock>> for Lamport<E> {
     fn send(&mut self, update: Update<LamportClock>) -> anyhow::Result<()> {
@@ -313,6 +280,37 @@ impl<E: SendEvent<UpdateOk<LamportClock>>> SendEvent<Update<LamportClock>> for L
         let counter = update.prev.max(update.remote) + 1;
         self.0.send(UpdateOk(counter))
     }
+}
+
+// this is different from just blanket `impl Ord` for `impl Clock`, which makes additional promise
+// over the *same* relation
+// the `arbitrary_cmp` here is yet another relation that happens to respect the `PartialOrd` one,
+// i.e. returns `X` (in {Less | Greater}) when partial order returns `Some(X)`.
+// in another word, for clock types that have inherent total ordering (e.g. the integer type used by
+// lamport clock), the two ordering are indeed the same relation, or "behave identical" if you
+// prefer
+// pub trait ClockOrd {
+//     fn arbitrary_cmp(lhs: (&Self, u8), rhs: (&Self, u8)) -> anyhow::Result<Ordering>;
+// }
+// impl<C: Clock> ClockOrd for C {
+//     fn arbitrary_cmp(
+//         (clock, id): (&Self, u8),
+//         (other_clock, other_id): (&Self, u8),
+//     ) -> anyhow::Result<Ordering> {
+//         match (clock.partial_cmp(other_clock), id.cmp(&other_id)) {
+//             (None, Ordering::Equal) => anyhow::bail!("concurrent clock from same id"),
+//             // this one is covered by the next case, but explicitly listed because it corresponds to
+//             // the only equal case: when a clock is compared to itself
+//             (Some(Ordering::Equal), Ordering::Equal) => Ok(Ordering::Equal),
+//             (Some(Ordering::Equal) | None, ordering) | (Some(ordering), _) => Ok(ordering),
+//         }
+//     }
+// }
+fn arbitrary_cmp(
+    (clock, id): (LamportClock, u8),
+    (other_clock, other_id): (LamportClock, u8),
+) -> anyhow::Result<Ordering> {
+    Ok((clock, id).cmp(&(other_clock, other_id)))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -379,8 +377,10 @@ impl<CN: SendMessage<All, Message>, U, C> OnEvent<events::Request> for Processor
     }
 }
 
-impl<CN: SendMessage<u8, Message>, U: SendEvent<events::RequestOk>, C: Clock + ClockOrd>
+impl<CN: SendMessage<u8, Message>, U: SendEvent<events::RequestOk>, C: Clock>
     OnEvent<Recv<Clocked<Message, C>>> for Processor<CN, U, C>
+where
+    C: std::fmt::Debug,
 {
     fn on_event(
         &mut self,
@@ -396,7 +396,7 @@ impl<CN: SendMessage<u8, Message>, U: SendEvent<events::RequestOk>, C: Clock + C
     }
 }
 
-impl<CN, U, C: Clock + ClockOrd> Processor<CN, U, C> {
+impl<CN, U, C: Clock> Processor<CN, U, C> {
     fn handle_clocked<A>(
         &mut self,
         message: Clocked<Message, C>,
@@ -404,6 +404,7 @@ impl<CN, U, C: Clock + ClockOrd> Processor<CN, U, C> {
     ) -> anyhow::Result<()>
     where
         CN: SendMessage<A, Message>,
+        C: std::fmt::Debug,
     {
         let &(Message::Request(id) | Message::RequestOk(id) | Message::Release(id)) =
             &message.inner;
@@ -416,21 +417,13 @@ impl<CN, U, C: Clock + ClockOrd> Processor<CN, U, C> {
         self.latests[id as usize] = message.clock.clone();
         match message.inner {
             Message::Request(_) => {
-                let mut insert_index = Some(self.requests.len());
-                for (index, (other_clock, other_id)) in self.requests.iter().enumerate() {
-                    match C::arbitrary_cmp((&message.clock, id), (other_clock, *other_id))? {
-                        Ordering::Greater => continue,
-                        Ordering::Equal => {
-                            insert_index = None;
-                            break;
-                        }
-                        Ordering::Less => {
-                            insert_index = Some(index);
-                            break;
-                        }
-                    }
-                }
-                if let Some(index) = insert_index {
+                if let Err(index) = self.requests.binary_search_by(|(other_clock, other_id)| {
+                    arbitrary_cmp(
+                        (other_clock.reduce(), *other_id),
+                        (message.clock.reduce(), id),
+                    )
+                    .unwrap()
+                }) {
                     self.requests.insert(index, (message.clock, id))
                 }
                 self.causal_net
@@ -550,7 +543,7 @@ pub mod verifiable {
         worker::Submit,
     };
 
-    use super::{events, Clock, ClockOrd, Clocked};
+    use super::{events, Clock, Clocked};
 
     #[derive(Debug, Hash, Serialize, Deserialize)]
     pub struct Ordered<C> {
@@ -565,7 +558,7 @@ pub mod verifiable {
         #[deref]
         #[deref_mut]
         inner: super::Processor<CN, U, C>,
-        last_ordered: (C, u8),
+        last_ordered: Vec<C>,
         proof: HashMap<u8, Verifiable<Ordered<C>>>,
         net: N,
     }
@@ -586,7 +579,7 @@ pub mod verifiable {
                 inner,
                 num_faulty,
                 net,
-                last_ordered: (clock_zero, u8::MAX),
+                last_ordered: vec![clock_zero; num_processor],
                 proof: Default::default(),
             }
         }
@@ -600,6 +593,7 @@ pub mod verifiable {
             events::Request: events::Request,
             timer: &mut impl Timer,
         ) -> anyhow::Result<()> {
+            debug!("request");
             self.inner.on_event(events::Request, timer)
         }
     }
@@ -620,36 +614,44 @@ pub mod verifiable {
             CN: SendMessage<All, super::Message>,
             N: SendMessage<u8, Ordered<C>>,
             U: SendEvent<events::RequestOk>,
-            C: Clock + ClockOrd,
+            C: Clock,
         > OnEvent<Recv<Clocked<super::Message, C>>> for Processor<CN, N, U, C>
+    where
+        C: std::fmt::Debug,
     {
         fn on_event(
             &mut self,
             Recv(message): Recv<Clocked<super::Message, C>>,
             _: &mut impl Timer,
         ) -> anyhow::Result<()> {
-            debug!("{:?}", message.inner);
+            // debug!("{:?}", message.inner);
+            if matches!(message.inner, super::Message::Release(_)) {
+                debug!("{:?}", message.inner);
+                if self.requesting {
+                    let i = self
+                        .requests
+                        .iter()
+                        .position(|(_, id)| *id == self.id)
+                        .unwrap();
+                    debug!("{:?}", &self.requests[..=i])
+                }
+            }
             self.handle_clocked(message, |_| All)?;
             self.check_requested()
         }
     }
 
-    impl<
-            CN,
-            N: SendMessage<u8, Ordered<C>>,
-            U: SendEvent<events::RequestOk>,
-            C: Clock + ClockOrd,
-        > Processor<CN, N, U, C>
+    impl<CN, N: SendMessage<u8, Ordered<C>>, U: SendEvent<events::RequestOk>, C: Clock>
+        Processor<CN, N, U, C>
     {
         fn check_requested(&mut self) -> anyhow::Result<()> {
             // println!("check requested");
             for (clock, id) in &self.inner.requests {
                 // println!("check requested {id}");
-                if C::arbitrary_cmp((clock, *id), (&self.last_ordered.0, self.last_ordered.1))?
-                    .is_le()
-                {
-                    // println!("skip ordered clock");
-                    continue;
+                match self.last_ordered[*id as usize].partial_cmp(clock) {
+                    None => anyhow::bail!("unreachable"),
+                    Some(Ordering::Less) => {}
+                    _ => continue,
                 }
                 if self.latests.iter().all(|other_clock| {
                     matches!(
@@ -664,7 +666,7 @@ pub mod verifiable {
                     };
                     // println!("ordered");
                     self.net.send(*id, ordered)?;
-                    self.last_ordered = (clock.clone(), *id)
+                    self.last_ordered[*id as usize] = clock.clone()
                 } else {
                     break;
                 }
@@ -684,6 +686,7 @@ pub mod verifiable {
                     {
                         self.requesting = false;
                         self.proof.clear(); // TODO transfer to whoever cares
+                        debug!("request ok");
                         self.upcall.send(events::RequestOk)?
                     }
                 }
@@ -694,13 +697,15 @@ pub mod verifiable {
 
     impl<CN, N: SendMessage<u8, Ordered<C>>, U: SendEvent<events::RequestOk>, C: Clock>
         OnEvent<Recv<Verifiable<Ordered<C>>>> for Processor<CN, N, U, C>
+    where
+        C: std::fmt::Debug,
     {
         fn on_event(
             &mut self,
             Recv(ordered): Recv<Verifiable<Ordered<C>>>,
             _: &mut impl Timer,
         ) -> anyhow::Result<()> {
-            // println!("recv ordered");
+            debug!("recv {:?}", *ordered);
             if !self.requesting {
                 return Ok(());
             }
@@ -709,8 +714,9 @@ pub mod verifiable {
                     other_ordered.clock.partial_cmp(&ordered.clock),
                     Some(Ordering::Greater | Ordering::Equal)
                 ) {
-                    // println!("discard earlier ordered");
-                    return Ok(());
+                    // debug!("discard earlier Ordered");
+                    // return Ok(());
+                    anyhow::bail!("duplicated Ordered from {}", ordered.id)
                 }
             }
             self.proof.insert(ordered.id, ordered);

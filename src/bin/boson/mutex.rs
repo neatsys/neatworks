@@ -382,35 +382,68 @@ pub async fn quorum_session(
         tcp::accept_session(clock_tcp_listener, clock_dispatch_session.sender());
     // let recv_crypto_session =
     //     recv_crypto_executor.run(crypto.clone(), Sender::from(causal_net_session.sender()));
-    let crypto_session = crypto_executor.run(crypto.clone(), Sender::from(clock_session.sender()));
-    let processor_crypto_session = processor_crypto_executor.run(
-        crypto,
-        lamport_mutex::verifiable::MessageNet::<_, QuorumClock>::new(IndexNet::new(
-            dispatch::Net::from(dispatch_session.sender()),
-            addrs,
-            None,
-        )),
-    );
-    let dispatch_session = dispatch_session.run(&mut dispatch);
-    let clock_dispatch_session = clock_dispatch_session.run(&mut clock_dispatch);
-    let processor_session = processor_session.run(&mut processor);
-    let causal_net_session = causal_net_session.run(&mut causal_net);
-    let clock_session = clock_session.run(&mut clock);
+    let crypto_session = {
+        let clock_session_sender = clock_session.sender();
+        let crypto = crypto.clone();
+        async move {
+            crypto_executor
+                .run(crypto, Sender::from(clock_session_sender))
+                .await
+        }
+    };
+    let processor_crypto_session = {
+        let dispatch_session_sender = dispatch_session.sender();
+        async move {
+            processor_crypto_executor
+                .run(
+                    crypto,
+                    lamport_mutex::verifiable::MessageNet::<_, QuorumClock>::new(IndexNet::new(
+                        dispatch::Net::from(dispatch_session_sender),
+                        addrs,
+                        None,
+                    )),
+                )
+                .await
+        }
+    };
+    let dispatch_session = async move { dispatch_session.run(&mut dispatch).await };
+    let clock_dispatch_session =
+        async move { clock_dispatch_session.run(&mut clock_dispatch).await };
+    let processor_session = async move { processor_session.run(&mut processor).await };
+    let causal_net_session = async move { causal_net_session.run(&mut causal_net).await };
+    let clock_session = async move { clock_session.run(&mut clock).await };
 
+    // tokio::select! {
+    //     () = cancel.cancelled() => return Ok(()),
+    //     result = event_session => result?,
+    //     result = tcp_accept_session => result?,
+    //     result = clock_tcp_accept_session => result?,
+    //     result = dispatch_session => result?,
+    //     result = clock_dispatch_session => result?,
+    //     result = processor_session => result?,
+    //     result = causal_net_session => result?,
+    //     // result = recv_crypto_session => result?,
+    //     result = crypto_session => result?,
+    //     result = processor_crypto_session => result?,
+    //     result = clock_session => result?,
+    // }
+
+    let mut sessions = tokio::task::JoinSet::new();
+    sessions.spawn(event_session);
+    sessions.spawn(tcp_accept_session);
+    sessions.spawn(clock_tcp_accept_session);
+    sessions.spawn(dispatch_session);
+    sessions.spawn(clock_dispatch_session);
+    sessions.spawn(processor_session);
+    sessions.spawn(causal_net_session);
+    sessions.spawn(crypto_session);
+    sessions.spawn(processor_crypto_session);
+    sessions.spawn(clock_session);
     tokio::select! {
         () = cancel.cancelled() => return Ok(()),
-        result = event_session => result?,
-        result = tcp_accept_session => result?,
-        result = clock_tcp_accept_session => result?,
-        result = dispatch_session => result?,
-        result = clock_dispatch_session => result?,
-        result = processor_session => result?,
-        result = causal_net_session => result?,
-        // result = recv_crypto_session => result?,
-        result = crypto_session => result?,
-        result = processor_crypto_session => result?,
-        result = clock_session => result?,
+        Some(result) = sessions.join_next() => result??,
     }
+
     anyhow::bail!("unreachable")
 }
 

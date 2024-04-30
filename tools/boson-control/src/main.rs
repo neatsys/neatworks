@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     fmt::Write,
     future::Future,
     net::SocketAddr,
@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
                 instances,
                 clock_instances,
                 RequestMode::All,
-                Variant::NitroEnclaves,
+                Variant::Quorum,
                 12,
             )
             .await?;
@@ -266,7 +266,7 @@ async fn mutex_session(
 ) -> anyhow::Result<()> {
     // this one will always be taken below
     let one_instance = instances[0].clone();
-    let mut region_instances = HashMap::<_, Vec<_>>::new();
+    let mut region_instances = BTreeMap::<_, Vec<_>>::new();
     for instance in instances {
         region_instances
             .entry(instance.region())
@@ -473,7 +473,7 @@ async fn cops_session(
     num_concurrent: usize,
     num_concurrent_put: usize,
 ) -> anyhow::Result<()> {
-    let mut region_instances = HashMap::<_, Vec<_>>::new();
+    let mut region_instances = BTreeMap::<_, Vec<_>>::new();
     for instance in instances {
         region_instances
             .entry(instance.region())
@@ -697,7 +697,7 @@ async fn cops_replicated_session(
     num_concurrent: usize,
     num_concurrent_put: usize,
 ) -> anyhow::Result<()> {
-    let mut region_instances = HashMap::<_, Vec<_>>::new();
+    let mut region_instances = BTreeMap::<_, Vec<_>>::new();
     for instance in instances {
         region_instances
             .entry(instance.region())

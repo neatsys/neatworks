@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env::args};
+use std::{collections::BTreeMap, env::args};
 
 use boson_control::terraform_output;
 
@@ -10,7 +10,7 @@ async fn main() -> anyhow::Result<()> {
         String::from("instances")
     })
     .await?;
-    let mut region_instances = HashMap::<_, Vec<_>>::new();
+    let mut region_instances = BTreeMap::<_, Vec<_>>::new();
     for instance in instances {
         region_instances
             .entry(instance.region())

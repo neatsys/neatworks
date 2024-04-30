@@ -12,7 +12,7 @@ use crate::{
         Crypto, PublicKey, Verifiable,
     },
     event::{erased::OnEvent, OnTimer, SendEvent},
-    lamport_mutex,
+    lamport_mutex::{self, Clock},
     net::{events::Recv, Addr, All, Payload, SendMessage},
     worker::Submit,
 };
@@ -74,8 +74,8 @@ pub struct AnnounceOk {
     key: PublicKey,
 }
 
-#[derive(Debug, Clone, Hash, Default, Serialize, Deserialize)]
-#[derive_where(PartialOrd, PartialEq)]
+#[derive(Clone, Hash, Default, Serialize, Deserialize)]
+#[derive_where(Debug, PartialOrd, PartialEq)]
 pub struct QuorumClock {
     plain: OrdinaryVersion, // redundant, just for easier use
     #[derive_where(skip)]
@@ -91,6 +91,12 @@ impl TryFrom<OrdinaryVersion> for QuorumClock {
             plain: value,
             cert: Default::default(),
         })
+    }
+}
+
+impl Clock for QuorumClock {
+    fn reduce(&self) -> lamport_mutex::LamportClock {
+        self.plain.reduce()
     }
 }
 
@@ -498,6 +504,12 @@ impl TryFrom<OrdinaryVersion> for NitroEnclavesClock {
     }
 }
 
+impl Clock for NitroEnclavesClock {
+    fn reduce(&self) -> lamport_mutex::LamportClock {
+        self.plain.reduce()
+    }
+}
+
 impl DepOrd for NitroEnclavesClock {
     fn dep_cmp(&self, other: &Self, id: crate::cops::KeyId) -> std::cmp::Ordering {
         self.plain.dep_cmp(&other.plain, id)
@@ -696,7 +708,7 @@ pub async fn nitro_enclaves_portal_session(
             Select::Recv(update) => {
                 let Some(update) = update else { return Ok(()) };
                 let mut sender = sender.clone();
-                anyhow::ensure!(sessions.len() <= 1); // for debugging mutex
+                // anyhow::ensure!(sessions.len() <= 1); // for debugging mutex
                 sessions.spawn(
                     async move {
                         let fd = socket(

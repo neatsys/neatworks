@@ -1,4 +1,4 @@
-use std::{collections::HashMap, future::Future, net::IpAddr};
+use std::{collections::BTreeMap, future::Future, net::IpAddr};
 
 use serde::Deserialize;
 use tokio::{process::Command, task::JoinSet};
@@ -35,7 +35,7 @@ pub fn retain_instances(
     instances: &[TerraformOutputInstance],
     num_per_region: usize,
 ) -> Vec<TerraformOutputInstance> {
-    let mut region_instances = HashMap::<_, Vec<_>>::new();
+    let mut region_instances = BTreeMap::<_, Vec<_>>::new();
     for instance in instances {
         let instances = region_instances.entry(instance.region()).or_default();
         if instances.len() < num_per_region {
