@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use derive_where::derive_where;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc::UnboundedReceiver, task::JoinSet};
-use tracing::{debug, warn};
+use tracing::{debug, warn, Instrument as _};
 
 use crate::{
     cops::{self, DepOrd, OrdinaryVersion},
@@ -603,7 +603,7 @@ impl NitroSecureModule {
             None,
         )?;
         bind(socket_fd.as_raw_fd(), &VsockAddr::new(0xFFFFFFFF, 5005))?;
-        // theoratically this is the earliest point to entering Tokio world, but i don't want to go
+        // theoretically this is the earliest point to entering Tokio world, but i don't want to go
         // unsafe with `FromRawFd`, and Tokio don't have a `From<OwnedFd>` yet
         listen(&socket_fd, Backlog::new(64)?)?;
         let socket = std::os::unix::net::UnixListener::from(socket_fd);
@@ -696,26 +696,34 @@ pub async fn nitro_enclaves_portal_session(
             Select::Recv(update) => {
                 let Some(update) = update else { return Ok(()) };
                 let mut sender = sender.clone();
-                sessions.spawn(async move {
-                    let fd = socket(
-                        AddressFamily::Vsock,
-                        SockType::Stream,
-                        SockFlag::empty(),
-                        None,
-                    )?;
-                    // this one is blocking, but should be instant, hopefully
-                    connect(fd.as_raw_fd(), &VsockAddr::new(cid, 5005))?;
-                    let socket = std::os::unix::net::UnixStream::from(fd);
-                    socket.set_nonblocking(true)?;
-                    let mut socket = tokio::net::UnixStream::from_std(socket)?;
-                    let buf = bincode::options().serialize(&update)?;
-                    socket.write_u64_le(buf.len() as _).await?;
-                    socket.write_all(&buf).await?;
-                    let len = socket.read_u64_le().await?;
-                    let mut buf = vec![0; len as _];
-                    socket.read_exact(&mut buf).await?;
-                    sender.send(bincode::options().deserialize(&buf)?)
-                });
+                anyhow::ensure!(sessions.len() <= 1); // for debugging mutex
+                sessions.spawn(
+                    async move {
+                        let fd = socket(
+                            AddressFamily::Vsock,
+                            SockType::Stream,
+                            SockFlag::empty(),
+                            None,
+                        )?;
+                        // this one is blocking, but should be instant, hopefully
+                        {
+                            let _span = tracing::debug_span!("connect").entered();
+                            connect(fd.as_raw_fd(), &VsockAddr::new(cid, 5005))?
+                        }
+                        let stream = std::os::unix::net::UnixStream::from(fd);
+                        stream.set_nonblocking(true)?;
+                        let mut socket = tokio::net::UnixStream::from_std(stream)?;
+                        let buf = bincode::options().serialize(&update)?;
+                        socket.write_u64_le(buf.len() as _).await?;
+                        socket.write_all(&buf).await?;
+                        let len = socket.read_u64_le().await?;
+                        let mut buf = vec![0; len as _];
+                        socket.read_exact(&mut buf).await?;
+                        drop(socket);
+                        sender.send(bincode::options().deserialize(&buf)?)
+                    }
+                    .instrument(tracing::debug_span!("update")),
+                );
             }
             Select::JoinNext(result) => result?,
         }
@@ -772,5 +780,5 @@ pub mod impls {
     }
 }
 
-// cSpell:words lamport upcall bincode vsock
+// cSpell:words lamport upcall bincode vsock nonblocking
 // cSpell:ignore EINTR

@@ -27,20 +27,6 @@ async fn main() -> anyhow::Result<()> {
     let item = std::env::args().nth(1);
     match item.as_deref() {
         Some("test-mutex") => {
-            // let instances = (0..4)
-            //     .map(|i| TerraformOutputInstance {
-            //         public_ip: IpAddr::from([127, 0, 0, i + 1]),
-            //         private_ip: IpAddr::from([127, 0, 0, i + 1]),
-            //         public_dns: format!("127.0.0.{}", i + 1),
-            //     })
-            //     .collect();
-            // let clock_instances = (0..2)
-            //     .map(|i| TerraformOutputInstance {
-            //         public_ip: IpAddr::from([127, 0, 0, i + 101]),
-            //         private_ip: IpAddr::from([127, 0, 0, i + 101]),
-            //         public_dns: format!("127.0.0.{}", i + 101),
-            //     })
-            //     .collect();
             let instances = terraform_output("mutex_instances").await?;
             let clock_instances = terraform_output("quorum_instances").await?;
             mutex_session(
@@ -48,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
                 instances,
                 clock_instances,
                 RequestMode::All,
-                Variant::Quorum,
+                Variant::NitroEnclaves,
                 12,
             )
             .await?;

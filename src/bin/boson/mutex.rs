@@ -499,34 +499,53 @@ pub async fn nitro_enclaves_session(
     let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
     // let recv_crypto_session =
     //     recv_crypto_executor.run(crypto.clone(), Sender::from(causal_net_session.sender()));
-    let processor_crypto_session = processor_crypto_executor.run(
-        crypto,
-        lamport_mutex::verifiable::MessageNet::<_, NitroEnclavesClock>::new(IndexNet::new(
-            dispatch::Net::from(dispatch_session.sender()),
-            addrs,
-            None,
-        )),
-    );
-    let dispatch_session = dispatch_session.run(&mut dispatch);
-    let processor_session = processor_session.run(&mut processor);
+    let processor_crypto_session = {
+        let dispatch_session_sender = dispatch_session.sender();
+        async move {
+            processor_crypto_executor
+                .run(
+                    crypto,
+                    lamport_mutex::verifiable::MessageNet::<_, NitroEnclavesClock>::new(
+                        IndexNet::new(dispatch::Net::from(dispatch_session_sender), addrs, None),
+                    ),
+                )
+                .await
+        }
+    };
+    let dispatch_session = async move { dispatch_session.run(&mut dispatch).await };
+    let processor_session = async move { processor_session.run(&mut processor).await };
     let clock_session = nitro_enclaves_portal_session(
         16,
         clock_receiver,
         boson::Lamport(Sender::from(causal_net_session.sender()), id),
     );
-    let causal_net_session = causal_net_session.run(&mut causal_net);
+    let causal_net_session = async move { causal_net_session.run(&mut causal_net).await };
 
+    // tokio::select! {
+    //     () = cancel.cancelled() => return Ok(()),
+    //     result = event_session => result?,
+    //     result = tcp_accept_session => result?,
+    //     result = dispatch_session => result?,
+    //     result = processor_session => result?,
+    //     result = causal_net_session => result?,
+    //     // result = recv_crypto_session => result?,
+    //     result = processor_crypto_session => result?,
+    //     result = clock_session => result?,
+    // }
+
+    let mut sessions = tokio::task::JoinSet::new();
+    sessions.spawn(event_session);
+    sessions.spawn(tcp_accept_session);
+    sessions.spawn(dispatch_session);
+    sessions.spawn(processor_session);
+    sessions.spawn(causal_net_session);
+    sessions.spawn(processor_crypto_session);
+    sessions.spawn(clock_session);
     tokio::select! {
         () = cancel.cancelled() => return Ok(()),
-        result = event_session => result?,
-        result = tcp_accept_session => result?,
-        result = dispatch_session => result?,
-        result = processor_session => result?,
-        result = causal_net_session => result?,
-        // result = recv_crypto_session => result?,
-        result = processor_crypto_session => result?,
-        result = clock_session => result?,
+        Some(result) = sessions.join_next() => result??,
     }
+
     anyhow::bail!("unreachable")
 }
 

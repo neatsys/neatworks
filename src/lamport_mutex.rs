@@ -172,8 +172,7 @@ impl<E, CS: SendEvent<Update<C>>, N, C: Clone, M> OnEvent<Init> for Causal<E, CS
         self.clock_service.send(update)?;
         self.pending_recv = Some(PendingRecv {
             messages: Default::default(),
-            // for Dispatch net's random backoff
-            slow_update: timer.set(SLOW_UPDATE_DURATION + std::time::Duration::from_millis(500))?,
+            slow_update: timer.set(SLOW_UPDATE_DURATION)?,
         });
         Ok(())
     }
@@ -279,7 +278,15 @@ impl<E, CS, N, C, M> OnTimer for Causal<E, CS, N, C, M> {
         timer_id: crate::event::TimerId,
         _: &mut impl Timer,
     ) -> anyhow::Result<()> {
-        anyhow::bail!("slow update: {timer_id:?}")
+        // it turns out the tail latency of validator backends could go very wild
+        // for example, a NitroEnclavesClock update typically takes 10~12ms, but sometimes it goes
+        // 300+ms
+        // there could be various reason, including the case where nitro enclaves does nothing wrong
+        // but the cooperative task suffers from starvation by my own code
+        // who knows (and cares), so just switch this into a non fatal error in response to the fact
+        // anyhow::bail!("slow update: {timer_id:?}")
+        warn!("slow update: {timer_id:?}");
+        Ok(())
     }
 }
 

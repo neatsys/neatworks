@@ -29,7 +29,23 @@ use tracing::warn;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    // tracing_subscriber::fmt::init();
+    use tracing::Level;
+    use tracing_subscriber::{
+        filter::Targets, fmt::format::FmtSpan, layer::SubscriberExt as _,
+        util::SubscriberInitExt as _,
+    };
+    tracing_subscriber::fmt()
+        .with_span_events(FmtSpan::CLOSE)
+        .with_max_level(Level::TRACE)
+        .finish()
+        .with(if let Ok(var) = std::env::var("RUST_LOG") {
+            var.parse()?
+        } else {
+            Targets::new().with_default(Level::INFO)
+        })
+        .init();
+
     let rlimit = nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_NOFILE)?;
     nix::sys::resource::setrlimit(
         nix::sys::resource::Resource::RLIMIT_NOFILE,
@@ -198,13 +214,11 @@ async fn mutex_request(State(state): State<AppState>, at: Json<SystemTime>) -> R
         };
         let start = Instant::now();
         channel.event_sender.send(mutex::Event::Request)?;
-        // TODO timeout
-        let result = channel.upcall.recv().await;
-        if result.is_none() {
-            // state.session.lock().await.take().unwrap().handle.await??;
+        let Some(result) = channel.upcall.recv().await else {
+            state.session.lock().await.take().unwrap().handle.await??;
             anyhow::bail!("unreachable")
-        }
-        anyhow::ensure!(matches!(result, Some(Upcall::RequestOk(_))), "{result:?}");
+        };
+        anyhow::ensure!(matches!(result, Upcall::RequestOk(_)), "{result:?}");
         channel.event_sender.send(mutex::Event::Release)?;
         Ok(Json(start.elapsed()))
     };
