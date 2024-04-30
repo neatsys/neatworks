@@ -722,46 +722,53 @@ pub async fn nitro_enclaves_portal_session(
     }
 }
 
-impl<M: Send + Sync + 'static> Verify<()> for lamport_mutex::Clocked<M, NitroEnclavesClock> {
-    fn verify_clock(&self, _: usize, (): &()) -> anyhow::Result<()> {
-        self.clock.verify()?;
-        Ok(())
-    }
-}
+#[cfg(feature = "nitro-enclaves")]
+pub mod impls {
+    use crate::{cops, lamport_mutex, net::Addr};
 
-impl Verify<()> for cops::PutOk<NitroEnclavesClock> {
-    fn verify_clock(&self, _: usize, (): &()) -> anyhow::Result<()> {
-        self.version_deps.verify()?;
-        Ok(())
-    }
-}
+    use super::{NitroEnclavesClock, Verify};
 
-impl Verify<()> for cops::GetOk<NitroEnclavesClock> {
-    fn verify_clock(&self, _: usize, (): &()) -> anyhow::Result<()> {
-        self.version_deps.verify()?;
-        Ok(())
-    }
-}
-
-impl<A: Addr> Verify<()> for cops::Put<NitroEnclavesClock, A> {
-    fn verify_clock(&self, _: usize, (): &()) -> anyhow::Result<()> {
-        for clock in self.deps.values() {
-            clock.verify()?;
+    impl<M: Send + Sync + 'static> Verify<()> for lamport_mutex::Clocked<M, NitroEnclavesClock> {
+        fn verify_clock(&self, _: usize, (): &()) -> anyhow::Result<()> {
+            self.clock.verify()?;
+            Ok(())
         }
-        Ok(())
     }
-}
 
-impl<A: Addr> Verify<()> for cops::Get<A> {
-    fn verify_clock(&self, _: usize, _: &()) -> anyhow::Result<()> {
-        Ok(())
+    impl Verify<()> for cops::PutOk<NitroEnclavesClock> {
+        fn verify_clock(&self, _: usize, (): &()) -> anyhow::Result<()> {
+            self.version_deps.verify()?;
+            Ok(())
+        }
     }
-}
 
-impl Verify<()> for cops::SyncKey<NitroEnclavesClock> {
-    fn verify_clock(&self, _: usize, (): &()) -> anyhow::Result<()> {
-        self.version_deps.verify()?;
-        Ok(())
+    impl Verify<()> for cops::GetOk<NitroEnclavesClock> {
+        fn verify_clock(&self, _: usize, (): &()) -> anyhow::Result<()> {
+            self.version_deps.verify()?;
+            Ok(())
+        }
+    }
+
+    impl<A: Addr> Verify<()> for cops::Put<NitroEnclavesClock, A> {
+        fn verify_clock(&self, _: usize, (): &()) -> anyhow::Result<()> {
+            for clock in self.deps.values() {
+                clock.verify()?;
+            }
+            Ok(())
+        }
+    }
+
+    impl<A: Addr> Verify<()> for cops::Get<A> {
+        fn verify_clock(&self, _: usize, _: &()) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Verify<()> for cops::SyncKey<NitroEnclavesClock> {
+        fn verify_clock(&self, _: usize, (): &()) -> anyhow::Result<()> {
+            self.version_deps.verify()?;
+            Ok(())
+        }
     }
 }
 
