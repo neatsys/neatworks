@@ -16,8 +16,23 @@ use tokio::{
     net::TcpStream,
     process::Command,
     task::JoinSet,
-    time::sleep,
+    time::{sleep, timeout},
 };
+use tokio_util::sync::CancellationToken;
+
+#[derive(Debug)]
+pub enum RequestMode {
+    One,
+    All,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Variant {
+    Untrusted,
+    Replicated,
+    Quorum,
+    NitroEnclaves,
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
@@ -61,30 +76,30 @@ async fn main() -> anyhow::Result<()> {
                     .await?
                 }
             }
-            // for variant in [
-            //     Variant::Quorum,
-            //     Variant::NitroEnclaves,
-            //     Variant::Replicated,
-            //     Variant::Untrusted,
-            // ] {
-            //     for n in match variant {
-            //         Variant::Replicated => 1..=10,
-            //         Variant::NitroEnclaves => 1..=12,
-            //         _ => 1..=16,
-            //     }
-            //     .rev()
-            //     {
-            //         mutex_session(
-            //             client.clone(),
-            //             instances.clone(),
-            //             clock_instances.clone(),
-            //             RequestMode::All,
-            //             variant,
-            //             n,
-            //         )
-            //         .await?
-            //     }
-            // }
+            for variant in [
+                Variant::Quorum,
+                Variant::NitroEnclaves,
+                Variant::Replicated,
+                Variant::Untrusted,
+            ] {
+                for n in match variant {
+                    Variant::Replicated => 1..=10,
+                    Variant::NitroEnclaves => 1..=12,
+                    _ => 1..=16,
+                }
+                .rev()
+                {
+                    mutex_session(
+                        client.clone(),
+                        instances.clone(),
+                        clock_instances.clone(),
+                        RequestMode::All,
+                        variant,
+                        n,
+                    )
+                    .await?
+                }
+            }
             Ok(())
         }
         Some("cops") => {
@@ -97,133 +112,8 @@ async fn main() -> anyhow::Result<()> {
                 Variant::Untrusted,
                 1,
                 1,
-                5,
-                2,
             )
             .await?;
-            cops_session(
-                client.clone(),
-                instances.clone(),
-                clock_instances.clone(),
-                Variant::Untrusted,
-                1,
-                1,
-                10,
-                4,
-            )
-            .await?;
-            for n in 1..=10 {
-                cops_session(
-                    client.clone(),
-                    instances.clone(),
-                    clock_instances.clone(),
-                    Variant::Untrusted,
-                    1,
-                    2,
-                    n * 10,
-                    n * 4,
-                )
-                .await?
-            }
-
-            cops_session(
-                client.clone(),
-                instances.clone(),
-                clock_instances.clone(),
-                Variant::Quorum,
-                1,
-                1,
-                5,
-                2,
-            )
-            .await?;
-            cops_session(
-                client.clone(),
-                instances.clone(),
-                clock_instances.clone(),
-                Variant::Quorum,
-                1,
-                1,
-                10,
-                4,
-            )
-            .await?;
-            for n in 1..=10 {
-                cops_session(
-                    client.clone(),
-                    instances.clone(),
-                    clock_instances.clone(),
-                    Variant::Quorum,
-                    1,
-                    2,
-                    n * 10,
-                    n * 4,
-                )
-                .await?
-            }
-
-            for n in [1, 2, 4, 8, 20, 40, 60, 80, 120, 160] {
-                cops_session(
-                    client.clone(),
-                    instances.clone(),
-                    clock_instances.clone(),
-                    Variant::Untrusted,
-                    1,
-                    2,
-                    200,
-                    n,
-                )
-                .await?
-            }
-            cops_session(
-                client.clone(),
-                instances.clone(),
-                clock_instances.clone(),
-                Variant::Untrusted,
-                1,
-                2,
-                160,
-                160,
-            )
-            .await?;
-
-            for (n_put, n) in [
-                (1, 200),
-                (2, 200),
-                (4, 200),
-                (8, 200),
-                (20, 200),
-                (20, 100),
-                (30, 100),
-                (40, 100),
-                (30, 50),
-                (40, 50),
-                (50, 50),
-            ] {
-                cops_session(
-                    client.clone(),
-                    instances.clone(),
-                    clock_instances.clone(),
-                    Variant::Quorum,
-                    1,
-                    2,
-                    n,
-                    n_put,
-                )
-                .await?
-            }
-
-            Ok(())
-        }
-        Some("cops-replicated") => {
-            let instances = terraform_output("cops_instances").await?;
-            for n in [1].into_iter().chain((2..=20).step_by(2)) {
-                cops_replicated_session(client.clone(), instances.clone(), 5, 1, n * 10, n * 4)
-                    .await?
-            }
-            for n in [1, 2, 4, 8, 20, 40, 60, 80, 120, 160, 200] {
-                cops_replicated_session(client.clone(), instances.clone(), 5, 1, 200, n).await?
-            }
             Ok(())
         }
         Some("quorum") => bench_quorum_session(client).await,
@@ -242,18 +132,35 @@ async fn while_ok<T>(
     anyhow::bail!("unreachable")
 }
 
-#[derive(Debug)]
-pub enum RequestMode {
-    One,
-    All,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum Variant {
-    Untrusted,
-    Replicated,
-    Quorum,
-    NitroEnclaves,
+async fn watchdog_session(
+    client: reqwest::Client,
+    url: String,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
+    let mut num_missing_ok = 0;
+    loop {
+        if let Ok(()) = timeout(Duration::from_millis(1000), cancel.cancelled()).await {
+            return Ok(());
+        }
+        if let Err(err) = async {
+            client
+                .get(format!("{url}/ok"))
+                .send()
+                .await?
+                .error_for_status()?;
+            anyhow::Ok(())
+        }
+        .await
+        {
+            if num_missing_ok < 3 {
+                num_missing_ok += 1;
+                println!("! missing {num_missing_ok} from {url}");
+                continue;
+            }
+            Err(err)?
+        }
+        num_missing_ok = 0
+    }
 }
 
 async fn mutex_session(
@@ -311,12 +218,18 @@ async fn mutex_session(
         addrs: clock_addrs,
         num_faulty: 1,
     };
+    let cancel = CancellationToken::new();
     for (i, url) in clock_urls.iter().enumerate() {
         let config = boson_control_messages::QuorumServer {
             quorum: quorum.clone(),
             index: i,
         };
-        watchdog_sessions.spawn(quorum_start_session(client.clone(), url.clone(), config));
+        watchdog_sessions.spawn(quorum_start_session(
+            client.clone(),
+            url.clone(),
+            config,
+            cancel.clone(),
+        ));
     }
     while_ok(&mut watchdog_sessions, sleep(Duration::from_millis(5000))).await?;
     use boson_control_messages::Variant::*;
@@ -335,7 +248,12 @@ async fn mutex_session(
             num_faulty: num_region_processor - 1,
             variant: variant_config.clone(),
         };
-        watchdog_sessions.spawn(mutex_start_session(client.clone(), url.clone(), config));
+        watchdog_sessions.spawn(mutex_watchdog_session(
+            client.clone(),
+            url.clone(),
+            config,
+            cancel.clone(),
+        ));
     }
     let mut lines = String::new();
     for i in 0..10 {
@@ -384,15 +302,8 @@ async fn mutex_session(
         }
         // sleep(Duration::from_millis(10000)).await
     }
-    watchdog_sessions.shutdown().await;
-    let mut stop_sessions = JoinSet::new();
-    for url in urls {
-        stop_sessions.spawn(mutex_stop_session(client.clone(), url));
-    }
-    for url in clock_urls {
-        stop_sessions.spawn(quorum_stop_session(client.clone(), url));
-    }
-    while let Some(result) = stop_sessions.join_next().await {
+    cancel.cancel();
+    while let Some(result) = watchdog_sessions.join_next().await {
         result??
     }
     // print!("{lines}");
@@ -409,10 +320,11 @@ async fn mutex_session(
     Ok(())
 }
 
-async fn mutex_start_session(
+async fn mutex_watchdog_session(
     client: reqwest::Client,
     url: String,
     config: boson_control_messages::Mutex,
+    cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     client
         .post(format!("{url}/mutex/start"))
@@ -420,31 +332,7 @@ async fn mutex_start_session(
         .send()
         .await?
         .error_for_status()?;
-    let mut num_missing_ok = 0;
-    loop {
-        sleep(Duration::from_millis(1000)).await;
-        if let Err(err) = async {
-            client
-                .get(format!("{url}/ok"))
-                .send()
-                .await?
-                .error_for_status()?;
-            anyhow::Ok(())
-        }
-        .await
-        {
-            if num_missing_ok < 3 {
-                num_missing_ok += 1;
-                println!("! missing {num_missing_ok} from {url}");
-                continue;
-            }
-            Err(err)?
-        }
-        num_missing_ok = 0
-    }
-}
-
-async fn mutex_stop_session(client: reqwest::Client, url: String) -> anyhow::Result<()> {
+    watchdog_session(client.clone(), url.clone(), cancel).await?;
     client
         .post(format!("{url}/mutex/stop"))
         .send()
@@ -480,8 +368,6 @@ async fn cops_session(
     instances: Vec<TerraformOutputInstance>,
     clock_instances: Vec<TerraformOutputInstance>,
     variant: Variant,
-    num_region_replica: usize,
-    num_replica_client: usize,
     num_concurrent: usize,
     num_concurrent_put: usize,
 ) -> anyhow::Result<()> {
@@ -493,19 +379,17 @@ async fn cops_session(
             .push(instance.clone())
     }
     let num_region = region_instances.len();
-    let num_region_client = num_region_replica * num_replica_client;
+    let num_region_client = 1; // TODO
 
-    // let mut clock_instances = Vec::new();
     let mut instances = Vec::new();
     let mut client_instances = Vec::new();
     for region_instances in region_instances.into_values() {
         let mut region_instances = region_instances.into_iter();
-        // clock_instances.extend((&mut region_instances).take(2));
-        instances.extend((&mut region_instances).take(num_region_replica));
+        instances.extend(region_instances.next());
         client_instances.extend(region_instances.take(num_region_client));
     }
     anyhow::ensure!(clock_instances.len() >= num_region * 2);
-    anyhow::ensure!(instances.len() == num_region * num_region_replica);
+    anyhow::ensure!(instances.len() == num_region);
     anyhow::ensure!(client_instances.len() == num_region * num_region_client);
 
     let urls = instances
@@ -538,17 +422,25 @@ async fn cops_session(
         addrs: clock_addrs.clone(),
         num_faulty: 1,
     };
+    let cancel = CancellationToken::new();
     for (i, url) in clock_urls.iter().enumerate() {
         let config = boson_control_messages::QuorumServer {
             quorum: quorum.clone(),
             index: i,
         };
-        watchdog_sessions.spawn(quorum_start_session(client.clone(), url.clone(), config));
+        watchdog_sessions.spawn(quorum_start_session(
+            client.clone(),
+            url.clone(),
+            config,
+            cancel.clone(),
+        ));
     }
     use boson_control_messages::Variant::*;
     let variant_config = match variant {
         Variant::Untrusted => Untrusted,
-        Variant::Replicated => anyhow::bail!("unimplemented"),
+        Variant::Replicated => Replicated(boson_control_messages::Replicated {
+            num_faulty: (instances.len() - 1) / 3,
+        }),
         Variant::Quorum => Quorum(quorum),
         Variant::NitroEnclaves => NitroEnclaves,
     };
@@ -566,15 +458,16 @@ async fn cops_session(
             client.clone(),
             url.clone(),
             config,
+            cancel.clone(),
         ));
     }
     while_ok(&mut watchdog_sessions, sleep(Duration::from_millis(5000))).await?;
     println!("Start clients");
     let mut client_sessions = JoinSet::new();
-    let record_count_per_replica = record_count / urls.len();
+    let record_count_per_replica = record_count / instances.len();
     let out = Arc::new(Mutex::new(Vec::new()));
     for (i, url) in client_urls.into_iter().enumerate() {
-        let index = i / num_replica_client;
+        let index = i / num_region_client;
         let config = boson_control_messages::CopsClient {
             addrs: addrs.clone(),
             ip: client_ips[i],
@@ -600,15 +493,8 @@ async fn cops_session(
     })
     .await??;
     println!("Shutdown");
-    watchdog_sessions.shutdown().await;
-    let mut stop_sessions = JoinSet::new();
-    for url in urls {
-        stop_sessions.spawn(cops_stop_server_session(client.clone(), url));
-    }
-    for url in clock_urls {
-        stop_sessions.spawn(quorum_stop_session(client.clone(), url));
-    }
-    while let Some(result) = stop_sessions.join_next().await {
+    cancel.cancel();
+    while let Some(result) = watchdog_sessions.join_next().await {
         result??
     }
     let (throughputs, latencies) = Arc::into_inner(out)
@@ -617,23 +503,22 @@ async fn cops_session(
         .into_iter()
         .unzip::<_, _, Vec<_>, Vec<_>>();
     let throughput = throughputs.into_iter().sum::<f32>();
-    let lantecy = latencies.iter().sum::<Duration>() / latencies.len() as u32;
+    let latency = latencies.iter().sum::<Duration>() / latencies.len() as u32;
     // println!(
     //     "{variant:?},{},{num_concurrent},{num_concurrent_put},{throughput},{}",
     //     num_region_replica,
     //     lantecy.as_secs_f32()
     // );
-    let path = Path::new("tools/boson-control/notebooks");
+    let path = Path::new("tools/boson-control/notebooks/cops");
     create_dir_all(path).await?;
     write(
         path.join(format!(
-            "cops-{}.txt",
+            "{}.txt",
             SystemTime::UNIX_EPOCH.elapsed()?.as_secs()
         )),
         format!(
-            "{variant:?},{},{num_concurrent},{num_concurrent_put},{throughput},{}",
-            num_region_replica,
-            lantecy.as_secs_f32()
+            "{variant:?},{num_concurrent},{num_concurrent_put},{throughput},{}",
+            latency.as_secs_f32()
         ),
     )
     .await?;
@@ -644,6 +529,7 @@ async fn cops_start_server_session(
     client: reqwest::Client,
     url: String,
     config: boson_control_messages::CopsServer,
+    cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     client
         .post(format!("{url}/cops/start-server"))
@@ -651,17 +537,7 @@ async fn cops_start_server_session(
         .send()
         .await?
         .error_for_status()?;
-    loop {
-        sleep(Duration::from_millis(1000)).await;
-        client
-            .get(format!("{url}/ok"))
-            .send()
-            .await?
-            .error_for_status()?;
-    }
-}
-
-async fn cops_stop_server_session(client: reqwest::Client, url: String) -> anyhow::Result<()> {
+    watchdog_session(client.clone(), url.clone(), cancel).await?;
     client
         .post(format!("{url}/cops/stop-server"))
         .send()
@@ -701,142 +577,6 @@ async fn cops_client_session(
     }
 }
 
-async fn cops_replicated_session(
-    client: reqwest::Client,
-    instances: Vec<TerraformOutputInstance>,
-    num_region_replica: usize,
-    num_replica_client: usize,
-    num_concurrent: usize,
-    num_concurrent_put: usize,
-) -> anyhow::Result<()> {
-    let mut region_instances = BTreeMap::<_, Vec<_>>::new();
-    for instance in instances {
-        region_instances
-            .entry(instance.region())
-            .or_default()
-            .push(instance.clone())
-    }
-    let num_region = region_instances.len();
-    let num_region_client = num_region_replica * num_replica_client;
-
-    // let mut clock_instances = Vec::new();
-    let mut instances = Vec::new();
-    let mut client_instances = Vec::new();
-    for region_instances in region_instances.into_values() {
-        let mut region_instances = region_instances.into_iter();
-        // clock_instances.extend((&mut region_instances).take(2));
-        instances.extend((&mut region_instances).take(num_region_replica));
-        client_instances.extend(region_instances.take(num_region_client));
-    }
-    anyhow::ensure!(instances.len() == num_region * num_region_replica);
-    anyhow::ensure!(client_instances.len() == num_region * num_region_client);
-
-    let urls = instances
-        .iter()
-        .map(|instance| format!("http://{}:3000", instance.public_dns))
-        .collect::<Vec<_>>();
-    let client_urls = client_instances
-        .iter()
-        .map(|instance| format!("http://{}:3000", instance.public_dns))
-        .collect::<Vec<_>>();
-    let addrs = instances
-        .iter()
-        .map(|instance| SocketAddr::from((instance.public_ip, 4000)))
-        .collect::<Vec<_>>();
-    let client_ips = client_instances
-        .iter()
-        .map(|instance| instance.public_ip)
-        .collect::<Vec<_>>();
-    let mut watchdog_sessions = JoinSet::new();
-    use boson_control_messages::Variant::*;
-    let variant_config = Replicated(boson_control_messages::Replicated {
-        num_faulty: (urls.len() - 1) / 3,
-    });
-    println!("Start servers");
-    let record_count = 1000;
-    for (i, url) in urls.iter().enumerate() {
-        println!("{url}");
-        let config = boson_control_messages::CopsServer {
-            addrs: addrs.clone(),
-            id: i as _,
-            record_count,
-            variant: variant_config.clone(),
-        };
-        watchdog_sessions.spawn(cops_start_server_session(
-            client.clone(),
-            url.clone(),
-            config,
-        ));
-    }
-    while_ok(&mut watchdog_sessions, sleep(Duration::from_millis(5000))).await?;
-    println!("Start clients");
-    let mut client_sessions = JoinSet::new();
-    let record_count_per_replica = record_count / urls.len();
-    let out = Arc::new(Mutex::new(Vec::new()));
-    for (i, url) in client_urls.into_iter().enumerate() {
-        let index = i / num_replica_client;
-        let config = boson_control_messages::CopsClient {
-            addrs: addrs.clone(),
-            ip: client_ips[i],
-            index,
-            num_concurrent,
-            num_concurrent_put,
-            record_count,
-            put_range: record_count_per_replica * index..record_count_per_replica * (index + 1),
-            variant: variant_config.clone(),
-        };
-        client_sessions.spawn(cops_client_session(
-            client.clone(),
-            url,
-            config,
-            out.clone(),
-        ));
-    }
-    while_ok(&mut watchdog_sessions, async {
-        while let Some(result) = client_sessions.join_next().await {
-            result??
-        }
-        anyhow::Ok(())
-    })
-    .await??;
-    println!("Shutdown");
-    watchdog_sessions.shutdown().await;
-    let mut stop_sessions = JoinSet::new();
-    for url in urls {
-        stop_sessions.spawn(cops_stop_server_session(client.clone(), url));
-    }
-    while let Some(result) = stop_sessions.join_next().await {
-        result??
-    }
-    let (throughputs, latencies) = Arc::into_inner(out)
-        .unwrap()
-        .into_inner()?
-        .into_iter()
-        .unzip::<_, _, Vec<_>, Vec<_>>();
-    let throughput = throughputs.into_iter().sum::<f32>();
-    let lantecy = latencies.iter().sum::<Duration>() / latencies.len() as u32;
-    // println!(
-    //     "Replicated (local),{},{num_concurrent},{num_concurrent_put},{throughput},{}",
-    //     num_region_replica,
-    //     lantecy.as_secs_f32()
-    // );
-    let path = Path::new("tools/boson-control/notebooks");
-    create_dir_all(path).await?;
-    write(
-        path.join(format!(
-            "cops-{}.txt",
-            SystemTime::UNIX_EPOCH.elapsed()?.as_secs()
-        )),
-        format!(
-            "Replicated (local),{},{num_concurrent},{num_concurrent_put},{throughput},{}",
-            num_region_replica,
-            lantecy.as_secs_f32()
-        ),
-    )
-    .await?;
-    Ok(())
-}
-
 async fn bench_quorum_session(client: reqwest::Client) -> anyhow::Result<()> {
     let instance = terraform_output("microbench_instances").await?.remove(0);
     let clock_instances = terraform_output("microbench_quorum_instances").await?;
@@ -857,12 +597,18 @@ async fn bench_quorum_session(client: reqwest::Client) -> anyhow::Result<()> {
 
         println!("Start clock services");
         let mut watchdog_sessions = JoinSet::new();
+        let cancel = CancellationToken::new();
         for (i, url) in clock_urls.iter().enumerate() {
             let config = boson_control_messages::QuorumServer {
                 quorum: quorum.clone(),
                 index: i,
             };
-            watchdog_sessions.spawn(quorum_start_session(client.clone(), url.clone(), config));
+            watchdog_sessions.spawn(quorum_start_session(
+                client.clone(),
+                url.clone(),
+                config,
+                cancel.clone(),
+            ));
         }
 
         while_ok(&mut watchdog_sessions, async {
@@ -884,12 +630,8 @@ async fn bench_quorum_session(client: reqwest::Client) -> anyhow::Result<()> {
         })
         .await??;
 
-        watchdog_sessions.shutdown().await;
-        let mut stop_sessions = JoinSet::new();
-        for url in &clock_urls {
-            stop_sessions.spawn(quorum_stop_session(client.clone(), url.clone()));
-        }
-        while let Some(result) = stop_sessions.join_next().await {
+        cancel.cancel();
+        while let Some(result) = watchdog_sessions.join_next().await {
             result??
         }
     }
@@ -908,6 +650,7 @@ async fn quorum_start_session(
     client: reqwest::Client,
     url: String,
     config: boson_control_messages::QuorumServer,
+    cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     client
         .post(format!("{url}/start-quorum"))
@@ -915,31 +658,7 @@ async fn quorum_start_session(
         .send()
         .await?
         .error_for_status()?;
-    let mut num_missing_ok = 0;
-    loop {
-        sleep(Duration::from_millis(1000)).await;
-        if let Err(err) = async {
-            client
-                .get(format!("{url}/ok"))
-                .send()
-                .await?
-                .error_for_status()?;
-            anyhow::Ok(())
-        }
-        .await
-        {
-            if num_missing_ok < 3 {
-                num_missing_ok += 1;
-                println!("! missing {num_missing_ok} from {url}");
-                continue;
-            }
-            Err(err)?
-        }
-        num_missing_ok = 0
-    }
-}
-
-async fn quorum_stop_session(client: reqwest::Client, url: String) -> anyhow::Result<()> {
+    watchdog_session(client.clone(), url.clone(), cancel).await?;
     client
         .post(format!("{url}/stop-quorum"))
         .send()
