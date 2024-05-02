@@ -31,7 +31,6 @@ use std::{
         atomic::{AtomicUsize, Ordering::SeqCst},
         Arc, Mutex,
     },
-    time::{Duration, Instant},
 };
 
 use rand::{
@@ -49,6 +48,14 @@ pub enum Op {
     Update(String, usize, String),
     Insert(String, Vec<String>),
     Delete(String),
+}
+
+pub enum Txn {
+    Op(Op),
+    // a "virtual" Op that emitted by the workload but should never be directly `Invoke(_)`ed
+    // this is for reusing the general `OpLatency` workload combinator without inventing a full
+    // fledged, multi-op transaction aware workload model
+    ReadModifyWrite(String, usize, String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,7 +182,7 @@ impl WorkloadSettings {
     }
 }
 
-#[derive(Clone, derive_more::AsMut)]
+#[derive(Clone)]
 pub struct Workload<R> {
     rng: R,
     settings: WorkloadSettings,
@@ -189,10 +196,6 @@ pub struct Workload<R> {
     transaction: WeightedAliasIndex<f32>,
 
     transaction_count: usize,
-    rmw_update: Option<Op>,
-    #[as_mut]
-    pub latencies: Vec<Duration>,
-    start: Option<Instant>,
 }
 
 struct InsertShared {
@@ -323,9 +326,6 @@ impl<R> Workload<R> {
             ])?,
             settings,
             transaction_count: 0,
-            rmw_update: None,
-            latencies: Default::default(),
-            start: None,
         })
     }
 
@@ -395,16 +395,13 @@ impl<R: Rng> Workload<R> {
 }
 
 impl<R: Rng> crate::workload::Workload for Workload<R> {
-    type Op = Op;
-    type Result = Result;
+    type Op = Txn;
     type OpContext = Option<usize>;
+    type Result = Result;
 
     fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::OpContext)>> {
-        let mut key_num = 0;
-        let op = 'op: {
-            if let Some(op) = self.rmw_update.take() {
-                break 'op Some(op);
-            }
+        let mut key_num = usize::MAX;
+        let txn = 'op: {
             if Some(self.transaction_count) == self.settings.operation_count {
                 break 'op None;
             }
@@ -420,30 +417,27 @@ impl<R: Rng> crate::workload::Workload for Workload<R> {
                 self.key_num()
             };
             let key_name = self.build_key_name(key_num);
-            self.start = Some(Instant::now());
             Some(match transaction {
-                Transaction::Read => Op::Read(key_name),
-                Transaction::Update => Op::Update(key_name, field, self.build_value()),
-                Transaction::Insert => Op::Insert(
+                Transaction::Read => Txn::Op(Op::Read(key_name)),
+                Transaction::Update => Txn::Op(Op::Update(key_name, field, self.build_value())),
+                Transaction::Insert => Txn::Op(Op::Insert(
                     key_name,
                     vec![self.build_value(); self.settings.field_count],
-                ),
-                Transaction::Scan => Op::Scan(key_name, self.scan_len.gen(&mut self.rng)),
+                )),
+                Transaction::Scan => Txn::Op(Op::Scan(key_name, self.scan_len.gen(&mut self.rng))),
                 Transaction::ReadModifyWrite => {
-                    let op = Op::Read(key_name.clone());
-                    let value = self.build_value();
-                    self.rmw_update = Some(Op::Update(key_name, field, value));
-                    op
+                    Txn::ReadModifyWrite(key_name, field, self.build_value())
                 }
             })
         };
-        Ok(if let Some(op) = op {
-            let attach = if matches!(op, Op::Insert(..)) {
+        Ok(if let Some(txn) = txn {
+            let context = if matches!(txn, Txn::Op(Op::Insert(..))) {
+                assert!(key_num != usize::MAX);
                 Some(key_num)
             } else {
                 None
             };
-            Some((op, attach))
+            Some((txn, context))
         } else {
             None
         })
@@ -454,13 +448,55 @@ impl<R: Rng> crate::workload::Workload for Workload<R> {
         if let Some(key_num) = key_num {
             self.insert_shared.ack(key_num)
         }
-        if self.rmw_update.is_none() {
-            let Some(start) = self.start.take() else {
-                anyhow::bail!("missing start instant")
-            };
-            self.latencies.push(start.elapsed())
-        }
         Ok(())
+    }
+}
+
+#[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
+pub struct Destruct<W, C>(
+    #[deref]
+    #[deref_mut]
+    W,
+    Option<(Op, C)>,
+);
+
+impl<W, C> From<W> for Destruct<W, C> {
+    fn from(value: W) -> Self {
+        Self(value, None)
+    }
+}
+
+impl<W: crate::workload::Workload<Op = Txn, Result = Result>> crate::workload::Workload
+    for Destruct<W, W::OpContext>
+{
+    type Op = Op;
+    type OpContext = Option<W::OpContext>;
+    type Result = Result;
+
+    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::OpContext)>> {
+        if let Some((op, context)) = self.1.take() {
+            return Ok(Some((op, Some(context))));
+        }
+        let Some((txn, context)) = self.0.next_op()? else {
+            return Ok(None);
+        };
+        Ok(Some(match txn {
+            Txn::Op(op) => (op, Some(context)),
+            Txn::ReadModifyWrite(key_name, field, value) => {
+                self.1 = Some((Op::Update(key_name.clone(), field, value), context));
+                (Op::Read(key_name), None)
+            }
+        }))
+    }
+
+    fn on_result(&mut self, result: Self::Result, context: Self::OpContext) -> anyhow::Result<()> {
+        if let Some(context) = context {
+            self.0.on_result(result, context)
+        } else {
+            assert!(self.1.is_some());
+            anyhow::ensure!(matches!(result, Result::ReadOk(_))); // check result in some way?
+            Ok(())
+        }
     }
 }
 

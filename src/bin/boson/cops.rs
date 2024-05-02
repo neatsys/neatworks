@@ -17,7 +17,7 @@ use augustus::{
     },
     pbft,
     worker::{spawning_backend, Submit},
-    workload::{CloseLoop, Iter, Json, Upcall, Workload},
+    workload::{CloseLoop, Iter, Json, OpLatency, Upcall, Workload},
 };
 use boson_control_messages::{CopsClient, CopsServer, Variant};
 use rand::{rngs::StdRng, thread_rng, SeedableRng};
@@ -104,7 +104,7 @@ pub async fn pbft_client_session(
         )));
         let mut close_loop = Blanket(Unify(CloseLoop::new(
             Sender::from(client_session.sender()),
-            Json(workload),
+            Json(OpLatency::new(ycsb::Destruct::from(workload))),
         )));
 
         let mut upcall = upcall.clone();
@@ -282,7 +282,7 @@ pub async fn untrusted_client_session(
         ));
         let mut close_loop = Blanket(Unify(CloseLoop::new(
             Sender::from(client_session.sender()),
-            workload,
+            OpLatency::new(ycsb::Destruct::from(workload)),
         )));
 
         let mut upcall = upcall.clone();
@@ -448,7 +448,7 @@ pub async fn quorum_client_session(
         ));
         let mut close_loop = Blanket(Unify(CloseLoop::new(
             Sender::from(client_session.sender()),
-            workload,
+            OpLatency::new(ycsb::Destruct::from(workload)),
         )));
 
         let mut upcall = upcall.clone();

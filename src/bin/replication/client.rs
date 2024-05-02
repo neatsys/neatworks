@@ -92,6 +92,7 @@ pub async fn session(
         match &workload {
             Workload::Null => sessions.spawn(close_loop_session(
                 OpLatency::new(Iter::from(repeat_with(Default::default))),
+                |workload| workload.as_mut(),
                 upcall_receiver,
                 invoke_sender,
                 barrier.clone(),
@@ -99,7 +100,10 @@ pub async fn session(
                 latencies.clone(),
             )),
             Workload::Ycsb(workload) => sessions.spawn(close_loop_session(
-                Json(workload.clone_reseed(StdRng::seed_from_u64(client_id as _))),
+                Json(ycsb::Destruct::from(OpLatency::new(
+                    workload.clone_reseed(StdRng::seed_from_u64(client_id as _)),
+                ))),
+                |workload| workload.as_mut(),
                 upcall_receiver,
                 invoke_sender,
                 barrier.clone(),
@@ -140,10 +144,9 @@ pub async fn session(
     Ok(())
 }
 
-async fn close_loop_session<
-    W: Workload<Op = Payload, Result = Payload> + AsMut<Vec<Duration>> + 'static,
->(
+async fn close_loop_session<W: Workload<Op = Payload, Result = Payload> + 'static>(
     workload: W,
+    as_latencies: impl Fn(&mut W) -> &mut Vec<Duration>,
     mut upcall: UnboundedReceiver<InvokeOk>,
     invoke: UnboundedSender<Invoke>,
     barrier: Arc<Barrier>,
@@ -179,7 +182,7 @@ async fn close_loop_session<
     latencies
         .lock()
         .map_err(|err| anyhow::format_err!("{err}"))?
-        .extend(take(close_loop.workload.as_mut()));
+        .extend(take(as_latencies(&mut close_loop.workload)));
     Ok(())
 }
 

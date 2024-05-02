@@ -34,7 +34,7 @@ impl Tcp {
     pub fn new(addr: impl Into<Option<SocketAddr>>) -> anyhow::Result<Self> {
         let addr = addr.into();
         let mut preamble = bincode::options().serialize(&addr)?;
-        assert!(preamble.len() < TCP_PREAMBLE_LEN);
+        anyhow::ensure!(preamble.len() < TCP_PREAMBLE_LEN);
         preamble.resize(TCP_PREAMBLE_LEN, Default::default());
         Ok(Self {
             local_addr: addr,
