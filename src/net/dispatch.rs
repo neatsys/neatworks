@@ -8,25 +8,27 @@
 // there were several attempts of proactively throttling/evicting connections
 // at this dispatching layer. those did not work well. on the one hand, we don't
 // have so much information that is useful for congestion control from our
-// inputs i.e. `SendMessage<...>` calls. on the other hand, we are not the only
-// consumer of underlying network resources, as others may be e.g. bulk service,
-// and we have no idea of how much resource should be preserved for them. in
-// conclusion, it's not a good idea to integrate resource management here
+// inputs i.e. `SendMessage<_, _>` calls. on the other hand, we are unlikely the
+// only customer of underlying network resources, as others may be e.g. bulk
+// service, and we have no idea of how much resource should be preserved for
+// them (or they are preserving for us). in conclusion, this is not the best
+// layer (and even possible to be the worst layer) to perform resource
+// management
 // the only thing remains to matter is about resource leaking. there is probably
 // no more port leaking going on here. another thing is that if we close too
 // many TCP connections in a short interval, there could be more TIME_WAIT
 // connections than the amount kernel would like to track i.e. 32768, and the
-// unexpected faster recycling may cause data corruption. since this dispatcher
-// does not decide the timing of closing connections (the underlying
+// unexpected faster recycling may cause stream data corruption. since this
+// dispatcher does not decide the timing of closing connections (the underlying
 // `impl Protocol` does), and (again) we don't know how frequent others are
 // closing connections, we are not doing anything specific to this
-// the dispatcher comes with inherit overhead: each outgoing message must go
-// through two channels, the first one from `DispatchNet` to `Dispatch` and the
-// second one from `Dispatch` to the corresponded `write_task`. the first
-// queuing is necessary for maintaining a global view of all connections in the
-// `Dispatch`. consider the fact that kernel already always maintains a
-// connection table (and yet another queuing layer), i generally don't satisfy
-// with this solution
+// the dispatcher comes with inherent overhead: each outgoing message must go
+// through two queuing procedures, the first one from the detached sender to
+// `Dispatch` and the second one from `Dispatch` to the corresponded
+// `write_task`. the first queuing is necessary for maintaining a global view of
+// all connections in the `Dispatch`. consider the fact that kernel already
+// always maintains a connection table (and probably yet another queuing layer),
+// this solution is somehow unsatisfiable to me
 use std::{collections::HashMap, time::Duration};
 
 use derive_where::derive_where;
@@ -116,6 +118,8 @@ pub trait Protocol<A, B> {
 
 pub struct Outgoing<A, B>(A, B);
 
+// TODO reuse crate::net::Detach
+// mainly blocking on the redesign of IterAddr
 #[derive(Clone)]
 pub struct Net<E, A>(pub E, std::marker::PhantomData<A>);
 // mark address type so the following implementations not conflict

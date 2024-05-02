@@ -86,8 +86,22 @@ module "mutex" {
     aws.af-south-1   = aws.af-south-1
   }
   instance_state = var.state
-  instance_type = "c5a.2xlarge"
+  instance_type  = "c5a.2xlarge"
   instance_count = 20
+}
+
+module "cops" {
+  source = "./geo_groups"
+  count  = var.mode == "cops" ? 1 : 0
+  providers = {
+    aws.ap-east-1    = aws.ap-east-1
+    aws.us-west-1    = aws.us-west-1
+    aws.eu-central-1 = aws.eu-central-1
+    aws.sa-east-1    = aws.sa-east-1
+    aws.af-south-1   = aws.af-south-1
+  }
+  instance_state = var.state
+  instance_type  = "c5a.2xlarge"
 }
 
 module "quorum" {
@@ -101,7 +115,7 @@ module "quorum" {
     aws.af-south-1   = aws.af-south-1
   }
   instance_state = var.state
-  instance_type = "c5a.8xlarge"
+  instance_type  = "c5a.8xlarge"
   instance_count = 2
 }
 
@@ -115,6 +129,10 @@ output "microbench_quorum_instances" {
 
 output "mutex_instances" {
   value = flatten(module.mutex[*].instances)
+}
+
+output "cops_instances" {
+  value = flatten(module.cops[*].instances)
 }
 
 output "quorum_instances" {

@@ -180,8 +180,8 @@ pub struct Workload<R> {
     rng: R,
     settings: WorkloadSettings,
 
-    insert_key_num: usize,          // `keysequence`
-    insert_state: Arc<InsertState>, // `transactioninsertkeysequence`
+    insert_key_num: usize,            // `keysequence`
+    insert_shared: Arc<InsertShared>, // `transactioninsertkeysequence`
 
     field_length: Gen,
     pub key_num: Gen,
@@ -195,30 +195,32 @@ pub struct Workload<R> {
     start: Option<Instant>,
 }
 
-struct InsertState {
+struct InsertShared {
     next_num: AtomicUsize,
     // possibly feasible to implement with AtomicUsize as well, but too hard for me
-    num_inserted: Mutex<(usize, HashSet<usize>)>,
+    progress: Mutex<(usize, HashSet<usize>)>,
 }
 
-impl InsertState {
-    fn next_num(&self) -> usize {
+impl InsertShared {
+    fn alloc(&self) -> usize {
         self.next_num.fetch_add(1, SeqCst)
     }
 
-    fn next_inserted_num(&self) -> usize {
-        self.num_inserted.lock().unwrap().0
+    fn first_unacked(&self) -> usize {
+        self.progress.lock().unwrap().0
     }
 
     fn ack(&self, n: usize) {
-        let (next_inserted_num, num_inserted) = &mut *self.num_inserted.lock().unwrap();
-        if n != *next_inserted_num {
-            num_inserted.insert(n);
+        let (first_unacked, acked) = &mut *self.progress.lock().unwrap();
+        assert!(n >= *first_unacked);
+        if n != *first_unacked {
+            let inserted = acked.insert(n);
+            assert!(inserted);
             return;
         }
         while {
-            *next_inserted_num += 1;
-            num_inserted.remove(next_inserted_num)
+            *first_unacked += 1;
+            acked.remove(first_unacked)
         } {}
     }
 }
@@ -301,9 +303,9 @@ impl<R> Workload<R> {
         Ok(Self {
             rng,
             insert_key_num: 0,
-            insert_state: Arc::new(InsertState {
+            insert_shared: Arc::new(InsertShared {
                 next_num: AtomicUsize::new(settings.record_count),
-                num_inserted: Mutex::new((settings.record_count, Default::default())),
+                progress: Mutex::new((settings.record_count, Default::default())),
             }),
             field_length: Gen::new(settings.field_length_distr, settings.field_length, false)?,
             key_num: if matches!(settings.request_distr, SettingsDistr::Latest) {
@@ -380,13 +382,13 @@ impl<R: Rng> Workload<R> {
 
     fn key_num(&mut self) -> usize {
         if matches!(self.settings.request_distr, SettingsDistr::Latest) {
-            return self.insert_state.next_inserted_num() - self.key_num.gen(&mut self.rng);
+            return self.insert_shared.first_unacked() - self.key_num.gen(&mut self.rng);
         }
         // probably never reiterate after the simplification i made
         let mut key_num;
         while {
             key_num = self.key_num.gen(&mut self.rng);
-            key_num >= self.insert_state.next_inserted_num()
+            key_num >= self.insert_shared.first_unacked()
         } {}
         key_num
     }
@@ -413,7 +415,7 @@ impl<R: Rng> crate::workload::Workload for Workload<R> {
                 0
             };
             key_num = if matches!(transaction, Transaction::Insert) {
-                self.insert_state.next_num()
+                self.insert_shared.alloc()
             } else {
                 self.key_num()
             };
@@ -450,7 +452,7 @@ impl<R: Rng> crate::workload::Workload for Workload<R> {
     fn on_result(&mut self, result: Self::Result, key_num: Self::Attach) -> anyhow::Result<()> {
         anyhow::ensure!(!matches!(result, Result::NotFound), "unexpected NotFound");
         if let Some(key_num) = key_num {
-            self.insert_state.ack(key_num)
+            self.insert_shared.ack(key_num)
         }
         if self.rmw_update.is_none() {
             let Some(start) = self.start.take() else {

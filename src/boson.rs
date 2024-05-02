@@ -520,6 +520,9 @@ impl DepOrd for NitroEnclavesClock {
     }
 }
 
+// technically `feature = "aws-nitro-enclaves-attestation"` is sufficient for
+// attestation, NSM API is only depended by `NitroSecureModule` that running
+// inside enclaves image
 #[cfg(feature = "nitro-enclaves")]
 impl NitroEnclavesClock {
     pub fn verify(

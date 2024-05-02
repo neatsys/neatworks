@@ -244,6 +244,7 @@ impl<E: SendEvent<DetachSend<A, M>>, A, M> SendMessage<A, M> for Detach<E> {
     }
 }
 
+// probably not useful
 impl<N: SendMessage<A, M>, A, M> OnEvent<DetachSend<A, M>> for N {
     fn on_event(
         &mut self,
