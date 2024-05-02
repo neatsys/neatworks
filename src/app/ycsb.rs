@@ -397,9 +397,9 @@ impl<R: Rng> Workload<R> {
 impl<R: Rng> crate::workload::Workload for Workload<R> {
     type Op = Op;
     type Result = Result;
-    type Attach = Option<usize>;
+    type OpContext = Option<usize>;
 
-    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::Attach)>> {
+    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::OpContext)>> {
         let mut key_num = 0;
         let op = 'op: {
             if let Some(op) = self.rmw_update.take() {
@@ -449,7 +449,7 @@ impl<R: Rng> crate::workload::Workload for Workload<R> {
         })
     }
 
-    fn on_result(&mut self, result: Self::Result, key_num: Self::Attach) -> anyhow::Result<()> {
+    fn on_result(&mut self, result: Self::Result, key_num: Self::OpContext) -> anyhow::Result<()> {
         anyhow::ensure!(!matches!(result, Result::NotFound), "unexpected NotFound");
         if let Some(key_num) = key_num {
             self.insert_shared.ack(key_num)

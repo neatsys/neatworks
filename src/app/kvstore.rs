@@ -1,13 +1,10 @@
-use std::{collections::BTreeMap, hash::Hash, panic::UnwindSafe};
+use std::{collections::BTreeMap, hash::Hash};
 
 use derive_where::derive_where;
 use rand::{distributions::Alphanumeric, rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    net::Payload,
-    workload::{Check, Workload},
-};
+use crate::net::Payload;
 
 use super::App;
 
@@ -59,23 +56,6 @@ impl App for KVStore {
         };
         Ok(serde_json::to_vec(&result)?)
     }
-}
-
-pub fn static_workload(
-    // ask for exact size as a safety manner, we are `collecting` inside
-    rounds: impl ExactSizeIterator<Item = (Op, Result)>,
-) -> anyhow::Result<impl Workload<Attach = ()> + Clone + UnwindSafe> {
-    Ok(Check::new(
-        rounds
-            .map(|(op, result)| {
-                Ok((
-                    Payload(serde_json::to_vec(&op)?),
-                    Payload(serde_json::to_vec(&result)?),
-                ))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?
-            .into_iter(),
-    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

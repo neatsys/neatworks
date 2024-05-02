@@ -26,12 +26,12 @@ use crate::{
 
 pub trait Workload {
     type Op;
+    type OpContext;
     type Result;
-    type Attach;
 
-    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::Attach)>>;
+    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::OpContext)>>;
 
-    fn on_result(&mut self, result: Self::Result, attach: Self::Attach) -> anyhow::Result<()>;
+    fn on_result(&mut self, result: Self::Result, context: Self::OpContext) -> anyhow::Result<()>;
 }
 
 #[derive(Debug, Clone)]
@@ -44,15 +44,15 @@ impl<I, O, R> From<I> for Iter<I, O, R> {
 }
 
 impl<T: Iterator<Item = O>, O, R> Workload for Iter<T, O, R> {
-    type Attach = ();
     type Op = O;
+    type OpContext = ();
     type Result = R;
 
-    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::Attach)>> {
+    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::OpContext)>> {
         Ok(self.0.next().map(|op| (op, ())))
     }
 
-    fn on_result(&mut self, _: Self::Result, (): Self::Attach) -> anyhow::Result<()> {
+    fn on_result(&mut self, _: Self::Result, (): Self::OpContext) -> anyhow::Result<()> {
         Ok(())
     }
 }
@@ -78,18 +78,12 @@ impl<W> OpLatency<W> {
     }
 }
 
-impl<W> From<OpLatency<W>> for Vec<Duration> {
-    fn from(value: OpLatency<W>) -> Self {
-        value.latencies
-    }
-}
-
 impl<W: Workload> Workload for OpLatency<W> {
     type Op = W::Op;
+    type OpContext = (Instant, W::OpContext);
     type Result = W::Result;
-    type Attach = (Instant, W::Attach);
 
-    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::Attach)>> {
+    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::OpContext)>> {
         let Some((op, attach)) = self.inner.next_op()? else {
             return Ok(None);
         };
@@ -99,10 +93,10 @@ impl<W: Workload> Workload for OpLatency<W> {
     fn on_result(
         &mut self,
         result: Self::Result,
-        (start, attach): Self::Attach,
+        (start, context): Self::OpContext,
     ) -> anyhow::Result<()> {
         self.latencies.push(start.elapsed());
-        self.inner.on_result(result, attach)
+        self.inner.on_result(result, context)
     }
 }
 
@@ -128,10 +122,10 @@ where
     W::Result: Clone,
 {
     type Op = W::Op;
+    type OpContext = (W::Op, W::OpContext);
     type Result = W::Result;
-    type Attach = (W::Op, W::Attach);
 
-    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::Attach)>> {
+    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::OpContext)>> {
         Ok(self
             .inner
             .next_op()?
@@ -141,10 +135,10 @@ where
     fn on_result(
         &mut self,
         result: Self::Result,
-        (op, attach): Self::Attach,
+        (op, context): Self::OpContext,
     ) -> anyhow::Result<()> {
         self.invocations.push((op, result.clone()));
-        self.inner.on_result(result, attach)
+        self.inner.on_result(result, context)
     }
 }
 
@@ -165,10 +159,10 @@ impl<W> Total<W> {
 
 impl<W: Workload> Workload for Total<W> {
     type Op = W::Op;
+    type OpContext = W::OpContext;
     type Result = W::Result;
-    type Attach = W::Attach;
 
-    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::Attach)>> {
+    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::OpContext)>> {
         let mut remain_count = self.remain_count.load(SeqCst);
         loop {
             if remain_count == 0 {
@@ -187,23 +181,24 @@ impl<W: Workload> Workload for Total<W> {
         self.inner.next_op()
     }
 
-    fn on_result(&mut self, result: Self::Result, attach: Self::Attach) -> anyhow::Result<()> {
-        self.inner.on_result(result, attach)
+    fn on_result(&mut self, result: Self::Result, context: Self::OpContext) -> anyhow::Result<()> {
+        self.inner.on_result(result, context)
     }
 }
 
+// this one is not fully composable i.e. cannot wrap any other workload
+// i guess that's reasonable since you probably want to control the ops because
+// only so you can assert on the results
 #[derive(Debug, Clone)]
 pub struct Check<I, O, R> {
     inner: I,
-    expected_result: Option<R>,
-    _m: std::marker::PhantomData<O>,
+    _m: std::marker::PhantomData<(O, R)>,
 }
 
 impl<I, O, R> Check<I, O, R> {
     pub fn new(inner: I) -> Self {
         Self {
             inner,
-            expected_result: None,
             _m: Default::default(),
         }
     }
@@ -221,30 +216,29 @@ impl<I: Iterator<Item = (O, R)>, O, R: Debug + Eq + Send + Sync + 'static> Workl
     for Check<I, O, R>
 {
     type Op = O;
+    type OpContext = R;
     type Result = R;
-    type Attach = ();
 
-    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::Attach)>> {
+    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::OpContext)>> {
         let Some((op, expected_result)) = self.inner.next() else {
             return Ok(None);
         };
-        let replaced = self.expected_result.replace(expected_result);
-        anyhow::ensure!(replaced.is_none(), "only support close loop");
-        Ok(Some((op, ())))
+        Ok(Some((op, expected_result)))
     }
 
-    fn on_result(&mut self, result: Self::Result, (): Self::Attach) -> anyhow::Result<()> {
-        let Some(expected_result) = self.expected_result.take() else {
-            anyhow::bail!("missing invocation")
-        };
-        if result == expected_result {
-            Ok(())
-        } else {
-            Err(UnexpectedResult {
+    fn on_result(
+        &mut self,
+        result: Self::Result,
+        expected_result: Self::OpContext,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            result == expected_result,
+            UnexpectedResult {
                 expect: expected_result,
-                actual: result,
-            })?
-        }
+                actual: result
+            }
+        );
+        Ok(())
     }
 }
 
@@ -263,18 +257,18 @@ where
     W::Result: DeserializeOwned,
 {
     type Op = Payload;
+    type OpContext = W::OpContext;
     type Result = Payload;
-    type Attach = W::Attach;
 
-    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::Attach)>> {
+    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::OpContext)>> {
         let Some((op, attach)) = self.0.next_op()? else {
             return Ok(None);
         };
         Ok(Some((Payload(serde_json::to_vec(&op)?), attach)))
     }
 
-    fn on_result(&mut self, result: Self::Result, attach: Self::Attach) -> anyhow::Result<()> {
-        self.0.on_result(serde_json::from_slice(&result)?, attach)
+    fn on_result(&mut self, result: Self::Result, context: Self::OpContext) -> anyhow::Result<()> {
+        self.0.on_result(serde_json::from_slice(&result)?, context)
     }
 }
 
@@ -293,12 +287,12 @@ pub mod events {
     pub struct Stop;
 }
 
-pub trait Upcall: SendEvent<events::InvokeOk> {}
-impl<T: SendEvent<events::InvokeOk>> Upcall for T {}
+pub trait Upcall<R = Payload>: SendEvent<events::InvokeOk<R>> {}
+impl<T: SendEvent<events::InvokeOk<R>>, R> Upcall<R> for T {}
 
 #[derive(Debug, Clone)]
-#[derive_where(PartialEq, Eq, Hash; W::Attach, E, SE)]
-pub struct CloseLoop<W: Workload, E, SE = BlackHole> {
+#[derive_where(PartialEq, Eq, Hash; C, E, SE)]
+pub struct CloseLoop<W, C, E, SE = BlackHole> {
     pub sender: E,
     // don't consider `workload` state for comparing, this is aligned with how DSLabs also ignores
     // workload in its `ClientWorker`
@@ -306,49 +300,51 @@ pub struct CloseLoop<W: Workload, E, SE = BlackHole> {
     // state after consuming one item from workload, but anyway i'm not making it worse
     #[derive_where[skip]]
     pub workload: W,
-    workload_attach: Option<W::Attach>,
+    op_context: Option<C>,
     pub stop_sender: Option<SE>,
     pub done: bool,
 }
 
-impl<W: Workload, E> CloseLoop<W, E> {
+impl<W, C, E> CloseLoop<W, C, E> {
     pub fn new(sender: E, workload: W) -> Self {
         Self {
             sender,
             workload,
-            workload_attach: None,
+            op_context: None,
             stop_sender: Some(BlackHole),
             done: false,
         }
     }
 }
 
-impl<W: Workload, E: SendEvent<events::Invoke<W::Op>>, SE> OnEvent<Init> for CloseLoop<W, E, SE> {
+impl<W: Workload, E: SendEvent<events::Invoke<W::Op>>, SE> OnEvent<Init>
+    for CloseLoop<W, W::OpContext, E, SE>
+{
     fn on_event(&mut self, Init: Init, _: &mut impl Timer) -> anyhow::Result<()> {
         let (op, attach) = self
             .workload
             .next_op()?
             .ok_or(anyhow::format_err!("not enough op"))?;
-        let replaced = self.workload_attach.replace(attach);
+        let replaced = self.op_context.replace(attach);
         anyhow::ensure!(replaced.is_none(), "duplicated launching");
         self.sender.send(events::Invoke(op))
     }
 }
 
 impl<W: Workload, E: SendEvent<events::Invoke<W::Op>>, SE: SendEventOnce<events::Stop>>
-    OnEvent<events::InvokeOk<W::Result>> for CloseLoop<W, E, SE>
+    OnEvent<events::InvokeOk<W::Result>> for CloseLoop<W, W::OpContext, E, SE>
 {
     fn on_event(
         &mut self,
         (_, result): events::InvokeOk<W::Result>,
         _: &mut impl Timer,
     ) -> anyhow::Result<()> {
-        let Some(attach) = self.workload_attach.take() else {
+        let Some(attach) = self.op_context.take() else {
             anyhow::bail!("missing workload attach")
         };
         self.workload.on_result(result, attach)?;
         if let Some((op, attach)) = self.workload.next_op()? {
-            self.workload_attach.replace(attach);
+            self.op_context.replace(attach);
             self.sender.send(events::Invoke(op))
         } else {
             let replaced = replace(&mut self.done, true);
@@ -358,7 +354,7 @@ impl<W: Workload, E: SendEvent<events::Invoke<W::Op>>, SE: SendEventOnce<events:
     }
 }
 
-impl<W: Workload, E, SE> OnTimer for CloseLoop<W, E, SE> {
+impl<W: Workload, C, E, SE> OnTimer for CloseLoop<W, C, E, SE> {
     fn on_timer(&mut self, _: crate::event::TimerId, _: &mut impl Timer) -> anyhow::Result<()> {
         unreachable!()
     }

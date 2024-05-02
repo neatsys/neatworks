@@ -142,10 +142,10 @@ type Replica = super::Replica<
     Addr,
 >;
 
-#[derive_where(PartialEq, Eq, Hash; W::Attach)]
-#[derive_where(Debug, Clone; W, W::Attach, F)]
-struct State<W: Workload, F, const CHECK: bool = false> {
-    pub clients: Vec<ClientState<W>>,
+#[derive(Debug, Clone)]
+#[derive_where(PartialEq, Eq, Hash; C)]
+struct State<W, C, F, const CHECK: bool = false> {
+    pub clients: Vec<ClientState<W, C>>,
     pub replicas: Vec<Replica>,
     message_events: BTreeSet<MessageEvent>,
     timers: BTreeMap<Addr, downcast::Timer<linear::Timer, TimerData>>,
@@ -153,11 +153,11 @@ struct State<W: Workload, F, const CHECK: bool = false> {
     filter: F,
 }
 
-#[derive_where(Debug, Clone; W, W::Attach)]
-#[derive_where(PartialEq, Eq, Hash; W::Attach)]
-struct ClientState<W: Workload> {
+#[derive(Debug, Clone)]
+#[derive_where(PartialEq, Eq, Hash; C)]
+struct ClientState<W, C> {
     pub state: Client,
-    pub close_loop: CloseLoop<W, Transient<Invoke>>,
+    pub close_loop: CloseLoop<W, C, Transient<Invoke>>,
 }
 
 trait Filter {
@@ -206,7 +206,7 @@ impl<F: Filter> Filter for Deadline<F> {
     }
 }
 
-impl<W: Workload, const CHECK: bool> State<W, AllowAll, CHECK> {
+impl<W, C, const CHECK: bool> State<W, C, AllowAll, CHECK> {
     fn new(num_replica: usize, num_faulty: usize) -> Self {
         let addrs = (0..num_replica)
             .map(|i| Addr::Replica(i as _))
@@ -239,7 +239,7 @@ impl<W: Workload, const CHECK: bool> State<W, AllowAll, CHECK> {
     }
 }
 
-impl<W: Workload, F, const CHECK: bool> State<W, F, CHECK> {
+impl<W, C, F, const CHECK: bool> State<W, C, F, CHECK> {
     fn push_client(&mut self, workload: W, num_replica: usize, num_faulty: usize) -> usize {
         let addrs = (0..num_replica)
             .map(|i| Addr::Replica(i as _))
@@ -261,7 +261,7 @@ impl<W: Workload, F, const CHECK: bool> State<W, F, CHECK> {
         index
     }
 
-    fn map_filter<G>(self, f: impl FnOnce(F) -> G) -> State<W, G, CHECK> {
+    fn map_filter<G>(self, f: impl FnOnce(F) -> G) -> State<W, C, G, CHECK> {
         State {
             clients: self.clients,
             replicas: self.replicas,
@@ -278,7 +278,7 @@ enum Event {
     Timer(TimerEvent),
 }
 
-impl<W: Workload, F: Filter, const CHECK: bool> State<W, F, CHECK> {
+impl<W, C, F: Filter, const CHECK: bool> State<W, C, F, CHECK> {
     fn timer_events(&self) -> impl Iterator<Item = TimerEvent> + '_ {
         self.timers.iter().flat_map(|(addr, timer)| {
             timer
@@ -294,7 +294,7 @@ impl<W: Workload, F: Filter, const CHECK: bool> State<W, F, CHECK> {
 }
 
 impl<W: Workload<Op = Payload, Result = Payload>, F: Filter + Clone, const CHECK: bool>
-    crate::search::State for State<W, F, CHECK>
+    crate::search::State for State<W, W::OpContext, F, CHECK>
 {
     type Event = Event;
 
@@ -382,7 +382,9 @@ impl<W: Workload<Op = Payload, Result = Payload>, F: Filter + Clone, const CHECK
     }
 }
 
-impl<W: Workload<Op = Payload, Result = Payload>, F: Filter, const CHECK: bool> State<W, F, CHECK> {
+impl<W: Workload<Op = Payload, Result = Payload>, F: Filter, const CHECK: bool>
+    State<W, W::OpContext, F, CHECK>
+{
     fn launch(&mut self) -> anyhow::Result<()> {
         for client in &mut self.clients {
             client.close_loop.on_event(Init, &mut UnreachableTimer)?
@@ -486,17 +488,19 @@ pub struct ProgressExhausted;
 
 pub trait SimulateState: crate::search::State {
     fn step_simulate(&mut self) -> anyhow::Result<()> {
-        let Some(event) = self.events().pop() else {
+        let mut events = self.events();
+        let Some(event) = events.pop() else {
             anyhow::bail!(ProgressExhausted)
         };
+        anyhow::ensure!(events.is_empty(), "simulate step returns multiple events");
         self.step(event)
     }
 }
 
 impl<W: Workload<Op = Payload, Result = Payload> + Clone, F: Filter + Clone> SimulateState
-    for State<W, F, false>
+    for State<W, W::OpContext, F, false>
 where
-    W::Attach: Clone,
+    W::OpContext: Clone,
 {
 }
 
@@ -504,7 +508,7 @@ where
 fn no_client() -> anyhow::Result<()> {
     let num_replica = 4;
     let num_faulty = 1;
-    let mut state = State::<Iter<Empty<Payload>>, _>::new(num_replica, num_faulty);
+    let mut state = State::<Iter<Empty<Payload>>, _, _>::new(num_replica, num_faulty);
     state.launch()
 }
 
@@ -515,7 +519,7 @@ fn no_client() -> anyhow::Result<()> {
 fn t02_basic() -> anyhow::Result<()> {
     let num_replica = 4;
     let num_faulty = 1;
-    let mut state = State::<_, _>::new(num_replica, num_faulty);
+    let mut state = State::<_, _, _>::new(num_replica, num_faulty);
     let op = Put("hello".into(), "world".into());
     let workload = Json(Check::new([(op.clone(), PutOk)].into_iter()));
     state.push_client(workload, num_replica, num_faulty);
@@ -544,7 +548,7 @@ fn t02_basic() -> anyhow::Result<()> {
 fn t03_no_partition() -> anyhow::Result<()> {
     let num_replica = 7;
     let num_faulty = 2;
-    let mut state = State::<_, _>::new(num_replica, num_faulty);
+    let mut state = State::<_, _, _>::new(num_replica, num_faulty);
 
     for (op, result) in [
         (Put("foo".into(), "bar".into()), PutOk),
@@ -567,7 +571,7 @@ fn t03_no_partition() -> anyhow::Result<()> {
 fn t04_progress_in_majority() -> anyhow::Result<()> {
     let num_replica = 7;
     let num_faulty = 2;
-    let mut state = State::<_, _>::new(num_replica, num_faulty).map_filter(|filter| {
+    let mut state = State::<_, _, _>::new(num_replica, num_faulty).map_filter(|filter| {
         WithPartition(
             filter,
             vec![
@@ -599,7 +603,7 @@ fn t04_progress_in_majority() -> anyhow::Result<()> {
 fn t05_no_progress_in_minority() -> anyhow::Result<()> {
     let num_replica = 7;
     let num_faulty = 2;
-    let mut state = State::<_, _>::new(num_replica, num_faulty)
+    let mut state = State::<_, _, _>::new(num_replica, num_faulty)
         .map_filter(|filter| {
             WithPartition(
                 filter,
@@ -636,7 +640,7 @@ fn t06_progress_after_heal() -> anyhow::Result<()> {
     let num_replica = 7;
     let num_faulty = 2;
 
-    let mut state = State::<_, _>::new(num_replica, num_faulty)
+    let mut state = State::<_, _, _>::new(num_replica, num_faulty)
         .map_filter(|filter| {
             WithPartition(
                 filter,
@@ -687,7 +691,7 @@ fn t06_progress_after_heal() -> anyhow::Result<()> {
 fn t07_server_switches_partitions() -> anyhow::Result<()> {
     let num_replica = 7;
     let num_faulty = 2;
-    let mut state = State::<_, _>::new(num_replica, num_faulty);
+    let mut state = State::<_, _, _>::new(num_replica, num_faulty);
     let workload = Json(Check::new(
         [(Put("hello".into(), "world".into()), PutOk)].into_iter(),
     ));

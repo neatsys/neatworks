@@ -30,11 +30,11 @@ fn main() -> anyhow::Result<()> {
 
     let settings = Settings {
         invariant: |_: &_| Ok(()),
-        goal: |state: &State<_>| state.clients.iter().all(|client| client.close_loop.done),
+        goal: |state: &State<_, _>| state.clients.iter().all(|client| client.close_loop.done),
         prune: |_: &_| false,
         max_depth: None,
     };
-    let result = breadth_first::<_, State<_>, _, _, _>(
+    let result = breadth_first::<_, State<_, _>, _, _, _>(
         state.clone(),
         settings.clone(),
         1.try_into().unwrap(),
@@ -49,7 +49,7 @@ fn main() -> anyhow::Result<()> {
         max_depth: None,
     };
     let result =
-        breadth_first::<_, State<_>, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
+        breadth_first::<_, State<_, _>, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
     println!("{result:?}");
 
     println!("* Multi-client different keys");
@@ -66,11 +66,11 @@ fn main() -> anyhow::Result<()> {
 
     let settings = Settings {
         invariant: |_: &_| Ok(()),
-        goal: |state: &State<_>| state.clients.iter().all(|client| client.close_loop.done),
+        goal: |state: &State<_, _>| state.clients.iter().all(|client| client.close_loop.done),
         prune: |_: &_| false,
         max_depth: None,
     };
-    let result = breadth_first::<_, State<_>, _, _, _>(
+    let result = breadth_first::<_, State<_, _>, _, _, _>(
         state.clone(),
         settings.clone(),
         1.try_into().unwrap(),
@@ -85,7 +85,7 @@ fn main() -> anyhow::Result<()> {
         max_depth: None,
     };
     let result =
-        breadth_first::<_, State<_>, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
+        breadth_first::<_, State<_, _>, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
     println!("{result:?}");
 
     println!("* Multi-client same key");
@@ -98,7 +98,7 @@ fn main() -> anyhow::Result<()> {
     state.launch()?;
 
     fn append_linearizable<W: Workload<Op = kvstore::Op, Result = kvstore::Result>>(
-        state: &State<Json<Recorded<W>>>,
+        state: &State<Json<Recorded<W>>, <Json<Recorded<W>> as Workload>::OpContext>,
     ) -> anyhow::Result<()> {
         let mut all_results = Vec::new();
         for client in &state.clients {
@@ -128,11 +128,11 @@ fn main() -> anyhow::Result<()> {
 
     let settings = Settings {
         invariant: append_linearizable,
-        goal: |state: &State<_>| state.clients.iter().all(|client| client.close_loop.done),
+        goal: |state: &State<_, _>| state.clients.iter().all(|client| client.close_loop.done),
         prune: |_: &_| false,
         max_depth: None,
     };
-    let result = breadth_first::<_, State<_>, _, _, _>(
+    let result = breadth_first::<_, State<_, _>, _, _, _>(
         state.clone(),
         settings.clone(),
         1.try_into().unwrap(),
@@ -147,7 +147,7 @@ fn main() -> anyhow::Result<()> {
         max_depth: None,
     };
     let result =
-        breadth_first::<_, State<_>, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
+        breadth_first::<_, State<_, _>, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
     println!("{result:?}");
 
     println!("* Infinite workload searches (with 2 clients)");
@@ -161,7 +161,7 @@ fn main() -> anyhow::Result<()> {
         prune: |_: &_| false,
         max_depth: None,
     };
-    let result = breadth_first::<_, State<_>, _, _, _>(
+    let result = breadth_first::<_, State<_, _>, _, _, _>(
         state.clone(),
         settings.clone(),
         available_parallelism()?,
@@ -170,7 +170,7 @@ fn main() -> anyhow::Result<()> {
     )?;
     println!("{result:?}");
     settings.max_depth = Some(1000.try_into().unwrap());
-    let result = random_depth_first::<_, State<_>, _, _, _>(
+    let result = random_depth_first::<_, State<_, _>, _, _, _>(
         state,
         settings,
         available_parallelism()?,

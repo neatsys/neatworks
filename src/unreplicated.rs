@@ -276,20 +276,20 @@ pub mod check {
     type Client = super::Client<Transient<MessageEvent>, Transient<InvokeOk>, Addr>;
     type Replica = super::Replica<KVStore, Transient<MessageEvent>, Addr>;
 
-    #[derive_where(PartialEq, Eq, Hash; W::Attach)]
-    #[derive_where(Debug, Clone; W, W::Attach)]
-    pub struct State<W: Workload> {
-        pub clients: Vec<ClientState<W>>,
+    #[derive(Debug, Clone)]
+    #[derive_where(PartialEq, Eq, Hash; C)]
+    pub struct State<W, C> {
+        pub clients: Vec<ClientState<W, C>>,
         pub replica: Replica,
         message_events: BTreeSet<MessageEvent>,
     }
 
-    #[derive_where(PartialEq, Eq, Hash; W::Attach)]
-    #[derive_where(Debug, Clone; W, W::Attach)]
-    pub struct ClientState<W: Workload> {
+    #[derive(Debug, Clone)]
+    #[derive_where(PartialEq, Eq, Hash; C)]
+    pub struct ClientState<W, C> {
         pub state: Client,
         timer: Timer,
-        pub close_loop: CloseLoop<W, Transient<Invoke>>,
+        pub close_loop: CloseLoop<W, C, Transient<Invoke>>,
     }
 
     #[derive(Debug, Clone)]
@@ -337,13 +337,13 @@ pub mod check {
         }
     }
 
-    impl<W: Workload> Default for State<W> {
+    impl<W, C> Default for State<W, C> {
         fn default() -> Self {
             Self::new()
         }
     }
 
-    impl<W: Workload> State<W> {
+    impl<W, C> State<W, C> {
         pub fn new() -> Self {
             Self {
                 clients: Default::default(),
@@ -367,7 +367,7 @@ pub mod check {
         }
     }
 
-    impl<W: Workload<Op = Payload, Result = Payload>> crate::search::State for State<W> {
+    impl<W: Workload<Op = Payload, Result = Payload>> crate::search::State for State<W, W::OpContext> {
         type Event = Event;
 
         fn events(&self) -> Vec<Self::Event> {
@@ -417,7 +417,7 @@ pub mod check {
         }
     }
 
-    impl<W: Workload<Op = Payload, Result = Payload>> State<W> {
+    impl<W: Workload<Op = Payload, Result = Payload>> State<W, W::OpContext> {
         pub fn launch(&mut self) -> anyhow::Result<()> {
             for client in &mut self.clients {
                 client.close_loop.on_event(Init, &mut UnreachableTimer)?
