@@ -56,7 +56,7 @@ use std::{
 };
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::{
     app::ycsb,
@@ -253,6 +253,7 @@ impl<N, U: SendEvent<InvokeOk<ycsb::Result>>, V: Version, A> OnEvent<Recv<PutOk<
                 Some(Ordering::Greater)
             )
         }) {
+            warn!("malformed PutOk");
             return Ok(());
         }
         self.deps = [(key, put_ok.version_deps)].into();
@@ -277,6 +278,7 @@ impl<N, U: SendEvent<InvokeOk<ycsb::Result>>, V: Version, A> OnEvent<Recv<GetOk<
             .values()
             .all(|dep| get_ok.version_deps.dep_cmp(dep, key).is_ge())
         {
+            warn!("malformed GetOk");
             return Ok(());
         }
         self.deps.insert(key, get_ok.version_deps);
@@ -400,6 +402,7 @@ impl<M: ReplicaCommon> OnEvent<Recv<Put<M::V, M::A>>>
                 .dep_cmp(dep, *id)
                 .is_ge()
             {
+                warn!("malformed Put");
                 return Ok(());
             }
         }
@@ -414,6 +417,52 @@ impl<M: ReplicaCommon> OnEvent<Recv<Put<M::V, M::A>>>
                 id: put.key,
                 prev: state.version_deps.clone(),
                 deps: put.deps.into_values().collect(),
+            };
+            self.version_service.send(update)?
+        }
+        Ok(())
+    }
+}
+
+impl<M: ReplicaCommon> OnEvent<events::UpdateOk<M::V>>
+    for Replica<M::N, M::CN, M::VS, M::V, M::A, M>
+{
+    fn on_event(
+        &mut self,
+        update_ok: events::UpdateOk<M::V>,
+        _: &mut impl Timer<Self>,
+    ) -> anyhow::Result<()> {
+        let Some(state) = self.store.get_mut(&update_ok.id) else {
+            anyhow::bail!("missing put key state")
+        };
+        let Some(put) = state.pending_puts.pop_front() else {
+            anyhow::bail!("missing pending puts")
+        };
+        anyhow::ensure!(put.deps.values().all(|dep| matches!(
+            update_ok.version_deps.partial_cmp(dep),
+            Some(Ordering::Greater)
+        )));
+        anyhow::ensure!(matches!(
+            update_ok.version_deps.partial_cmp(&state.version_deps),
+            Some(Ordering::Greater)
+        ));
+        state.value = put.value.clone();
+        state.version_deps = update_ok.version_deps.clone();
+        let put_ok = PutOk {
+            version_deps: update_ok.version_deps.clone(),
+        };
+        self.client_net.send(put.client_addr, put_ok)?;
+        let sync_key = SyncKey {
+            key: put.key,
+            value: put.value,
+            version_deps: update_ok.version_deps.clone(),
+        };
+        self.net.send(All, sync_key)?;
+        if let Some(pending_put) = state.pending_puts.front() {
+            let update = events::Update {
+                id: update_ok.id,
+                prev: update_ok.version_deps,
+                deps: pending_put.deps.values().cloned().collect(),
             };
             self.version_service.send(update)?
         }
@@ -482,59 +531,13 @@ impl<M: ReplicaCommon> OnEvent<Recv<SyncKey<M::V>>> for Replica<M::N, M::CN, M::
             return Ok(());
         }
         self.apply_sync(sync_key)?;
-        for sync_key in take(&mut self.pending_sync_keys) {
-            if !self.can_sync(&sync_key) {
-                self.pending_sync_keys.push(sync_key);
-                continue;
-            }
-            self.apply_sync(sync_key)?
-        }
-        Ok(())
-    }
-}
-
-impl<M: ReplicaCommon> OnEvent<events::UpdateOk<M::V>>
-    for Replica<M::N, M::CN, M::VS, M::V, M::A, M>
-{
-    fn on_event(
-        &mut self,
-        update_ok: events::UpdateOk<M::V>,
-        _: &mut impl Timer<Self>,
-    ) -> anyhow::Result<()> {
-        let Some(state) = self.store.get_mut(&update_ok.id) else {
-            anyhow::bail!("missing put key state")
-        };
-        let Some(put) = state.pending_puts.pop_front() else {
-            anyhow::bail!("missing pending puts")
-        };
-        anyhow::ensure!(put.deps.values().all(|dep| matches!(
-            update_ok.version_deps.partial_cmp(dep),
-            Some(Ordering::Greater)
-        )));
-        anyhow::ensure!(matches!(
-            update_ok.version_deps.partial_cmp(&state.version_deps),
-            Some(Ordering::Greater)
-        ));
-        state.value = put.value.clone();
-        state.version_deps = update_ok.version_deps.clone();
-        let put_ok = PutOk {
-            version_deps: update_ok.version_deps.clone(),
-        };
-        self.client_net.send(put.client_addr, put_ok)?;
-        let sync_key = SyncKey {
-            key: put.key,
-            value: put.value,
-            version_deps: update_ok.version_deps.clone(),
-        };
-        self.net.send(All, sync_key)?;
-        if let Some(pending_put) = state.pending_puts.front() {
-            let update = events::Update {
-                id: update_ok.id,
-                prev: update_ok.version_deps,
-                deps: pending_put.deps.values().cloned().collect(),
-            };
-            self.version_service.send(update)?
-        }
+        // for sync_key in take(&mut self.pending_sync_keys) {
+        //     if !self.can_sync(&sync_key) {
+        //         self.pending_sync_keys.push(sync_key);
+        //         continue;
+        //     }
+        //     self.apply_sync(sync_key)?
+        // }
         Ok(())
     }
 }

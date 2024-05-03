@@ -42,12 +42,12 @@ fn create_workload(
     let mut settings0 = ycsb::WorkloadSettings::new_a(record_count);
     settings0.request_distr = ycsb::SettingsDistr::Uniform;
     settings0.field_count = 1;
-    let workload0 = ycsb::Workload::new(StdRng::from_rng(&mut rng)?, settings0)?;
-    let mut settings1 = ycsb::WorkloadSettings::new_a(record_count);
+    let mut workload0 = ycsb::Workload::new(StdRng::from_rng(&mut rng)?, settings0)?;
+    workload0.key_num = ycsb::Gen::Uniform(Uniform::from(put_range));
+    let mut settings1 = ycsb::WorkloadSettings::new_c(record_count);
     settings1.request_distr = ycsb::SettingsDistr::Uniform;
     settings1.field_count = 1;
-    let mut workload1 = ycsb::Workload::new(StdRng::from_rng(&mut rng)?, settings1)?;
-    workload1.key_num = ycsb::Gen::Uniform(Uniform::from(put_range));
+    let workload1 = ycsb::Workload::new(StdRng::from_rng(&mut rng)?, settings1)?;
     anyhow::ensure!(put_ratio <= 0.5);
     let workload = Weighted2(workload0, workload1, StdRng::from_rng(rng)?, put_ratio * 2.);
     Ok(workload)
@@ -109,7 +109,6 @@ pub async fn pbft_client_session(
         record_count,
         put_range,
         variant: Variant::Replicated(config),
-        ..
     } = config
     else {
         anyhow::bail!("unimplemented")
@@ -280,9 +279,8 @@ pub async fn untrusted_client_session(
     upcall: impl Clone + SendEvent<(f32, Duration)> + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
     let CopsClient {
-        addrs,
+        mut addrs,
         ip,
-        index,
         num_concurrent,
         put_ratio,
         record_count,
@@ -292,7 +290,8 @@ pub async fn untrusted_client_session(
     else {
         anyhow::bail!("unimplemented")
     };
-    let replica_addr = addrs[index];
+    let replica_addr = addrs.remove(0);
+    anyhow::ensure!(addrs.is_empty());
 
     let mut sessions = JoinSet::new();
     for index in 0..num_concurrent {
@@ -431,9 +430,8 @@ pub async fn quorum_client_session(
     // use augustus::crypto::peer::Crypto;
 
     let CopsClient {
-        addrs,
+        mut addrs,
         ip,
-        index,
         num_concurrent,
         put_ratio,
         record_count,
@@ -444,7 +442,8 @@ pub async fn quorum_client_session(
     else {
         anyhow::bail!("unimplemented")
     };
-    let replica_addr = addrs[index];
+    let replica_addr = addrs.remove(0);
+    anyhow::ensure!(addrs.is_empty());
     // let crypto = Crypto::new_random(&mut thread_rng());
 
     let mut sessions = JoinSet::new();

@@ -64,8 +64,8 @@ async fn main() -> anyhow::Result<()> {
                 client_instances.clone(),
                 instances.clone(),
                 clock_instances.clone(),
-                Variant::Replicated,
-                8000,
+                Variant::Untrusted,
+                10,
                 0.1,
             )
             .await?;
@@ -410,10 +410,6 @@ async fn cops_session(
         .iter()
         .map(|instance| format!("http://{}:3000", instance.public_dns))
         .collect::<Vec<_>>();
-    let client_urls = client_instances
-        .iter()
-        .map(|instance| format!("http://{}:3000", instance.public_dns))
-        .collect::<Vec<_>>();
     let clock_urls = clock_instances
         .iter()
         .map(|instance| format!("http://{}:3000", instance.public_dns))
@@ -426,10 +422,7 @@ async fn cops_session(
         .iter()
         .map(|instance| SocketAddr::from((instance.public_ip, 5000)))
         .collect::<Vec<_>>();
-    let client_ips = client_instances
-        .iter()
-        .map(|instance| instance.public_ip)
-        .collect::<Vec<_>>();
+
     let mut watchdog_sessions = JoinSet::new();
     println!("Start clock services");
     let quorum = boson_control_messages::Quorum {
@@ -459,7 +452,7 @@ async fn cops_session(
         Variant::NitroEnclaves => NitroEnclaves,
     };
     println!("Start servers");
-    let record_count = 1000;
+    let record_count = 500;
     for (i, url) in urls.iter().enumerate() {
         println!("{url}");
         let config = boson_control_messages::CopsServer {
@@ -480,12 +473,24 @@ async fn cops_session(
     let mut client_sessions = JoinSet::new();
     let record_count_per_replica = record_count / instances.len();
     let out = Arc::new(Mutex::new(Vec::new()));
-    for (i, url) in client_urls.into_iter().enumerate() {
+    for (i, instance) in client_instances.iter().enumerate() {
+        let addrs = match variant {
+            Variant::Replicated => addrs.clone(),
+            _ => {
+                let server_instance = instances
+                    .iter()
+                    .find(|server_instance| server_instance.region() == instance.region())
+                    .ok_or(anyhow::format_err!(
+                        "no server in region {:?}",
+                        instance.region()
+                    ))?;
+                vec![SocketAddr::from((server_instance.public_ip, 4000))]
+            }
+        };
         let index = i / num_region_client;
         let config = boson_control_messages::CopsClient {
-            addrs: addrs.clone(),
-            ip: client_ips[i],
-            index,
+            addrs,
+            ip: instance.public_ip,
             num_concurrent,
             put_ratio,
             record_count,
@@ -494,7 +499,7 @@ async fn cops_session(
         };
         client_sessions.spawn(cops_client_session(
             client.clone(),
-            url,
+            format!("http://{}:3000", instance.public_dns),
             config,
             out.clone(),
         ));
@@ -511,13 +516,16 @@ async fn cops_session(
     while let Some(result) = watchdog_sessions.join_next().await {
         result??
     }
-    let (throughputs, latencies) = Arc::into_inner(out)
-        .unwrap()
-        .into_inner()?
-        .into_iter()
-        .unzip::<_, _, Vec<_>, Vec<_>>();
-    let throughput = throughputs.into_iter().sum::<f32>();
-    let latency = latencies.iter().sum::<Duration>() / latencies.len() as u32;
+    let results = Arc::into_inner(out).unwrap().into_inner()?;
+    let throughput = results
+        .iter()
+        .map(|(throughput, _)| throughput)
+        .sum::<f32>();
+    let latency = results
+        .iter()
+        .map(|(throughput, latency)| latency.mul_f32(*throughput))
+        .sum::<Duration>()
+        .div_f32(throughput);
     println!("{throughput} {latency:?}");
     let path = Path::new("tools/boson-control/notebooks/cops");
     create_dir_all(path).await?;

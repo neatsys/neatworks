@@ -278,18 +278,23 @@ async fn cops_poll_results(State(state): State<AppState>) -> Response {
             return Ok(None);
         }
         let mut channel = state_channel.take().unwrap();
-        let mut throughputs = Vec::new();
-        let mut latencies = Vec::new();
+        let mut results = Vec::new();
         while let Ok(result) = channel.upcall.try_recv() {
             let Upcall::ThroughputLatency(throughput, latency) = result else {
                 anyhow::bail!("unimplemented")
             };
-            throughputs.push(throughput);
-            latencies.push(latency)
+            results.push((throughput, latency))
         }
         state.session.lock().await.take().unwrap().handle.await??;
-        let throughput = throughputs.into_iter().sum::<f32>();
-        let latency = latencies.iter().sum::<Duration>() / latencies.len() as u32;
+        let throughput = results
+            .iter()
+            .map(|(throughput, _)| throughput)
+            .sum::<f32>();
+        let latency = results
+            .iter()
+            .map(|(throughput, latency)| latency.mul_f32(*throughput))
+            .sum::<Duration>()
+            .div_f32(throughput);
         Ok(Some((throughput, latency)))
     };
     match task.await {

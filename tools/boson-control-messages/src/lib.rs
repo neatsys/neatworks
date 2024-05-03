@@ -25,7 +25,6 @@ pub struct CopsServer {
 pub struct CopsClient {
     pub addrs: Vec<SocketAddr>,
     pub ip: IpAddr,
-    pub index: usize,          // of `addrs` to contact
     pub num_concurrent: usize, // per instance
     pub put_ratio: f64,
     pub record_count: usize,
