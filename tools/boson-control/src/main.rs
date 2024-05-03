@@ -111,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
                 clock_instances.clone(),
                 Variant::Untrusted,
                 1,
-                1,
+                0.1,
             )
             .await?;
             Ok(())
@@ -369,7 +369,7 @@ async fn cops_session(
     clock_instances: Vec<TerraformOutputInstance>,
     variant: Variant,
     num_concurrent: usize,
-    num_concurrent_put: usize,
+    put_ratio: f64,
 ) -> anyhow::Result<()> {
     let mut region_instances = BTreeMap::<_, Vec<_>>::new();
     for instance in instances {
@@ -473,7 +473,7 @@ async fn cops_session(
             ip: client_ips[i],
             index,
             num_concurrent,
-            num_concurrent_put,
+            put_ratio,
             record_count,
             put_range: record_count_per_replica * index..record_count_per_replica * (index + 1),
             variant: variant_config.clone(),
@@ -517,7 +517,7 @@ async fn cops_session(
             SystemTime::UNIX_EPOCH.elapsed()?.as_secs()
         )),
         format!(
-            "{variant:?},{num_concurrent},{num_concurrent_put},{throughput},{}",
+            "{variant:?},{num_concurrent},{put_ratio},{throughput},{}",
             latency.as_secs_f32()
         ),
     )

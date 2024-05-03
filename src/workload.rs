@@ -14,6 +14,7 @@ use std::{
 };
 
 use derive_where::derive_where;
+use rand::Rng;
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{
@@ -269,6 +270,49 @@ where
 
     fn on_result(&mut self, result: Self::Result, context: Self::OpContext) -> anyhow::Result<()> {
         self.0.on_result(serde_json::from_slice(&result)?, context)
+    }
+}
+
+pub struct Weighted2<W0, W1, R>(pub W0, pub W1, pub R, pub f64);
+
+impl<
+        W0: Workload,
+        W1: Workload<Op = W0::Op, OpContext = W0::OpContext, Result = W0::Result>,
+        R: Rng,
+    > Workload for Weighted2<W0, W1, R>
+{
+    type Op = W0::Op;
+    type OpContext = (bool, W0::OpContext);
+    type Result = W0::Result;
+
+    fn next_op(&mut self) -> anyhow::Result<Option<(Self::Op, Self::OpContext)>> {
+        let choose0 = self.2.gen_bool(self.3);
+        let Some((op, context)) = if choose0 {
+            self.0.next_op()
+        } else {
+            self.1.next_op()
+        }?
+        else {
+            // simply returning `Ok(None)` here is not a good manner, as the unselected workload may
+            // still have op yet to produce, which may cause the following `next_op` call to return
+            // `Some` op
+            // certain combinator and close loop relies on the fused property, so we'd better to not
+            // break it (though don't have a good idea on how to design then for now)
+            anyhow::bail!("unimplemented")
+        };
+        Ok(Some((op, (choose0, context))))
+    }
+
+    fn on_result(
+        &mut self,
+        result: Self::Result,
+        (choose0, context): Self::OpContext,
+    ) -> anyhow::Result<()> {
+        if choose0 {
+            self.0.on_result(result, context)
+        } else {
+            self.1.on_result(result, context)
+        }
     }
 }
 

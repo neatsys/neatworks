@@ -17,31 +17,39 @@ use augustus::{
     },
     pbft,
     worker::{spawning_backend, Submit},
-    workload::{CloseLoop, Iter, Json, OpLatency, Upcall, Workload},
+    workload::{CloseLoop, Iter, Json, OpLatency, Upcall, Weighted2, Workload},
 };
 use boson_control_messages::{CopsClient, CopsServer, Variant};
-use rand::{rngs::StdRng, thread_rng, SeedableRng};
+use rand::{rngs::StdRng, thread_rng, Rng, SeedableRng};
 use rand_distr::Uniform;
 use tokio::{net::TcpListener, task::JoinSet, time::sleep};
 use tokio_util::sync::CancellationToken;
 
-fn create_workload<R>(
-    rng: R,
-    do_put: bool,
+fn create_workload(
+    mut rng: &mut impl Rng,
     record_count: usize,
     put_range: Range<usize>,
-) -> anyhow::Result<ycsb::Workload<R>> {
-    let mut settings = if do_put {
-        ycsb::WorkloadSettings::new_a
-    } else {
-        ycsb::WorkloadSettings::new_c
-    }(record_count);
-    settings.request_distr = ycsb::SettingsDistr::Uniform;
-    settings.field_count = 1;
-    let mut workload = ycsb::Workload::new(rng, settings)?;
-    if do_put {
-        workload.key_num = ycsb::Gen::Uniform(Uniform::from(put_range))
-    }
+    put_ratio: f64,
+) -> anyhow::Result<
+    impl augustus::workload::Workload<
+            Op = ycsb::Txn,
+            Result = ycsb::Result,
+            OpContext = impl Send + Sync + 'static,
+        > + Send
+        + Sync
+        + 'static,
+> {
+    let mut settings0 = ycsb::WorkloadSettings::new_a(record_count);
+    settings0.request_distr = ycsb::SettingsDistr::Uniform;
+    settings0.field_count = 1;
+    let workload0 = ycsb::Workload::new(StdRng::from_rng(&mut rng)?, settings0)?;
+    let mut settings1 = ycsb::WorkloadSettings::new_a(record_count);
+    settings1.request_distr = ycsb::SettingsDistr::Uniform;
+    settings1.field_count = 1;
+    let mut workload1 = ycsb::Workload::new(StdRng::from_rng(&mut rng)?, settings1)?;
+    workload1.key_num = ycsb::Gen::Uniform(Uniform::from(put_range));
+    anyhow::ensure!(put_ratio <= 0.5);
+    let workload = Weighted2(workload0, workload1, StdRng::from_rng(rng)?, put_ratio * 2.);
     Ok(workload)
 }
 
@@ -53,7 +61,7 @@ pub async fn pbft_client_session(
         addrs,
         ip,
         num_concurrent,
-        num_concurrent_put,
+        put_ratio,
         record_count,
         put_range,
         variant: Variant::Replicated(config),
@@ -72,10 +80,10 @@ pub async fn pbft_client_session(
         let addr = SocketAddr::from((ip, tcp_listener.local_addr()?.port()));
         // println!("client {addr} listening {:?}", tcp_listener.local_addr());
         let workload = create_workload(
-            StdRng::seed_from_u64(117418 + index as u64),
-            index < num_concurrent_put,
+            &mut StdRng::seed_from_u64(117418 + index as u64),
             record_count,
             put_range.clone(),
+            put_ratio,
         )?;
 
         let mut dispatch_session = event::Session::new();
@@ -104,7 +112,7 @@ pub async fn pbft_client_session(
         )));
         let mut close_loop = Blanket(Unify(CloseLoop::new(
             Sender::from(client_session.sender()),
-            Json(OpLatency::new(ycsb::Destruct::from(workload))),
+            Json(ycsb::Destruct::from(OpLatency::new(workload))),
         )));
 
         let mut upcall = upcall.clone();
@@ -172,13 +180,13 @@ pub async fn pbft_server_session(
     let num_faulty = config.num_faulty;
     let crypto = Crypto::new_hardcoded(num_replica, id, CryptoFlavor::Schnorrkel)?;
     let mut app = app::BTreeMap::new();
-    {
-        let mut workload =
-            create_workload(StdRng::seed_from_u64(117418), false, record_count, 0..1)?;
-        let mut workload = Json(Iter::<_, _, ()>::from(workload.startup_ops()));
-        while let Some((op, ())) = workload.next_op()? {
-            app.execute(&op)?;
-        }
+    let mut workload = ycsb::Workload::new(
+        StdRng::seed_from_u64(117418),
+        ycsb::WorkloadSettings::new(record_count),
+    )?;
+    let mut workload = Json(Iter::<_, _, ()>::from(workload.startup_ops()));
+    while let Some((op, ())) = workload.next_op()? {
+        app.execute(&op)?;
     }
 
     // let tcp_listener = TcpListener::bind(addr).await?;
@@ -237,7 +245,7 @@ pub async fn untrusted_client_session(
         ip,
         index,
         num_concurrent,
-        num_concurrent_put,
+        put_ratio,
         record_count,
         put_range,
         variant: Variant::Untrusted,
@@ -253,10 +261,10 @@ pub async fn untrusted_client_session(
         let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?;
         let addr = SocketAddr::from((ip, tcp_listener.local_addr()?.port()));
         let workload = create_workload(
-            StdRng::seed_from_u64(117418 + index as u64),
-            index < num_concurrent_put,
+            &mut StdRng::seed_from_u64(117418 + index as u64),
             record_count,
             put_range.clone(),
+            put_ratio,
         )?;
 
         let mut dispatch_session = event::Session::new();
@@ -282,7 +290,7 @@ pub async fn untrusted_client_session(
         ));
         let mut close_loop = Blanket(Unify(CloseLoop::new(
             Sender::from(client_session.sender()),
-            OpLatency::new(ycsb::Destruct::from(workload)),
+            ycsb::Destruct::from(OpLatency::new(workload)),
         )));
 
         let mut upcall = upcall.clone();
@@ -367,13 +375,13 @@ pub async fn untrusted_server_session(
                 as Box<dyn SendEvent<cops::events::UpdateOk<OrdinaryVersion>> + Send + Sync>),
         ),
     ));
-    {
-        let mut workload =
-            create_workload(StdRng::seed_from_u64(117418), false, record_count, 0..1)?;
-        let mut workload = Iter::<_, _, ()>::from(workload.startup_ops());
-        while let Some((op, ())) = workload.next_op()? {
-            replica.startup_insert(op)?
-        }
+    let mut workload = ycsb::Workload::new(
+        StdRng::seed_from_u64(117418),
+        ycsb::WorkloadSettings::new(record_count),
+    )?;
+    let mut workload = Iter::<_, _, ()>::from(workload.startup_ops());
+    while let Some((op, ())) = workload.next_op()? {
+        replica.startup_insert(op)?
     }
 
     let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
@@ -399,7 +407,7 @@ pub async fn quorum_client_session(
         ip,
         index,
         num_concurrent,
-        num_concurrent_put,
+        put_ratio,
         record_count,
         put_range,
         // variant: Variant::Quorum(config),
@@ -417,10 +425,10 @@ pub async fn quorum_client_session(
         let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?;
         let addr = SocketAddr::from((ip, tcp_listener.local_addr()?.port()));
         let workload = create_workload(
-            StdRng::seed_from_u64(117418 + index as u64),
-            index < num_concurrent_put,
+            &mut StdRng::seed_from_u64(117418 + index as u64),
             record_count,
             put_range.clone(),
+            put_ratio,
         )?;
 
         let mut dispatch_session = event::Session::new();
@@ -448,7 +456,7 @@ pub async fn quorum_client_session(
         ));
         let mut close_loop = Blanket(Unify(CloseLoop::new(
             Sender::from(client_session.sender()),
-            OpLatency::new(ycsb::Destruct::from(workload)),
+            ycsb::Destruct::from(OpLatency::new(workload)),
         )));
 
         let mut upcall = upcall.clone();
@@ -555,14 +563,15 @@ pub async fn quorum_server_session(
             boson::Cops(Sender::from(clock_session.sender())),
         ),
     ));
-    {
-        let mut workload =
-            create_workload(StdRng::seed_from_u64(117418), false, record_count, 0..1)?;
-        let mut workload = Iter::<_, _, ()>::from(workload.startup_ops());
-        while let Some((op, ())) = workload.next_op()? {
-            replica.startup_insert(op)?
-        }
+    let mut workload = ycsb::Workload::new(
+        StdRng::seed_from_u64(117418),
+        ycsb::WorkloadSettings::new(record_count),
+    )?;
+    let mut workload = Iter::<_, _, ()>::from(workload.startup_ops());
+    while let Some((op, ())) = workload.next_op()? {
+        replica.startup_insert(op)?
     }
+
     let mut clock = Blanket(Unify(QuorumClient::new(
         clock_addr,
         crypto.public_key(),

@@ -415,9 +415,9 @@ impl<N, CN, CW, S, A, M> Replica<N, CN, CW, S, A, M> {
         (self.log.len() as u32).max(1)
     }
 
-    const NUM_CONCURRENT_PRE_PREPARE: u32 = 1;
+    // const NUM_CONCURRENT_PRE_PREPARE: u32 = 1;
     // const NUM_CONCURRENT_PRE_PREPARE: u32 = 8;
-    // const NUM_CONCURRENT_PRE_PREPARE: u32 = 100;
+    const NUM_CONCURRENT_PRE_PREPARE: u32 = 100;
 }
 
 pub trait ReplicaCommon {
