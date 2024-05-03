@@ -144,7 +144,8 @@ impl<N, U, A> Client<N, U, A> {
     }
 }
 
-const CLIENT_RESEND_INTERVAL: Duration = Duration::from_millis(2000);
+// const CLIENT_RESEND_INTERVAL: Duration = Duration::from_millis(800);
+const CLIENT_RESEND_INTERVAL: Duration = Duration::from_millis(800000);
 
 impl<N: ToReplicaNet<A>, U, A: Addr> OnEvent<Invoke> for Client<N, U, A> {
     fn on_event(&mut self, Invoke(op): Invoke, timer: &mut impl Timer<Self>) -> anyhow::Result<()> {
@@ -335,7 +336,7 @@ impl<A> Default for LogEntry<A> {
             prepares: Default::default(),
             commits: Default::default(),
             progress: TimerState::new(CLIENT_RESEND_INTERVAL / 5),
-            state_transfer: TimerState::new(Duration::from_millis(500)),
+            state_transfer: TimerState::new(Duration::from_millis(1500)),
         }
     }
 }
@@ -417,7 +418,7 @@ impl<N, CN, CW, S, A, M> Replica<N, CN, CW, S, A, M> {
 
     // const NUM_CONCURRENT_PRE_PREPARE: u32 = 1;
     // const NUM_CONCURRENT_PRE_PREPARE: u32 = 8;
-    const NUM_CONCURRENT_PRE_PREPARE: u32 = 100;
+    const NUM_CONCURRENT_PRE_PREPARE: u32 = 800;
 }
 
 pub trait ReplicaCommon {

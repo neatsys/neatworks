@@ -119,8 +119,11 @@ pub async fn pbft_client_session(
 
     let mut sessions = JoinSet::new();
     for index in 0..num_concurrent {
-        // let tcp_listener = TcpListener::bind((ip, 0)).await?;
-        let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?;
+        // let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?;
+        let tcp_socket = tokio::net::TcpSocket::new_v4()?;
+        tcp_socket.set_reuseaddr(true)?;
+        tcp_socket.bind(SocketAddr::from(([0; 4], 10000 + index as u16)))?;
+        let tcp_listener = tcp_socket.listen(20_000)?;
         let addr = SocketAddr::from((ip, tcp_listener.local_addr()?.port()));
         // println!("client {addr} listening {:?}", tcp_listener.local_addr());
         let workload = create_workload(
@@ -222,8 +225,11 @@ pub async fn pbft_server_session(
         app.execute(&op)?;
     }
 
-    // let tcp_listener = TcpListener::bind(addr).await?;
-    let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], addr.port()))).await?;
+    // let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], addr.port()))).await?;
+    let tcp_socket = tokio::net::TcpSocket::new_v4()?;
+    tcp_socket.set_reuseaddr(true)?;
+    tcp_socket.bind(SocketAddr::from(([0; 4], addr.port())))?;
+    let tcp_listener = tcp_socket.listen(20_000)?;
     let mut dispatch_session = event::Session::new();
     let mut replica_session = Session::new();
     let (crypto_worker, mut crypto_executor) = spawning_backend();

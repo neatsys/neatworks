@@ -47,9 +47,9 @@ async fn host_session(ssh_host: String, sync: bool) -> anyhow::Result<()> {
     }
     let status = Command::new("ssh")
         .arg(ssh_host)
-        // .arg("pkill -x boson; sleep 1; tmux new -d -s boson \"./boson >boson.log\"")
+        .arg("pkill -x boson; sleep 1; tmux new -d -s boson \"./boson >boson.log\"")
         // .arg("pkill -x boson; sleep 1; tmux new -d -s boson \"RUST_LOG=info,augustus::lamport_mutex::verifiable=debug ./boson >boson.log\"")
-        .arg("pkill -x boson; sleep 1; tmux new -d -s boson \"RUST_BACKTRACE=1 ./boson >boson.log\"")
+        // .arg("pkill -x boson; sleep 1; tmux new -d -s boson \"RUST_BACKTRACE=1 ./boson >boson.log\"")
         .status()
         .await?;
     anyhow::ensure!(status.success(), "Command `boson` exit with {status}");

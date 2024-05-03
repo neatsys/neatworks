@@ -23,8 +23,8 @@ opt-level = 3
 
 [profile.artifact]
 inherits = "release"
-debug = true
-# strip = true
+# debug = true
+strip = true
 # lto = true
 
 # cSpell:disable

@@ -82,8 +82,8 @@ impl Tcp {
     ) {
         loop {
             let buf = match timeout(close_after, receiver.recv()).await {
-                Ok(None) => return,
-                Err(_) => break,
+                Ok(None) => return, // dispatch actively shutdown write task, skip closing on guard
+                Err(_) => break,    // close timeout, break to notify dispatch through close guard
                 Ok(Some(buf)) => buf,
             };
             if let Err(err) = async {
@@ -127,7 +127,10 @@ impl<B: Buf> Protocol<SocketAddr, B> for Tcp {
         let close_after = self.write_timeout;
         tokio::spawn(async move {
             let task = async {
-                let mut stream = TcpStream::connect(remote).await?;
+                // let mut stream = TcpStream::connect(remote).await?;
+                let socket = tokio::net::TcpSocket::new_v4()?;
+                socket.set_reuseaddr(true)?;
+                let mut stream = socket.connect(remote).await?;
                 stream.set_nodelay(true)?;
                 stream.write_all(&preamble).await?;
                 anyhow::Ok(stream)

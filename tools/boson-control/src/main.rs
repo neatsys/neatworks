@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
                 instances.clone(),
                 clock_instances.clone(),
                 Variant::Replicated,
-                1,
+                8000,
                 0.1,
             )
             .await?;
@@ -518,11 +518,7 @@ async fn cops_session(
         .unzip::<_, _, Vec<_>, Vec<_>>();
     let throughput = throughputs.into_iter().sum::<f32>();
     let latency = latencies.iter().sum::<Duration>() / latencies.len() as u32;
-    // println!(
-    //     "{variant:?},{},{num_concurrent},{num_concurrent_put},{throughput},{}",
-    //     num_region_replica,
-    //     lantecy.as_secs_f32()
-    // );
+    println!("{throughput} {latency:?}");
     let path = Path::new("tools/boson-control/notebooks/cops");
     create_dir_all(path).await?;
     write(
@@ -574,18 +570,18 @@ async fn cops_client_session(
         .error_for_status()?;
     loop {
         sleep(Duration::from_millis(1000)).await;
-        let results = client
+        let result = client
             .post(format!("{url}/cops/poll-results"))
             .send()
             .await?
             .error_for_status()?
-            .json::<Option<Vec<(f32, Duration)>>>()
+            .json::<Option<(f32, Duration)>>()
             .await?;
-        if let Some(results) = results {
-            println!("{results:?}");
+        if let Some(result) = result {
+            println!("{result:?}");
             out.lock()
                 .map_err(|err| anyhow::format_err!("{err}"))?
-                .extend(results);
+                .push(result);
             break Ok(());
         }
     }
