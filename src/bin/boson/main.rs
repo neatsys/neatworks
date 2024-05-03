@@ -269,23 +269,24 @@ async fn cops_start_client(
 
 async fn cops_poll_results(State(state): State<AppState>) -> Response {
     let task = async {
-        let mut channel = state.channel.lock().await;
-        let Some(channel) = channel.as_mut() else {
+        let mut state_channel = state.channel.lock().await;
+        let Some(channel) = state_channel.as_mut() else {
             anyhow::bail!("unimplemented")
         };
+        // waiting for `Option::take_if` to stabilize
         if !channel.upcall.is_closed() {
-            Ok(None)
-        } else {
-            let mut results = Vec::new();
-            while let Ok(result) = channel.upcall.try_recv() {
-                let Upcall::ThroughputLatency(throughput, latency) = result else {
-                    anyhow::bail!("unimplemented")
-                };
-                results.push((throughput, latency))
-            }
-            state.session.lock().await.take().unwrap().handle.await??;
-            Ok(Some(results))
+            return Ok(None);
         }
+        let mut channel = state_channel.take().unwrap();
+        let mut results = Vec::new();
+        while let Ok(result) = channel.upcall.try_recv() {
+            let Upcall::ThroughputLatency(throughput, latency) = result else {
+                anyhow::bail!("unimplemented")
+            };
+            results.push((throughput, latency))
+        }
+        state.session.lock().await.take().unwrap().handle.await??;
+        Ok(Some(results))
     };
     match task.await {
         Ok(results) => Json(results).into_response(),

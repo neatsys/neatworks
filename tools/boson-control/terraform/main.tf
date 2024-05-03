@@ -57,7 +57,7 @@ variable "n" {
 
 module "microbench" {
   source = "./group"
-  count  = contains(["microbench", "mutex"], var.mode) ? 1 : 0
+  count  = 1 # has been using to build nitro enclaves image so always enable
   providers = {
     aws = aws.ap-southeast-1
   }
@@ -104,9 +104,24 @@ module "cops" {
   instance_type  = "c5a.2xlarge"
 }
 
+module "cops_client" {
+  source = "./geo_groups"
+  count  = var.mode == "cops" ? 1 : 0
+  providers = {
+    aws.ap-east-1    = aws.ap-east-1
+    aws.us-west-1    = aws.us-west-1
+    aws.eu-central-1 = aws.eu-central-1
+    aws.sa-east-1    = aws.sa-east-1
+    aws.af-south-1   = aws.af-south-1
+  }
+  instance_state = var.state
+  instance_type  = "c5a.2xlarge"
+}
+
 module "quorum" {
   source = "./geo_groups"
-  count  = contains(["cops", "mutex"], var.mode) ? 1 : 0
+  # count  = contains(["cops", "mutex"], var.mode) ? 1 : 0
+  count = 0
   providers = {
     aws.ap-east-1    = aws.ap-east-1
     aws.us-west-1    = aws.us-west-1
@@ -133,6 +148,10 @@ output "mutex_instances" {
 
 output "cops_instances" {
   value = flatten(module.cops[*].instances)
+}
+
+output "cops_client_instances" {
+  value = flatten(module.cops_client[*].instances)
 }
 
 output "quorum_instances" {

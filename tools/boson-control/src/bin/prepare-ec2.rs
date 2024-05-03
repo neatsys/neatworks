@@ -7,6 +7,7 @@ use tokio::process::Command;
 async fn main() -> anyhow::Result<()> {
     let mut instances = terraform_output("microbench_quorum_instances").await?;
     instances.extend(terraform_output("quorum_instances").await?);
+    instances.extend(terraform_output("cops_client_instances").await?);
     instance_sessions(&instances, |host| async move {
         let host = format!("ec2-user@{host}");
         let status = Command::new("ssh")
@@ -22,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut instances = terraform_output("microbench_instances").await?;
     instances.extend(terraform_output("mutex_instances").await?);
-    // TODO extend cops instances
+    instances.extend(terraform_output("cops_instances").await?);
     instance_sessions(&instances, |host| async move {
         let host = format!("ec2-user@{host}");
         let status = Command::new("ssh")

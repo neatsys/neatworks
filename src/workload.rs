@@ -323,9 +323,9 @@ pub mod events {
     pub struct Invoke<O = Payload>(pub O);
 
     // newtype namespace may be desired after the type erasure migration
-    // the `u32` field was for client id, and becomes unused after remove multiple
-    // client support on `CloseLoop`
-    // too lazy to refactor it off
+    // the `u32` field was for client id, and becomes unused after remove multiple client support on
+    // `CloseLoop`
+    // too lazy to refactor it off, and speculating the possibility of using it in an open loop
     pub type InvokeOk<R = Payload> = (u32, R);
 
     pub struct Stop;
@@ -368,7 +368,7 @@ impl<W: Workload, E: SendEvent<events::Invoke<W::Op>>, SE> OnEvent<Init>
         let (op, attach) = self
             .workload
             .next_op()?
-            .ok_or(anyhow::format_err!("not enough op"))?;
+            .ok_or(anyhow::format_err!("not enough op"))?; // or treat it expected and send Stop?
         let replaced = self.op_context.replace(attach);
         anyhow::ensure!(replaced.is_none(), "duplicated launching");
         self.sender.send(events::Invoke(op))

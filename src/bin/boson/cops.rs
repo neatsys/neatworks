@@ -1,4 +1,4 @@
-use std::{mem::take, net::SocketAddr, ops::Range, time::Duration};
+use std::{future::Future, mem::take, net::SocketAddr, ops::Range, pin::Pin, time::Duration};
 
 use augustus::{
     app::{self, ycsb, App},
@@ -51,6 +51,50 @@ fn create_workload(
     anyhow::ensure!(put_ratio <= 0.5);
     let workload = Weighted2(workload0, workload1, StdRng::from_rng(rng)?, put_ratio * 2.);
     Ok(workload)
+}
+
+// this is a humor function :) a typical consequence of "i am willing to pay any
+// cost as long as i can get rid of redundant code"
+// maybe its seemingly ridiculous just comes from the fact that i have to write
+// down all the types, instead of letting compiler to infer them out, as the
+// case of Haskell and OCaml
+// also, a little bit of unnecessary runtime overhead is paid for the inability
+// of expressing rank 2 trait bound i.e.
+//   impl Fn(&mut A, &mut B) -> impl Future<Output = ...> + ...
+// in this language. you may also interpret it as the fact of async functions/
+// closures are not "first-class" supported (yet) (imagine something like `impl
+// AsyncFn(...) -> ...`), if you feel rank 2 is something good to not have
+// OCaml/Haskell probably just pay this runtime overhead everywhere (for some
+// more justified rationale though), and also this function is strictly scoped
+// into this rather marginal part of the whole codebase (and probably will never
+// have more than 4 call sites), so i'm ok with it
+async fn benchmark_session<A, B>(
+    a: &mut A,
+    b: &mut B,
+    run: impl for<'a> Fn(
+        &'a mut A,
+        &'a mut B,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + Sync + 'a>>,
+    as_latencies: impl Fn(&mut B) -> &mut Vec<Duration>,
+) -> anyhow::Result<(f32, Duration)> {
+    tokio::select! {
+        () = sleep(Duration::from_millis(5000)) => {}
+        result = run(a, b) => result?,
+    }
+    as_latencies(b).clear();
+    tokio::select! {
+        () = sleep(Duration::from_millis(10000)) => {}
+        result = run(a, b) => result?,
+    }
+    let latencies = take(as_latencies(b));
+    tokio::select! {
+        () = sleep(Duration::from_millis(5000)) => {}
+        result = run(a, b) => result?,
+    }
+    Ok((
+        latencies.len() as f32 / 10.,
+        latencies.iter().sum::<Duration>() / latencies.len().max(1) as u32,
+    ))
 }
 
 pub async fn pbft_client_session(
@@ -126,24 +170,14 @@ pub async fn pbft_client_session(
             // one is `CloseLoop<impl Workload<Op = ycsb::Op, Result = ycsb::Result, ...>, ...>`
             let close_loop_session = async move {
                 Sender::from(close_loop_session.sender()).send(Init)?;
-                tokio::select! {
-                    () = sleep(Duration::from_millis(5000)) => {}
-                    result = close_loop_session.run(&mut close_loop) => result?,
-                }
-                close_loop.workload.as_mut().clear();
-                tokio::select! {
-                    () = sleep(Duration::from_millis(10000)) => {}
-                    result = close_loop_session.run(&mut close_loop) => result?,
-                }
-                let latencies = take(close_loop.workload.as_mut());
-                tokio::select! {
-                    () = sleep(Duration::from_millis(5000)) => {}
-                    result = close_loop_session.run(&mut close_loop) => result?,
-                }
-                upcall.send((
-                    latencies.len() as f32 / 10.,
-                    latencies.iter().sum::<Duration>() / latencies.len().max(1) as u32,
-                ))
+                let (throughput, latency) = benchmark_session(
+                    &mut close_loop_session,
+                    &mut close_loop,
+                    |session, state| Box::pin(session.run(state)),
+                    |state| state.workload.as_mut(),
+                )
+                .await?;
+                upcall.send((throughput, latency))
             };
             tokio::select! {
                 result = tcp_accept_session => result?,
@@ -180,10 +214,9 @@ pub async fn pbft_server_session(
     let num_faulty = config.num_faulty;
     let crypto = Crypto::new_hardcoded(num_replica, id, CryptoFlavor::Schnorrkel)?;
     let mut app = app::BTreeMap::new();
-    let mut workload = ycsb::Workload::new(
-        StdRng::seed_from_u64(117418),
-        ycsb::WorkloadSettings::new(record_count),
-    )?;
+    let mut settings = ycsb::WorkloadSettings::new(record_count);
+    settings.field_count = 1;
+    let mut workload = ycsb::Workload::new(StdRng::seed_from_u64(117418), settings)?;
     let mut workload = Json(Iter::<_, _, ()>::from(workload.startup_ops()));
     while let Some((op, ())) = workload.next_op()? {
         app.execute(&op)?;
@@ -300,24 +333,14 @@ pub async fn untrusted_client_session(
             let client_session = client_session.run(&mut client);
             let close_loop_session = async move {
                 Sender::from(close_loop_session.sender()).send(Init)?;
-                tokio::select! {
-                    () = sleep(Duration::from_millis(5000)) => {}
-                    result = close_loop_session.run(&mut close_loop) => result?,
-                }
-                close_loop.workload.as_mut().clear();
-                tokio::select! {
-                    () = sleep(Duration::from_millis(10000)) => {}
-                    result = close_loop_session.run(&mut close_loop) => result?,
-                }
-                let latencies = take(close_loop.workload.as_mut());
-                tokio::select! {
-                    () = sleep(Duration::from_millis(5000)) => {}
-                    result = close_loop_session.run(&mut close_loop) => result?,
-                }
-                upcall.send((
-                    latencies.len() as f32 / 10.,
-                    latencies.iter().sum::<Duration>() / latencies.len().max(1) as u32,
-                ))
+                let (throughput, latency) = benchmark_session(
+                    &mut close_loop_session,
+                    &mut close_loop,
+                    |session, state| Box::pin(session.run(state)),
+                    |state| state.workload.as_mut(),
+                )
+                .await?;
+                upcall.send((throughput, latency))
             };
             tokio::select! {
                 result = tcp_accept_session => result?,
@@ -375,10 +398,9 @@ pub async fn untrusted_server_session(
                 as Box<dyn SendEvent<cops::events::UpdateOk<OrdinaryVersion>> + Send + Sync>),
         ),
     ));
-    let mut workload = ycsb::Workload::new(
-        StdRng::seed_from_u64(117418),
-        ycsb::WorkloadSettings::new(record_count),
-    )?;
+    let mut settings = ycsb::WorkloadSettings::new(record_count);
+    settings.field_count = 1;
+    let mut workload = ycsb::Workload::new(StdRng::seed_from_u64(117418), settings)?;
     let mut workload = Iter::<_, _, ()>::from(workload.startup_ops());
     while let Some((op, ())) = workload.next_op()? {
         replica.startup_insert(op)?
@@ -468,24 +490,14 @@ pub async fn quorum_client_session(
             let client_session = client_session.run(&mut client);
             let close_loop_session = async move {
                 Sender::from(close_loop_session.sender()).send(Init)?;
-                tokio::select! {
-                    () = sleep(Duration::from_millis(5000)) => {}
-                    result = close_loop_session.run(&mut close_loop) => result?,
-                }
-                close_loop.workload.as_mut().clear();
-                tokio::select! {
-                    () = sleep(Duration::from_millis(10000)) => {}
-                    result = close_loop_session.run(&mut close_loop) => result?,
-                }
-                let latencies = take(close_loop.workload.as_mut());
-                tokio::select! {
-                    () = sleep(Duration::from_millis(5000)) => {}
-                    result = close_loop_session.run(&mut close_loop) => result?,
-                }
-                upcall.send((
-                    latencies.len() as f32 / 10.,
-                    latencies.iter().sum::<Duration>() / latencies.len().max(1) as u32,
-                ))
+                let (throughput, latency) = benchmark_session(
+                    &mut close_loop_session,
+                    &mut close_loop,
+                    |session, state| Box::pin(session.run(state)),
+                    |state| state.workload.as_mut(),
+                )
+                .await?;
+                upcall.send((throughput, latency))
             };
             tokio::select! {
                 result = tcp_accept_session => result?,
@@ -563,10 +575,9 @@ pub async fn quorum_server_session(
             boson::Cops(Sender::from(clock_session.sender())),
         ),
     ));
-    let mut workload = ycsb::Workload::new(
-        StdRng::seed_from_u64(117418),
-        ycsb::WorkloadSettings::new(record_count),
-    )?;
+    let mut settings = ycsb::WorkloadSettings::new(record_count);
+    settings.field_count = 1;
+    let mut workload = ycsb::Workload::new(StdRng::seed_from_u64(117418), settings)?;
     let mut workload = Iter::<_, _, ()>::from(workload.startup_ops());
     while let Some((op, ())) = workload.next_op()? {
         replica.startup_insert(op)?

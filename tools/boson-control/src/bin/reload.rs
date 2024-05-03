@@ -27,6 +27,8 @@ async fn main() -> anyhow::Result<()> {
     let mut instances = terraform_output("microbench_quorum_instances").await?;
     instances.extend(terraform_output("quorum_instances").await?);
     instances.extend(terraform_output("mutex_instances").await?);
+    instances.extend(terraform_output("cops_instances").await?);
+    instances.extend(terraform_output("cops_client_instances").await?);
     instance_sessions(&instances, |host| host_session(host, sync)).await
 }
 
@@ -45,9 +47,9 @@ async fn host_session(ssh_host: String, sync: bool) -> anyhow::Result<()> {
     }
     let status = Command::new("ssh")
         .arg(ssh_host)
-        .arg("pkill -x boson; sleep 1; tmux new -d -s boson \"./boson >boson.log\"")
+        // .arg("pkill -x boson; sleep 1; tmux new -d -s boson \"./boson >boson.log\"")
         // .arg("pkill -x boson; sleep 1; tmux new -d -s boson \"RUST_LOG=info,augustus::lamport_mutex::verifiable=debug ./boson >boson.log\"")
-        // .arg("pkill -x boson; sleep 1; tmux new -d -s boson \"RUST_BACKTRACE=1 ./boson >boson.log\"")
+        .arg("pkill -x boson; sleep 1; tmux new -d -s boson \"RUST_BACKTRACE=1 ./boson >boson.log\"")
         .status()
         .await?;
     anyhow::ensure!(status.success(), "Command `boson` exit with {status}");

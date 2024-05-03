@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt::Write,
     future::Future,
     net::SocketAddr,
@@ -55,6 +55,22 @@ async fn main() -> anyhow::Result<()> {
             .await?;
             Ok(())
         }
+        Some("test-cops") => {
+            let client_instances = terraform_output("cops_client_instances").await?;
+            let instances = terraform_output("cops_instances").await?;
+            let clock_instances = terraform_output("quorum_instances").await?;
+            cops_session(
+                client.clone(),
+                client_instances.clone(),
+                instances.clone(),
+                clock_instances.clone(),
+                Variant::Replicated,
+                1,
+                0.1,
+            )
+            .await?;
+            Ok(())
+        }
         Some("mutex") => {
             let instances = terraform_output("mutex_instances").await?;
             let clock_instances = terraform_output("quorum_instances").await?;
@@ -103,10 +119,12 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("cops") => {
+            let client_instances = terraform_output("cops_client_instances").await?;
             let instances = terraform_output("cops_instances").await?;
             let clock_instances = terraform_output("quorum_instances").await?;
             cops_session(
                 client.clone(),
+                client_instances.clone(),
                 instances.clone(),
                 clock_instances.clone(),
                 Variant::Untrusted,
@@ -152,12 +170,17 @@ async fn watchdog_session(
         }
         .await
         {
+            if let Some(err_ref) = err.downcast_ref::<reqwest::Error>() {
+                if err_ref.is_status() {
+                    break Err(err);
+                }
+            }
             if num_missing_ok < 3 {
                 num_missing_ok += 1;
-                println!("! missing {num_missing_ok} from {url}");
+                println!("! missing /ok {num_missing_ok}/3 from {url}");
                 continue;
             }
-            Err(err)?
+            break Err(err);
         }
         num_missing_ok = 0
     }
@@ -224,7 +247,7 @@ async fn mutex_session(
             quorum: quorum.clone(),
             index: i,
         };
-        watchdog_sessions.spawn(quorum_start_session(
+        watchdog_sessions.spawn(quorum_watchdog_session(
             client.clone(),
             url.clone(),
             config,
@@ -365,30 +388,21 @@ async fn mutex_request_session(
 
 async fn cops_session(
     client: reqwest::Client,
+    client_instances: Vec<TerraformOutputInstance>,
     instances: Vec<TerraformOutputInstance>,
     clock_instances: Vec<TerraformOutputInstance>,
     variant: Variant,
     num_concurrent: usize,
     put_ratio: f64,
 ) -> anyhow::Result<()> {
-    let mut region_instances = BTreeMap::<_, Vec<_>>::new();
-    for instance in instances {
-        region_instances
-            .entry(instance.region())
-            .or_default()
-            .push(instance.clone())
-    }
-    let num_region = region_instances.len();
+    let num_region = instances
+        .iter()
+        .map(|instance| instance.region())
+        .collect::<BTreeSet<_>>()
+        .len();
     let num_region_client = 1; // TODO
 
-    let mut instances = Vec::new();
-    let mut client_instances = Vec::new();
-    for region_instances in region_instances.into_values() {
-        let mut region_instances = region_instances.into_iter();
-        instances.extend(region_instances.next());
-        client_instances.extend(region_instances.take(num_region_client));
-    }
-    anyhow::ensure!(clock_instances.len() >= num_region * 2);
+    // anyhow::ensure!(clock_instances.len() >= num_region * 2);
     anyhow::ensure!(instances.len() == num_region);
     anyhow::ensure!(client_instances.len() == num_region * num_region_client);
 
@@ -428,7 +442,7 @@ async fn cops_session(
             quorum: quorum.clone(),
             index: i,
         };
-        watchdog_sessions.spawn(quorum_start_session(
+        watchdog_sessions.spawn(quorum_watchdog_session(
             client.clone(),
             url.clone(),
             config,
@@ -454,7 +468,7 @@ async fn cops_session(
             record_count,
             variant: variant_config.clone(),
         };
-        watchdog_sessions.spawn(cops_start_server_session(
+        watchdog_sessions.spawn(cops_server_watchdog_session(
             client.clone(),
             url.clone(),
             config,
@@ -525,7 +539,7 @@ async fn cops_session(
     Ok(())
 }
 
-async fn cops_start_server_session(
+async fn cops_server_watchdog_session(
     client: reqwest::Client,
     url: String,
     config: boson_control_messages::CopsServer,
@@ -603,7 +617,7 @@ async fn bench_quorum_session(client: reqwest::Client) -> anyhow::Result<()> {
                 quorum: quorum.clone(),
                 index: i,
             };
-            watchdog_sessions.spawn(quorum_start_session(
+            watchdog_sessions.spawn(quorum_watchdog_session(
                 client.clone(),
                 url.clone(),
                 config,
@@ -646,7 +660,7 @@ async fn bench_quorum_session(client: reqwest::Client) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn quorum_start_session(
+async fn quorum_watchdog_session(
     client: reqwest::Client,
     url: String,
     config: boson_control_messages::QuorumServer,
