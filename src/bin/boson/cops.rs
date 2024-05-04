@@ -85,7 +85,7 @@ async fn benchmark_session<A, B>(
         &'a mut B,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + Sync + 'a>>,
     as_latencies: impl Fn(&mut B) -> &mut Vec<Duration>,
-) -> anyhow::Result<(f32, Duration)> {
+) -> anyhow::Result<Vec<Duration>> {
     tokio::select! {
         () = sleep(Duration::from_millis(5000)) => {}
         result = run(a, b) => result?,
@@ -100,15 +100,12 @@ async fn benchmark_session<A, B>(
         () = sleep(Duration::from_millis(5000)) => {}
         result = run(a, b) => result?,
     }
-    Ok((
-        latencies.len() as f32 / 10.,
-        latencies.iter().sum::<Duration>() / latencies.len().max(1) as u32,
-    ))
+    Ok(latencies)
 }
 
 pub async fn pbft_client_session(
     config: CopsClient,
-    upcall: impl Clone + SendEvent<(f32, Duration)> + Send + Sync + 'static,
+    upcall: impl Clone + SendEvent<Vec<Duration>> + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
     let CopsClient {
         addrs,
@@ -181,14 +178,14 @@ pub async fn pbft_client_session(
             // one is `CloseLoop<impl Workload<Op = ycsb::Op, Result = ycsb::Result, ...>, ...>`
             let close_loop_session = async move {
                 Sender::from(close_loop_session.sender()).send(Init)?;
-                let (throughput, latency) = benchmark_session(
+                let latencies = benchmark_session(
                     &mut close_loop_session,
                     &mut close_loop,
                     |session, state| Box::pin(session.run(state)),
                     |state| state.workload.as_mut(),
                 )
                 .await?;
-                upcall.send((throughput, latency))
+                upcall.send(latencies)
             };
             tokio::select! {
                 result = tcp_accept_session => result?,
@@ -285,7 +282,7 @@ pub async fn pbft_server_session(
 
 pub async fn untrusted_client_session(
     config: CopsClient,
-    upcall: impl Clone + SendEvent<(f32, Duration)> + Send + Sync + 'static,
+    upcall: impl Clone + SendEvent<Vec<Duration>> + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
     let CopsClient {
         mut addrs,
@@ -347,14 +344,14 @@ pub async fn untrusted_client_session(
             let client_session = client_session.run(&mut client);
             let close_loop_session = async move {
                 Sender::from(close_loop_session.sender()).send(Init)?;
-                let (throughput, latency) = benchmark_session(
+                let latencies = benchmark_session(
                     &mut close_loop_session,
                     &mut close_loop,
                     |session, state| Box::pin(session.run(state)),
                     |state| state.workload.as_mut(),
                 )
                 .await?;
-                upcall.send((throughput, latency))
+                upcall.send(latencies)
             };
             tokio::select! {
                 result = tcp_accept_session => result?,
@@ -421,20 +418,29 @@ pub async fn untrusted_server_session(
     }
 
     let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
-    let dispatch_session = dispatch_session.run(&mut dispatch);
-    let replica_session = replica_session.run(&mut replica);
+    let dispatch_session = async move { dispatch_session.run(&mut dispatch).await };
+    let replica_session = async move { replica_session.run(&mut replica).await };
+
     tokio::select! {
         () = cancel.cancelled() => return Ok(()),
         result = tcp_accept_session => result?,
         result = dispatch_session => result?,
         result = replica_session => result?,
     }
+    // let mut sessions = JoinSet::new();
+    // sessions.spawn(tcp_accept_session);
+    // sessions.spawn(dispatch_session);
+    // sessions.spawn(replica_session);
+    // tokio::select! {
+    //     () = cancel.cancelled() => return Ok(()),
+    //     Some(result) = sessions.join_next() => result??,
+    // }
     anyhow::bail!("unreachable")
 }
 
 pub async fn quorum_client_session(
     config: CopsClient,
-    upcall: impl Clone + SendEvent<(f32, Duration)> + Send + Sync + 'static,
+    upcall: impl Clone + SendEvent<Vec<Duration>> + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
     // use augustus::crypto::peer::Crypto;
 
@@ -504,14 +510,14 @@ pub async fn quorum_client_session(
             let client_session = client_session.run(&mut client);
             let close_loop_session = async move {
                 Sender::from(close_loop_session.sender()).send(Init)?;
-                let (throughput, latency) = benchmark_session(
+                let latencies = benchmark_session(
                     &mut close_loop_session,
                     &mut close_loop,
                     |session, state| Box::pin(session.run(state)),
                     |state| state.workload.as_mut(),
                 )
                 .await?;
-                upcall.send((throughput, latency))
+                upcall.send(latencies)
             };
             tokio::select! {
                 result = tcp_accept_session => result?,
@@ -645,7 +651,7 @@ pub async fn quorum_server_session(
 
 pub async fn nitro_enclaves_client_session(
     config: CopsClient,
-    upcall: impl Clone + SendEvent<(f32, Duration)> + Send + Sync + 'static,
+    upcall: impl Clone + SendEvent<Vec<Duration>> + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
     // use augustus::crypto::peer::Crypto;
 
@@ -717,14 +723,14 @@ pub async fn nitro_enclaves_client_session(
             let client_session = client_session.run(&mut client);
             let close_loop_session = async move {
                 Sender::from(close_loop_session.sender()).send(Init)?;
-                let (throughput, latency) = benchmark_session(
+                let latencies = benchmark_session(
                     &mut close_loop_session,
                     &mut close_loop,
                     |session, state| Box::pin(session.run(state)),
                     |state| state.workload.as_mut(),
                 )
                 .await?;
-                upcall.send((throughput, latency))
+                upcall.send(latencies)
             };
             tokio::select! {
                 result = tcp_accept_session => result?,

@@ -5,6 +5,7 @@ use tokio::process::Command;
 async fn main() -> anyhow::Result<()> {
     let mut instances = terraform_output("microbench_instances").await?;
     instances.extend(terraform_output("mutex_instances").await?);
+    instances.extend(terraform_output("cops_instances").await?);
     instance_sessions(&instances, session).await
 }
 

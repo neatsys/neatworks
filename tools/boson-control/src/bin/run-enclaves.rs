@@ -21,7 +21,7 @@ async fn session(host: String) -> anyhow::Result<()> {
     let status = Command::new("ssh")
         .arg(&host)
         .arg(
-            "nitro-cli run-enclave --cpu-count 2 --memory 2048 --enclave-cid 16 --eif-path app.eif",
+            "nitro-cli run-enclave --cpu-count 4 --memory 2048 --enclave-cid 16 --eif-path app.eif",
         )
         .status()
         .await?;

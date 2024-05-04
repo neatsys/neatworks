@@ -101,7 +101,7 @@ struct AppChannel {
 #[derive(Debug, derive_more::From)]
 enum Upcall {
     RequestOk(augustus::lamport_mutex::events::RequestOk),
-    ThroughputLatency(f32, Duration),
+    Latencies(Vec<Duration>),
 }
 
 fn log_exit(err: anyhow::Error) -> StatusCode {
@@ -280,24 +280,25 @@ async fn cops_poll_results(State(state): State<AppState>) -> Response {
             return Ok(None);
         }
         let mut channel = state_channel.take().unwrap();
-        let mut results = Vec::new();
+        let mut latencies = Vec::new();
         while let Ok(result) = channel.upcall.try_recv() {
-            let Upcall::ThroughputLatency(throughput, latency) = result else {
+            let Upcall::Latencies(some_latencies) = result else {
                 anyhow::bail!("unimplemented")
             };
-            results.push((throughput, latency))
+            latencies.extend(some_latencies)
         }
         state.session.lock().await.take().unwrap().handle.await??;
-        let throughput = results
-            .iter()
-            .map(|(throughput, _)| throughput)
-            .sum::<f32>();
-        let latency = results
-            .iter()
-            .map(|(throughput, latency)| latency.mul_f32(*throughput))
-            .sum::<Duration>()
-            .div_f32(throughput);
-        Ok(Some((throughput, latency)))
+        let throughput = latencies.len() as f32 / 10.;
+        latencies.sort_unstable();
+        let latency = latencies
+            .get(latencies.len() / 2)
+            .copied()
+            .unwrap_or_default();
+        let latency_99 = latencies
+            .get(latencies.len() * 99 / 100)
+            .copied()
+            .unwrap_or_default();
+        Ok(Some((throughput, latency, latency_99)))
     };
     match task.await {
         Ok(result) => Json(result).into_response(),

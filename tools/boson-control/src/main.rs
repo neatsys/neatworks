@@ -64,8 +64,8 @@ async fn main() -> anyhow::Result<()> {
                 client_instances.clone(),
                 instances.clone(),
                 clock_instances.clone(),
-                Variant::NitroEnclaves,
-                4,
+                Variant::Untrusted,
+            500,
                 0.1,
             )
             .await?;
@@ -583,13 +583,13 @@ async fn cops_client_session(
             .send()
             .await?
             .error_for_status()?
-            .json::<Option<(f32, Duration)>>()
+            .json::<Option<(f32, Duration, Duration)>>()
             .await?;
         if let Some(result) = result {
             println!("{result:?} {url}");
             out.lock()
                 .map_err(|err| anyhow::format_err!("{err}"))?
-                .push(result);
+                .push((result.0, result.1));
             break Ok(());
         }
     }

@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
                 ) + " && sudo usermod -aG ne ec2-user"
                     + " && sudo usermod -aG docker ec2-user"
                     // + " && echo -e \"---\nmemory_mib: 2048\\ncpu_count: 4\" | sudo tee /etc/nitro_enclaves/allocator.yaml"
-                    + " && echo -e \"---\nmemory_mib: 2048\\ncpu_count: 2\" | sudo tee /etc/nitro_enclaves/allocator.yaml"
+                    + " && echo -e \"---\nmemory_mib: 2048\\ncpu_count: 4\" | sudo tee /etc/nitro_enclaves/allocator.yaml"
                     + " && sudo systemctl restart nitro-enclaves-allocator.service"
                     + " && sudo systemctl restart docker"
                     + " && sudo sysctl -w net.core.somaxconn=20000" 
