@@ -183,7 +183,7 @@ impl<N, U, V, A> Client<N, U, V, A> {
 pub struct InvokeTimeout;
 
 impl InvokeTimeout {
-    const AFTER: Duration = Duration::from_millis(800);
+    const AFTER: Duration = Duration::from_millis(1200);
 }
 
 impl<N: ClientNet<A, V>, U, V: Version, A: Addr> OnEvent<Invoke<ycsb::Op>> for Client<N, U, V, A> {
@@ -247,15 +247,15 @@ impl<N, U: SendEvent<InvokeOk<ycsb::Result>>, V: Version, A> OnEvent<Recv<PutOk<
         let Some((key, timer_id)) = self.working_key.take() else {
             anyhow::bail!("missing working key")
         };
-        if !self.deps.values().all(|dep| {
-            matches!(
-                put_ok.version_deps.partial_cmp(dep),
-                Some(Ordering::Greater)
-            )
-        }) {
-            warn!("malformed PutOk");
-            return Ok(());
-        }
+        // if !self.deps.values().all(|dep| {
+        //     matches!(
+        //         put_ok.version_deps.partial_cmp(dep),
+        //         Some(Ordering::Greater)
+        //     )
+        // }) {
+        //     warn!("malformed PutOk");
+        //     return Ok(());
+        // }
         self.deps = [(key, put_ok.version_deps)].into();
         timer.unset(timer_id)?;
         self.upcall.send((Default::default(), ycsb::Result::Ok)) // careful
@@ -273,14 +273,14 @@ impl<N, U: SendEvent<InvokeOk<ycsb::Result>>, V: Version, A> OnEvent<Recv<GetOk<
         let Some((key, timer_id)) = self.working_key.take() else {
             anyhow::bail!("missing working key")
         };
-        if !self
-            .deps
-            .values()
-            .all(|dep| get_ok.version_deps.dep_cmp(dep, key).is_ge())
-        {
-            warn!("malformed GetOk");
-            return Ok(());
-        }
+        // if !self
+        //     .deps
+        //     .values()
+        //     .all(|dep| get_ok.version_deps.dep_cmp(dep, key).is_ge())
+        // {
+        //     warn!("malformed GetOk");
+        //     return Ok(());
+        // }
         self.deps.insert(key, get_ok.version_deps);
         timer.unset(timer_id)?;
         self.upcall
@@ -500,7 +500,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::VS, M::V, M::A, M> {
                 sync_key.version_deps.partial_cmp(&state.version_deps),
                 Some(Ordering::Greater)
             ) {
-                //
+                warn!("malformed SyncKey");
                 return Ok(());
             }
             state.value = sync_key.value;
@@ -526,18 +526,18 @@ impl<M: ReplicaCommon> OnEvent<Recv<SyncKey<M::V>>> for Replica<M::N, M::CN, M::
         Recv(sync_key): Recv<SyncKey<M::V>>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        if !self.can_sync(&sync_key) {
-            self.pending_sync_keys.push(sync_key);
-            return Ok(());
-        }
-        self.apply_sync(sync_key)?;
-        // for sync_key in take(&mut self.pending_sync_keys) {
-        //     if !self.can_sync(&sync_key) {
-        //         self.pending_sync_keys.push(sync_key);
-        //         continue;
-        //     }
-        //     self.apply_sync(sync_key)?
+        // if !self.can_sync(&sync_key) {
+        //     self.pending_sync_keys.push(sync_key);
+        //     return Ok(());
         // }
+        self.apply_sync(sync_key)?;
+        for sync_key in take(&mut self.pending_sync_keys) {
+            if !self.can_sync(&sync_key) {
+                self.pending_sync_keys.push(sync_key);
+                continue;
+            }
+            self.apply_sync(sync_key)?
+        }
         Ok(())
     }
 }

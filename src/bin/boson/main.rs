@@ -249,7 +249,9 @@ async fn cops_start_client(
             Quorum(_) => state
                 .handle
                 .spawn(cops::quorum_client_session(config, upcall_sender)),
-            NitroEnclaves => todo!(),
+            NitroEnclaves => state
+                .handle
+                .spawn(cops::nitro_enclaves_client_session(config, upcall_sender)),
         };
         *session = Some(AppSession { handle, cancel });
         let replaced = state.channel.lock().await.replace(AppChannel {
@@ -324,7 +326,9 @@ async fn cops_start_server(
             Quorum(_) => state
                 .handle
                 .spawn(cops::quorum_server_session(config, cancel.clone())),
-            NitroEnclaves => todo!(),
+            NitroEnclaves => state
+                .handle
+                .spawn(cops::nitro_enclaves_server_session(config, cancel.clone())),
         };
         *session = Some(AppSession { handle, cancel });
         let replaced = state.channel.lock().await.replace(AppChannel {

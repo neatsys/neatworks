@@ -329,18 +329,12 @@ pub mod erased {
         }
     }
 
-    #[derive(Debug)]
+    #[derive_where(Debug, Clone; E)]
     pub struct Erasure<E, S, T>(E, std::marker::PhantomData<(S, T)>);
 
     impl<E, S, T> From<E> for Erasure<E, S, T> {
         fn from(value: E) -> Self {
             Self(value, Default::default())
-        }
-    }
-
-    impl<E: Clone, S, T> Clone for Erasure<E, S, T> {
-        fn clone(&self) -> Self {
-            Self::from(self.0.clone())
         }
     }
 

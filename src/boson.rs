@@ -40,6 +40,7 @@ impl<E: SendEvent<lamport_mutex::events::UpdateOk<C>>, C> SendEvent<UpdateOk<C>>
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Cops<E>(pub E);
 
 impl<E: SendEvent<Update<C>>, C> SendEvent<cops::events::Update<C>> for Cops<E> {
