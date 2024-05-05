@@ -183,7 +183,7 @@ impl<N, U, V, A> Client<N, U, V, A> {
 pub struct InvokeTimeout;
 
 impl InvokeTimeout {
-    const AFTER: Duration = Duration::from_millis(1200);
+    const AFTER: Duration = Duration::from_millis(1000);
 }
 
 impl<N: ClientNet<A, V>, U, V: Version, A: Addr> OnEvent<Invoke<ycsb::Op>> for Client<N, U, V, A> {
@@ -294,7 +294,9 @@ impl<N, U, V, A> OnEvent<InvokeTimeout> for Client<N, U, V, A> {
         InvokeTimeout: InvokeTimeout,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        anyhow::bail!("client timeout while working on {:?}", self.working_key)
+        // anyhow::bail!("client timeout while working on {:?}", self.working_key)
+        warn!("client timeout while working on {:?}", self.working_key);
+        Ok(())
     }
 }
 

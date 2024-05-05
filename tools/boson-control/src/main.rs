@@ -64,8 +64,8 @@ async fn main() -> anyhow::Result<()> {
                 client_instances.clone(),
                 instances.clone(),
                 clock_instances.clone(),
-                Variant::Untrusted,
-            500,
+                Variant::NitroEnclaves,
+                1,
                 0.1,
             )
             .await?;

@@ -112,7 +112,10 @@ async fn put_impl_session(
     Ok(chunk)
 }
 
-pub async fn get_session(config: GetConfig, op_client: reqwest::Client) -> anyhow::Result<GetResult> {
+pub async fn get_session(
+    config: GetConfig,
+    op_client: reqwest::Client,
+) -> anyhow::Result<GetResult> {
     let start = Instant::now();
     let mut get_sessions = JoinSet::<anyhow::Result<_>>::new();
     for ((index, chunk), peer_url) in config.chunks.into_iter().zip(config.peer_urls) {

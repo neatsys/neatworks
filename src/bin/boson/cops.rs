@@ -672,7 +672,7 @@ pub async fn nitro_enclaves_client_session(
     // let crypto = Crypto::new_random(&mut thread_rng());
 
     let mut sessions = JoinSet::new();
-    for _ in 0..num_concurrent {
+    for index in 0..num_concurrent {
         // let tcp_listener = TcpListener::bind((ip, 0)).await?;
         let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?;
         let addr = SocketAddr::from((ip, tcp_listener.local_addr()?.port()));
@@ -722,6 +722,9 @@ pub async fn nitro_enclaves_client_session(
             let dispatch_session = dispatch_session.run(&mut dispatch);
             let client_session = client_session.run(&mut client);
             let close_loop_session = async move {
+                if index != 0 {
+                    sleep(Duration::from_millis(200)).await
+                }
                 Sender::from(close_loop_session.sender()).send(Init)?;
                 let latencies = benchmark_session(
                     &mut close_loop_session,
@@ -769,12 +772,13 @@ pub async fn nitro_enclaves_server_session(
     let mut dispatch_session = event::Session::new();
     let mut replica_session = Session::new();
     let (clock_sender, clock_receiver) = unbounded_channel();
-    let (client_crypto_worker, mut client_crypto_executor) = spawning_backend();
+    // let (client_crypto_worker, mut client_crypto_executor) = spawning_backend();
 
     let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
         Tcp::new(addr)?,
         {
-            let mut sender = VerifyClock::new(0, client_crypto_worker);
+            // let mut sender = VerifyClock::new(0, client_crypto_worker);
+            let mut sender = Sender::from(replica_session.sender());
             move |buf: &_| cops::to_replica_on_buf(buf, &mut sender)
         },
         Once(dispatch_session.sender()),
@@ -800,8 +804,8 @@ pub async fn nitro_enclaves_server_session(
     }
 
     let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
-    let client_crypto_session =
-        client_crypto_executor.run((), Sender::from(replica_session.sender()));
+    // let client_crypto_session =
+    //     client_crypto_executor.run((), Sender::from(replica_session.sender()));
     let dispatch_session = dispatch_session.run(&mut dispatch);
     let clock_session = nitro_enclaves_portal_session(
         16,
@@ -812,7 +816,7 @@ pub async fn nitro_enclaves_server_session(
     tokio::select! {
         () = cancel.cancelled() => return Ok(()),
         result = tcp_accept_session => result?,
-        result = client_crypto_session => result?,
+        // result = client_crypto_session => result?,
         result = dispatch_session => result?,
         result = clock_session => result?,
         result = replica_session => result?,

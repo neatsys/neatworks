@@ -722,10 +722,15 @@ pub async fn nitro_enclaves_portal_session(
                             None,
                         )?;
                         // this one is blocking, but should be instant, hopefully
-                        {
-                            let _span = tracing::debug_span!("connect").entered();
-                            connect(fd.as_raw_fd(), &VsockAddr::new(cid, 5005))?
-                        }
+                        // {
+                        //     let _span = tracing::debug_span!("connect").entered();
+                        //     connect(fd.as_raw_fd(), &VsockAddr::new(cid, 5005))?
+                        // }
+                        tokio::task::spawn_blocking({
+                            let fd = fd.as_raw_fd();
+                            move || connect(fd, &VsockAddr::new(cid, 5005))
+                        })
+                        .await??;
                         let stream = std::os::unix::net::UnixStream::from(fd);
                         stream.set_nonblocking(true)?;
                         let mut socket = tokio::net::UnixStream::from_std(stream)?;

@@ -50,11 +50,6 @@ variable "mode" {
   }
 }
 
-variable "n" {
-  type    = number
-  default = 1
-}
-
 module "microbench" {
   source = "./group"
   count  = 1 # has been using to build nitro enclaves image so always enable
@@ -101,7 +96,7 @@ module "cops" {
     aws.af-south-1   = aws.af-south-1
   }
   instance_state = var.state
-  instance_type  = "c5a.2xlarge"
+  instance_type  = "c5a.8xlarge"
 }
 
 module "cops_client" {

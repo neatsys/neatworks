@@ -44,8 +44,7 @@ pub async fn session(
     let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
         Tcp::new(addr)?,
         {
-            let mut sender =
-                boson::VerifyClock::new(config.quorum.num_faulty, recv_crypto_worker);
+            let mut sender = boson::VerifyClock::new(config.quorum.num_faulty, recv_crypto_worker);
             move |buf: &_| {
                 sender.send(Recv(
                     deserialize::<Verifiable<boson::Announce<SocketAddr>>>(buf)?,
