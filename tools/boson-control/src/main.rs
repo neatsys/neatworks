@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
                 instances.clone(),
                 clock_instances.clone(),
                 Variant::NitroEnclaves,
-                1,
+                400,
                 0.1,
             )
             .await?;

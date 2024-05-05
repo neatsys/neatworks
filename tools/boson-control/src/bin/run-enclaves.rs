@@ -29,7 +29,7 @@ async fn session(host: String) -> anyhow::Result<()> {
     let status = Command::new("ssh")
         .arg(&host)
         .arg(if is_cops {
-            "nitro-cli run-enclave --cpu-count 28 --memory 2048 --enclave-cid 16 --eif-path app.eif"
+            "nitro-cli run-enclave --cpu-count 20 --memory 2048 --enclave-cid 16 --eif-path app.eif"
         } else {
             "nitro-cli run-enclave --cpu-count 2 --memory 2048 --enclave-cid 16 --eif-path app.eif"
         })

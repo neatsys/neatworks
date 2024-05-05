@@ -71,28 +71,8 @@ use crate::{
 // "key" under COPS context, "id" under Boson's logical clock context
 pub type KeyId = u64;
 
-// `PartialOrd` for causality check: whether `self` happens after `other` in the
-// sense of causality
-// say Put(k2, _, {}) returns c2: {k2: 2}, then Put(k1, _, {k2: c2}) may return
-// c1: {k1: 1, k2: 2} so that c1.partial_cmp(c2) == Some(Greater), but not just
-// c1': {k1: 1}
-pub trait Version: PartialOrd + DepOrd + Clone + Send + Sync + 'static {}
-impl<T: PartialOrd + DepOrd + Clone + Send + Sync + 'static> Version for T {}
-
-// `DepOrd` for dependency check: `self` may not happen after `other`, but must
-// happen after (not earlier than) something involves `id` that happens before
-// the `other`
-// say Get(k1) returns c1: {k1: 1, k2: 2} from above, then Get(k2) may return
-// c2: {k2: 2} from above, or c2': {k2: 3, k3: 1} that may happen after that c2
-// (e.g. for a Put(k2, _, {k3: 1})), so that c2/c2'.dep_cmp(c1).is_ge() == true,
-// but not c2'': {k2: 1}
-pub trait DepOrd {
-    fn dep_cmp(&self, other: &Self, id: KeyId) -> Ordering;
-
-    // the `id`s that when calling `other.dep_cmp(self, id)`, Less may ever get returned
-    // in another word, all `KeyId`s that `self` may have opinion regarding dependency check
-    fn deps(&self) -> impl Iterator<Item = KeyId> + '_;
-}
+pub trait Version: AsRef<OrdinaryVersion> + Clone {}
+impl<V: AsRef<OrdinaryVersion> + Clone> Version for V {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct Put<V, A> {
@@ -401,7 +381,8 @@ impl<M: ReplicaCommon> OnEvent<Recv<Put<M::V, M::A>>>
                 .get(id)
                 .map(|state| &state.version_deps)
                 .unwrap_or(&self.version_zero)
-                .dep_cmp(dep, *id)
+                .as_ref()
+                .dep_cmp(dep.as_ref(), *id)
                 .is_ge()
             {
                 warn!("malformed Put");
@@ -441,11 +422,14 @@ impl<M: ReplicaCommon> OnEvent<events::UpdateOk<M::V>>
             anyhow::bail!("missing pending puts")
         };
         anyhow::ensure!(put.deps.values().all(|dep| matches!(
-            update_ok.version_deps.partial_cmp(dep),
+            update_ok.version_deps.as_ref().partial_cmp(dep.as_ref()),
             Some(Ordering::Greater)
         )));
         anyhow::ensure!(matches!(
-            update_ok.version_deps.partial_cmp(&state.version_deps),
+            update_ok
+                .version_deps
+                .as_ref()
+                .partial_cmp(state.version_deps.as_ref()),
             Some(Ordering::Greater)
         ));
         state.value = put.value.clone();
@@ -474,35 +458,56 @@ impl<M: ReplicaCommon> OnEvent<events::UpdateOk<M::V>>
 
 impl<M: ReplicaCommon> Replica<M::N, M::CN, M::VS, M::V, M::A, M> {
     fn can_sync(&self, sync_key: &SyncKey<M::V>) -> bool {
-        for id in sync_key.version_deps.deps() {
-            if id == sync_key.key {
-                continue;
+        // for (id, version) in &sync_key.version_deps.as_ref().0 {
+        let id = &sync_key.key;
+        let version = &sync_key.version_deps.as_ref().0[id];
+        let local_version = self
+            .store
+            .get(id)
+            .and_then(|state| {
+                // the startup insertion
+                if state.version_deps.as_ref().is_genesis() {
+                    None
+                } else {
+                    Some(state.version_deps.as_ref().0[id])
+                }
+            })
+            .unwrap_or_default();
+        if *version
+            > if *id == sync_key.key {
+                local_version + 1
+            } else {
+                local_version
             }
-            if !self
-                .store
-                .get(&id)
-                .map(|state| &state.version_deps)
-                .unwrap_or(&self.version_zero)
-                .dep_cmp(&sync_key.version_deps, id)
-                .is_ge()
-            {
-                return false;
-            }
+        {
+            return false;
         }
+        // }
         true
     }
 
-    fn apply_sync(&mut self, sync_key: SyncKey<M::V>) -> anyhow::Result<()> {
+    fn apply_sync(&mut self, sync_key: SyncKey<M::V>) -> anyhow::Result<()>
+    where
+        M::V: std::fmt::Debug,
+    {
         if let Some(state) = self.store.get_mut(&sync_key.key) {
             anyhow::ensure!(
                 state.pending_puts.is_empty(),
                 "conflicting Put across servers"
             );
+            anyhow::ensure!(sync_key.version_deps.as_ref().0.contains_key(&sync_key.key));
             if !matches!(
-                sync_key.version_deps.partial_cmp(&state.version_deps),
+                sync_key
+                    .version_deps
+                    .as_ref()
+                    .partial_cmp(state.version_deps.as_ref()),
                 Some(Ordering::Greater)
             ) {
-                warn!("malformed SyncKey");
+                warn!(
+                    "malformed SyncKey",
+                    // "malformed SyncKey: {:?} -> {:?}",
+                    // state.version_deps, sync_key.version_deps
+                );
                 return Ok(());
             }
             state.value = sync_key.value;
@@ -522,22 +527,27 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::VS, M::V, M::A, M> {
     }
 }
 
-impl<M: ReplicaCommon> OnEvent<Recv<SyncKey<M::V>>> for Replica<M::N, M::CN, M::VS, M::V, M::A, M> {
+impl<M: ReplicaCommon> OnEvent<Recv<SyncKey<M::V>>> for Replica<M::N, M::CN, M::VS, M::V, M::A, M>
+where
+    M::V: std::fmt::Debug,
+{
     fn on_event(
         &mut self,
         Recv(sync_key): Recv<SyncKey<M::V>>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        // if !self.can_sync(&sync_key) {
-        //     self.pending_sync_keys.push(sync_key);
-        //     return Ok(());
-        // }
+        if !self.can_sync(&sync_key) {
+            self.pending_sync_keys.push(sync_key);
+            debug!("pending SyncKey len {}", self.pending_sync_keys.len());
+            return Ok(());
+        }
         self.apply_sync(sync_key)?;
         for sync_key in take(&mut self.pending_sync_keys) {
             if !self.can_sync(&sync_key) {
                 self.pending_sync_keys.push(sync_key);
                 continue;
             }
+            debug!("clear previous SyncKey");
             self.apply_sync(sync_key)?
         }
         Ok(())
@@ -599,6 +609,12 @@ pub fn to_replica_on_buf<V: DeserializeOwned, A: DeserializeOwned>(
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct OrdinaryVersion(pub BTreeMap<KeyId, u32>);
+
+impl AsRef<OrdinaryVersion> for OrdinaryVersion {
+    fn as_ref(&self) -> &OrdinaryVersion {
+        self
+    }
+}
 
 impl OrdinaryVersion {
     pub fn new() -> Self {
@@ -666,8 +682,8 @@ impl PartialOrd for OrdinaryVersion {
     }
 }
 
-impl DepOrd for OrdinaryVersion {
-    fn dep_cmp(&self, other: &Self, id: KeyId) -> Ordering {
+impl OrdinaryVersion {
+    pub fn dep_cmp(&self, other: &Self, id: KeyId) -> Ordering {
         match (self.0.get(&id), other.0.get(&id)) {
             // handy sanity check
             // (Some(0), _) | (_, Some(0)) => {
@@ -682,10 +698,6 @@ impl DepOrd for OrdinaryVersion {
             (None, None) => Ordering::Equal,
             (Some(n), Some(m)) => n.cmp(m),
         }
-    }
-
-    fn deps(&self) -> impl Iterator<Item = KeyId> + '_ {
-        self.0.keys().copied()
     }
 }
 

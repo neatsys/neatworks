@@ -2,11 +2,11 @@ use std::collections::HashMap;
 
 use derive_where::derive_where;
 use serde::{Deserialize, Serialize};
-use tokio::{sync::mpsc::UnboundedReceiver, task::JoinSet};
-use tracing::{debug, warn, Instrument as _};
+use tokio::sync::mpsc::UnboundedReceiver;
+use tracing::{debug, warn};
 
 use crate::{
-    cops::{self, DepOrd, OrdinaryVersion},
+    cops::{self, OrdinaryVersion},
     crypto::peer::{
         events::{Signed, Verified},
         Crypto, PublicKey, Verifiable,
@@ -75,9 +75,10 @@ pub struct AnnounceOk {
     key: PublicKey,
 }
 
-#[derive(Clone, Hash, Default, Serialize, Deserialize)]
+#[derive(Clone, Hash, derive_more::AsRef, Serialize, Deserialize)]
 #[derive_where(Debug, PartialOrd, PartialEq)]
 pub struct QuorumClock {
+    #[as_ref]
     plain: OrdinaryVersion, // redundant, just for easier use
     #[derive_where(skip)]
     cert: Vec<Verifiable<AnnounceOk>>,
@@ -98,16 +99,6 @@ impl TryFrom<OrdinaryVersion> for QuorumClock {
 impl Clock for QuorumClock {
     fn reduce(&self) -> lamport_mutex::LamportClock {
         self.plain.reduce()
-    }
-}
-
-impl DepOrd for QuorumClock {
-    fn dep_cmp(&self, other: &Self, id: crate::cops::KeyId) -> std::cmp::Ordering {
-        self.plain.dep_cmp(&other.plain, id)
-    }
-
-    fn deps(&self) -> impl Iterator<Item = crate::cops::KeyId> + '_ {
-        self.plain.deps()
     }
 }
 
@@ -465,10 +456,14 @@ impl Verify<Crypto> for cops::GetOk<QuorumClock> {
 }
 
 impl<A: Addr> Verify<Crypto> for cops::Put<QuorumClock, A> {
-    fn verify_clock(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()> {
-        for clock in self.deps.values() {
-            clock.verify(num_faulty, crypto)?
-        }
+    // fn verify_clock(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()> {
+    //     for clock in self.deps.values() {
+    //         clock.verify(num_faulty, crypto)?
+    //     }
+    //     Ok(())
+    // }
+
+    fn verify_clock(&self, _: usize, _: &Crypto) -> anyhow::Result<()> {
         Ok(())
     }
 }
@@ -485,9 +480,10 @@ impl Verify<Crypto> for cops::SyncKey<QuorumClock> {
     }
 }
 
-#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, derive_more::AsRef, Serialize, Deserialize)]
 #[derive_where(PartialOrd, PartialEq)]
 pub struct NitroEnclavesClock {
+    #[as_ref]
     pub plain: OrdinaryVersion,
     #[derive_where(skip)]
     pub document: Payload,
@@ -508,16 +504,6 @@ impl TryFrom<OrdinaryVersion> for NitroEnclavesClock {
 impl Clock for NitroEnclavesClock {
     fn reduce(&self) -> lamport_mutex::LamportClock {
         self.plain.reduce()
-    }
-}
-
-impl DepOrd for NitroEnclavesClock {
-    fn dep_cmp(&self, other: &Self, id: crate::cops::KeyId) -> std::cmp::Ordering {
-        self.plain.dep_cmp(&other.plain, id)
-    }
-
-    fn deps(&self) -> impl Iterator<Item = crate::cops::KeyId> + '_ {
-        self.plain.deps()
     }
 }
 
@@ -603,7 +589,10 @@ impl NitroSecureModule {
         use nix::sys::socket::{
             bind, listen, socket, AddressFamily, Backlog, SockFlag, SockType, VsockAddr,
         };
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::{
+            io::{AsyncReadExt as _, AsyncWriteExt as _},
+            sync::mpsc::unbounded_channel,
+        };
 
         let nsm = std::sync::Arc::new(Self::new()?);
         let pcrs = [
@@ -625,59 +614,138 @@ impl NitroSecureModule {
         let socket = std::os::unix::net::UnixListener::from(socket_fd);
         socket.set_nonblocking(true)?;
         let socket = tokio::net::UnixListener::from_std(socket)?;
-        // let mut buf = Vec::new();
-        let mut sessions = JoinSet::new();
+
         loop {
-            enum Select {
-                Accept((tokio::net::UnixStream, tokio::net::unix::SocketAddr)),
-                JoinNext(Result<anyhow::Result<()>, tokio::task::JoinError>),
-            }
-            match tokio::select! {
-                accept = socket.accept() => Select::Accept(accept?),
-                Some(result) = sessions.join_next() => Select::JoinNext(result),
-            } {
-                Select::Accept((mut stream, _)) => {
+            let (stream, _) = socket.accept().await?;
+            let (mut read_half, mut write_half) = stream.into_split();
+            let (write_sender, mut write_receiver) = unbounded_channel::<Vec<_>>();
+
+            let mut write_session = tokio::spawn(async move {
+                while let Some(buf) = write_receiver.recv().await {
+                    write_half.write_u64_le(buf.len() as _).await?;
+                    write_half.write_all(&buf).await?;
+                }
+                anyhow::Ok(())
+            });
+            let nsm = nsm.clone();
+            let pcrs = pcrs.clone();
+            let mut read_session = tokio::spawn(async move {
+                loop {
+                    let task = async {
+                        let len = read_half.read_u64_le().await?;
+                        let mut buf = vec![0; len as _];
+                        read_half.read_exact(&mut buf).await?;
+                        anyhow::Ok(buf)
+                    };
+                    let buf = match task.await {
+                        Ok(buf) => buf,
+                        Err(err) => {
+                            warn!("{err}");
+                            return anyhow::Ok(());
+                        }
+                    };
                     let nsm = nsm.clone();
                     let pcrs = pcrs.clone();
-                    sessions.spawn(async move {
-                        let len = stream.read_u64_le().await?;
-                        let mut buf = vec![0; len as _];
-                        stream.read_exact(&mut buf).await?;
-                        let Update(prev, merged, id) =
-                            bincode::options().deserialize::<Update<NitroEnclavesClock>>(&buf)?;
-                        for clock in [&prev].into_iter().chain(&merged) {
-                            if let Some(document) = clock.verify()? {
-                                for (i, pcr) in pcrs.iter().enumerate() {
-                                    anyhow::ensure!(
-                                        document.pcrs.get(&i).map(|pcr| &**pcr) == Some(pcr)
-                                    )
+                    let write_sender = write_sender.clone();
+                    tokio::spawn(async move {
+                        if let Err(err) = async {
+                            let Update(prev, merged, id) = bincode::options()
+                                .deserialize::<Update<NitroEnclavesClock>>(&buf)?;
+                            for clock in [&prev].into_iter().chain(&merged) {
+                                if let Some(document) = clock.verify()? {
+                                    for (i, pcr) in pcrs.iter().enumerate() {
+                                        anyhow::ensure!(
+                                            document.pcrs.get(&i).map(|pcr| &**pcr) == Some(pcr)
+                                        )
+                                    }
                                 }
                             }
+                            let plain = prev
+                                .plain
+                                .update(merged.iter().map(|clock| &clock.plain), id);
+                            // relies on the fact that different clocks always hash into different
+                            // digests, hopefully true
+                            let user_data = plain.sha256().to_fixed_bytes().to_vec();
+                            let document = nsm.process_attestation(user_data)?;
+                            let updated = NitroEnclavesClock {
+                                plain,
+                                document: Payload(document),
+                            };
+                            let buf = bincode::options().serialize(&(id, updated))?;
+                            write_sender.send(buf)?;
+                            Ok(())
                         }
-                        let plain = prev
-                            .plain
-                            .update(merged.iter().map(|clock| &clock.plain), id);
-                        // relies on the fact that different clocks always hash into different
-                        // digests, hopefully true
-                        let user_data = plain.sha256().to_fixed_bytes().to_vec();
-                        let document = nsm.process_attestation(user_data)?;
-                        let updated = NitroEnclavesClock {
-                            plain,
-                            document: Payload(document),
-                        };
-                        let buf = bincode::options().serialize(&(id, updated))?;
-                        stream.write_u64_le(buf.len() as _).await?;
-                        stream.write_all(&buf).await?;
-                        Ok(())
+                        .await
+                        {
+                            warn!("{err}")
+                        }
                     });
                 }
-                Select::JoinNext(result) => {
-                    if let Err(err) = result.map_err(Into::into).and_then(std::convert::identity) {
-                        warn!("{err}")
-                    }
+            });
+            loop {
+                let result = tokio::select! {
+                    result = &mut read_session, if !read_session.is_finished() => result,
+                    result = &mut write_session, if !write_session.is_finished() => result,
+                    else => break,
+                };
+                if let Err(err) = result.map_err(Into::into).and_then(std::convert::identity) {
+                    warn!("{err}")
                 }
             }
         }
+
+        // let mut sessions = tokio::task::JoinSet::new();
+        // loop {
+        //     enum Select {
+        //         Accept((tokio::net::UnixStream, tokio::net::unix::SocketAddr)),
+        //         JoinNext(Result<anyhow::Result<()>, tokio::task::JoinError>),
+        //     }
+        //     match tokio::select! {
+        //         accept = socket.accept() => Select::Accept(accept?),
+        //         Some(result) = sessions.join_next() => Select::JoinNext(result),
+        //     } {
+        //         Select::Accept((mut stream, _)) => {
+        //             let nsm = nsm.clone();
+        //             let pcrs = pcrs.clone();
+        //             sessions.spawn(async move {
+        //                 let len = stream.read_u64_le().await?;
+        //                 let mut buf = vec![0; len as _];
+        //                 stream.read_exact(&mut buf).await?;
+        //                 let Update(prev, merged, id) =
+        //                     bincode::options().deserialize::<Update<NitroEnclavesClock>>(&buf)?;
+        //                 for clock in [&prev].into_iter().chain(&merged) {
+        //                     if let Some(document) = clock.verify()? {
+        //                         for (i, pcr) in pcrs.iter().enumerate() {
+        //                             anyhow::ensure!(
+        //                                 document.pcrs.get(&i).map(|pcr| &**pcr) == Some(pcr)
+        //                             )
+        //                         }
+        //                     }
+        //                 }
+        //                 let plain = prev
+        //                     .plain
+        //                     .update(merged.iter().map(|clock| &clock.plain), id);
+        //                 // relies on the fact that different clocks always hash into different
+        //                 // digests, hopefully true
+        //                 let user_data = plain.sha256().to_fixed_bytes().to_vec();
+        //                 let document = nsm.process_attestation(user_data)?;
+        //                 let updated = NitroEnclavesClock {
+        //                     plain,
+        //                     document: Payload(document),
+        //                 };
+        //                 let buf = bincode::options().serialize(&(id, updated))?;
+        //                 stream.write_u64_le(buf.len() as _).await?;
+        //                 stream.write_all(&buf).await?;
+        //                 Ok(())
+        //             });
+        //         }
+        //         Select::JoinNext(result) => {
+        //             if let Err(err) = result.map_err(Into::into).and_then(std::convert::identity) {
+        //                 warn!("{err}")
+        //             }
+        //         }
+        //     }
+        // }
     }
 }
 
@@ -691,7 +759,7 @@ impl Drop for NitroSecureModule {
 pub async fn nitro_enclaves_portal_session(
     cid: u32,
     mut events: UnboundedReceiver<Update<NitroEnclavesClock>>,
-    sender: impl SendEvent<UpdateOk<NitroEnclavesClock>> + Clone + Send + 'static,
+    mut sender: impl SendEvent<UpdateOk<NitroEnclavesClock>> + Clone + Send + 'static,
 ) -> anyhow::Result<()> {
     use std::os::fd::AsRawFd;
 
@@ -699,56 +767,94 @@ pub async fn nitro_enclaves_portal_session(
     use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    let mut sessions = JoinSet::new();
-    loop {
-        enum Select {
-            Recv(Option<Update<NitroEnclavesClock>>),
-            JoinNext(anyhow::Result<()>),
-        }
-        match tokio::select! {
-            recv = events.recv() => Select::Recv(recv),
-            Some(result) = sessions.join_next() => Select::JoinNext(result?),
-        } {
-            Select::Recv(update) => {
-                let Some(update) = update else { return Ok(()) };
-                let mut sender = sender.clone();
-                // anyhow::ensure!(sessions.len() <= 1); // for debugging mutex
-                sessions.spawn(
-                    async move {
-                        let fd = socket(
-                            AddressFamily::Vsock,
-                            SockType::Stream,
-                            SockFlag::empty(),
-                            None,
-                        )?;
-                        // this one is blocking, but should be instant, hopefully
-                        // {
-                        //     let _span = tracing::debug_span!("connect").entered();
-                        //     connect(fd.as_raw_fd(), &VsockAddr::new(cid, 5005))?
-                        // }
-                        tokio::task::spawn_blocking({
-                            let fd = fd.as_raw_fd();
-                            move || connect(fd, &VsockAddr::new(cid, 5005))
-                        })
-                        .await??;
-                        let stream = std::os::unix::net::UnixStream::from(fd);
-                        stream.set_nonblocking(true)?;
-                        let mut socket = tokio::net::UnixStream::from_std(stream)?;
-                        let buf = bincode::options().serialize(&update)?;
-                        socket.write_u64_le(buf.len() as _).await?;
-                        socket.write_all(&buf).await?;
-                        let len = socket.read_u64_le().await?;
-                        let mut buf = vec![0; len as _];
-                        socket.read_exact(&mut buf).await?;
-                        drop(socket);
-                        sender.send(bincode::options().deserialize(&buf)?)
-                    }
-                    .instrument(tracing::debug_span!("update")),
-                );
-            }
-            Select::JoinNext(result) => result?,
-        }
+    let fd = socket(
+        AddressFamily::Vsock,
+        SockType::Stream,
+        SockFlag::empty(),
+        None,
+    )?;
+    // this one is blocking, but should be instant, hopefully
+    {
+        let _span = tracing::debug_span!("connect").entered();
+        connect(fd.as_raw_fd(), &VsockAddr::new(cid, 5005))?
     }
+    let stream = std::os::unix::net::UnixStream::from(fd);
+    stream.set_nonblocking(true)?;
+    let stream = tokio::net::UnixStream::from_std(stream)?;
+    let (mut read_half, mut write_half) = stream.into_split();
+    let write_session = tokio::spawn(async move {
+        while let Some(update) = events.recv().await {
+            let buf = bincode::options().serialize(&update)?;
+            write_half.write_u64_le(buf.len() as _).await?;
+            write_half.write_all(&buf).await?
+        }
+        anyhow::Ok(())
+    });
+    let read_session = tokio::spawn(async move {
+        loop {
+            let len = read_half.read_u64_le().await?;
+            let mut buf = vec![0; len as _];
+            read_half.read_exact(&mut buf).await?;
+            sender.send(bincode::options().deserialize(&buf)?)?
+        }
+        #[allow(unreachable_code)] // for type hinting
+        anyhow::Ok(())
+    });
+    tokio::select! {
+        result = write_session => return result?,
+        result = read_session => result??
+    }
+    anyhow::bail!("unreachable")
+
+    // let mut sessions = tokio::task::JoinSet::new();
+    // loop {
+    //     enum Select {
+    //         Recv(Option<Update<NitroEnclavesClock>>),
+    //         JoinNext(anyhow::Result<()>),
+    //     }
+    //     match tokio::select! {
+    //         recv = events.recv() => Select::Recv(recv),
+    //         Some(result) = sessions.join_next() => Select::JoinNext(result?),
+    //     } {
+    //         Select::Recv(update) => {
+    //             let Some(update) = update else { return Ok(()) };
+    //             let mut sender = sender.clone();
+    //             // anyhow::ensure!(sessions.len() <= 1); // for debugging mutex
+    //             sessions.spawn(
+    //                 async move {
+    //                     let fd = socket(
+    //                         AddressFamily::Vsock,
+    //                         SockType::Stream,
+    //                         SockFlag::empty(),
+    //                         None,
+    //                     )?;
+    //                     // this one is blocking, but should be instant, hopefully
+    //                     // {
+    //                     //     let _span = tracing::debug_span!("connect").entered();
+    //                     //     connect(fd.as_raw_fd(), &VsockAddr::new(cid, 5005))?
+    //                     // }
+    //                     tokio::task::spawn_blocking({
+    //                         let fd = fd.as_raw_fd();
+    //                         move || connect(fd, &VsockAddr::new(cid, 5005))
+    //                     })
+    //                     .await??;
+    //                     let stream = std::os::unix::net::UnixStream::from(fd);
+    //                     stream.set_nonblocking(true)?;
+    //                     let mut stream = tokio::net::UnixStream::from_std(stream)?;
+    //                     let buf = bincode::options().serialize(&update)?;
+    //                     stream.write_u64_le(buf.len() as _).await?;
+    //                     stream.write_all(&buf).await?;
+    //                     let len = stream.read_u64_le().await?;
+    //                     let mut buf = vec![0; len as _];
+    //                     stream.read_exact(&mut buf).await?;
+    //                     drop(stream);
+    //                     sender.send(bincode::options().deserialize(&buf)?)
+    //                 }, // .instrument(tracing::debug_span!("update")),
+    //             );
+    //         }
+    //         Select::JoinNext(result) => result?,
+    //     }
+    // }
 }
 
 #[cfg(feature = "nitro-enclaves")]
@@ -780,9 +886,9 @@ pub mod impls {
 
     impl<A: Addr> Verify<()> for cops::Put<NitroEnclavesClock, A> {
         fn verify_clock(&self, _: usize, (): &()) -> anyhow::Result<()> {
-            for clock in self.deps.values() {
-                clock.verify()?;
-            }
+            // for clock in self.deps.values() {
+            //     clock.verify()?;
+            // }
             Ok(())
         }
     }

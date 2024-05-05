@@ -356,13 +356,13 @@ pub async fn quorum_session(
         id,
         addrs.len(),
         num_faulty,
-        QuorumClock::default(),
+        QuorumClock::try_from(OrdinaryVersion::default())?,
         Detach(Sender::from(causal_net_session.sender())),
         lamport_mutex::verifiable::SignOrdered::new(processor_crypto_worker),
         upcall,
     )));
     let mut causal_net = Blanket(Unify(Causal::new(
-        QuorumClock::default(),
+        QuorumClock::try_from(OrdinaryVersion::default())?,
         Box::new(Sender::from(processor_session.sender()))
             as Box<dyn lamport_mutex::SendRecvEvent<QuorumClock> + Send + Sync>,
         boson::Lamport(Sender::from(clock_session.sender()), id),

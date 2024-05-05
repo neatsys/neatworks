@@ -290,15 +290,16 @@ async fn cops_poll_results(State(state): State<AppState>) -> Response {
         state.session.lock().await.take().unwrap().handle.await??;
         let throughput = latencies.len() as f32 / 10.;
         latencies.sort_unstable();
-        let latency = latencies
-            .get(latencies.len() / 2)
+        // let latency = latencies
+        //     .get(latencies.len() / 2)
+        //     .copied()
+        //     .unwrap_or_default();
+        let latency = latencies.iter().sum::<Duration>() / latencies.len() as u32;
+        let latency_999 = latencies
+            .get(latencies.len() * 999 / 1000)
             .copied()
             .unwrap_or_default();
-        let latency_99 = latencies
-            .get(latencies.len() * 99 / 100)
-            .copied()
-            .unwrap_or_default();
-        Ok(Some((throughput, latency, latency_99)))
+        Ok(Some((throughput, latency, latency_999)))
     };
     match task.await {
         Ok(result) => Json(result).into_response(),
