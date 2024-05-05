@@ -694,6 +694,11 @@ impl NitroSecureModule {
             }
         }
 
+        // the following alternative implementation takes one connection per Update approach,
+        // instead of keep reusing the same connection as above
+        // no significant performance difference. the taken approach is slightly more stable because
+        // of the lack of connection timeout failure on `connect` in portal session
+
         // let mut sessions = tokio::task::JoinSet::new();
         // loop {
         //     enum Select {

@@ -185,6 +185,12 @@ impl<N: ClientNet<A, V>, U, V: Version, A: Addr> OnEvent<Invoke<ycsb::Op>> for C
         // Get/Get concurrent could be supported, maybe in future
         // the client will be driven by a close loop without concurrent invocation after all
         anyhow::ensure!(replaced.is_none(), "concurrent op");
+
+        use rand::Rng as _;
+        if rand::thread_rng().gen_bool(0.2) {
+            self.deps.clear()
+        }
+
         match op {
             ycsb::Op::Update(_, index, value) => {
                 anyhow::ensure!(index == 0, "unimplemented");
@@ -599,11 +605,12 @@ impl<
 pub fn to_replica_on_buf<V: DeserializeOwned, A: DeserializeOwned>(
     buf: &[u8],
     sender: &mut impl SendReplicaRecvEvent<V, A>,
+    sync_sender: &mut impl SendReplicaRecvEvent<V, A>,
 ) -> anyhow::Result<()> {
     match deserialize(buf)? {
         ToReplicaMessage::Put(message) => sender.send(Recv(message)),
         ToReplicaMessage::Get(message) => sender.send(Recv(message)),
-        ToReplicaMessage::SyncKey(message) => sender.send(Recv(message)),
+        ToReplicaMessage::SyncKey(message) => sync_sender.send(Recv(message)),
     }
 }
 
@@ -733,4 +740,4 @@ mod tests {
     }
 }
 
-// cSpell:words deque upcall ycsb sosp
+// cSpell:words deque upcall ycsb sosp lamport

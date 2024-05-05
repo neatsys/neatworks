@@ -392,7 +392,8 @@ pub async fn untrusted_server_session(
         Tcp::new(addr)?,
         {
             let mut sender = Sender::from(replica_session.sender());
-            move |buf: &_| cops::to_replica_on_buf(buf, &mut sender)
+            let mut sync_sender = sender.clone();
+            move |buf: &_| cops::to_replica_on_buf(buf, &mut sender, &mut sync_sender)
         },
         Once(dispatch_session.sender()),
     )?));
@@ -563,14 +564,15 @@ pub async fn quorum_server_session(
     let mut clock_dispatch_session = event::Session::new();
     let mut replica_session = Session::new();
     let mut clock_session = Session::new();
-    let (client_crypto_worker, mut client_crypto_executor) = spawning_backend();
     let (crypto_worker, mut crypto_executor) = spawning_backend();
+    let (clock_crypto_worker, mut clock_crypto_executor) = spawning_backend();
 
     let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
         Tcp::new(addr)?,
         {
-            let mut sender = VerifyClock::new(config.num_faulty, client_crypto_worker);
-            move |buf: &_| cops::to_replica_on_buf(buf, &mut sender)
+            let mut sender = Sender::from(replica_session.sender());
+            let mut sync_sender = VerifyClock::new(config.num_faulty, crypto_worker);
+            move |buf: &_| cops::to_replica_on_buf(buf, &mut sender, &mut sync_sender)
         },
         Once(dispatch_session.sender()),
     )?));
@@ -606,7 +608,9 @@ pub async fn quorum_server_session(
         clock_addr,
         crypto.public_key(),
         config.num_faulty,
-        Box::new(boson::quorum_client::CryptoWorker::from(crypto_worker))
+        Box::new(boson::quorum_client::CryptoWorker::from(
+            clock_crypto_worker,
+        ))
             as Box<
                 dyn Submit<Crypto, dyn boson::quorum_client::SendCryptoEvent<SocketAddr>>
                     + Send
@@ -629,8 +633,8 @@ pub async fn quorum_server_session(
     let clock_tcp_accept_session =
         tcp::accept_session(clock_tcp_listener, clock_dispatch_session.sender());
     let client_crypto_session =
-        client_crypto_executor.run(crypto.clone(), Sender::from(replica_session.sender()));
-    let crypto_session = crypto_executor.run(crypto, Sender::from(clock_session.sender()));
+        crypto_executor.run(crypto.clone(), Sender::from(replica_session.sender()));
+    let crypto_session = clock_crypto_executor.run(crypto, Sender::from(clock_session.sender()));
     let dispatch_session = dispatch_session.run(&mut dispatch);
     let clock_dispatch_session = clock_dispatch_session.run(&mut clock_dispatch);
     let replica_session = replica_session.run(&mut replica);
@@ -772,14 +776,14 @@ pub async fn nitro_enclaves_server_session(
     let mut dispatch_session = event::Session::new();
     let mut replica_session = Session::new();
     let (clock_sender, clock_receiver) = unbounded_channel();
-    let (client_crypto_worker, mut client_crypto_executor) = spawning_backend();
+    let (crypto_worker, mut crypto_executor) = spawning_backend();
 
     let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
         Tcp::new(addr)?,
         {
-            let mut sender = VerifyClock::new(0, client_crypto_worker);
-            // let mut sender = Sender::from(replica_session.sender());
-            move |buf: &_| cops::to_replica_on_buf(buf, &mut sender)
+            let mut sync_sender = VerifyClock::new(0, crypto_worker);
+            let mut sender = Sender::from(replica_session.sender());
+            move |buf: &_| cops::to_replica_on_buf(buf, &mut sender, &mut sync_sender)
         },
         Once(dispatch_session.sender()),
     )?));
@@ -804,8 +808,16 @@ pub async fn nitro_enclaves_server_session(
     }
 
     let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
-    let client_crypto_session =
-        client_crypto_executor.run((), Sender::from(replica_session.sender()));
+    // let client_crypto_session = crypto_executor.run((), Sender::from(replica_session.sender()));
+    let mut client_crypto_session = tokio::task::spawn_blocking({
+        let replica_session_sender = Sender::from(replica_session.sender());
+        move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(crypto_executor.run((), replica_session_sender))
+        }
+    });
     let dispatch_session = dispatch_session.run(&mut dispatch);
     let clock_session = nitro_enclaves_portal_session(
         16,
@@ -813,15 +825,20 @@ pub async fn nitro_enclaves_server_session(
         boson::Cops(Sender::from(replica_session.sender())),
     );
     let replica_session = replica_session.run(&mut replica);
-    tokio::select! {
-        () = cancel.cancelled() => return Ok(()),
-        result = tcp_accept_session => result?,
-        result = client_crypto_session => result?,
-        result = dispatch_session => result?,
-        result = clock_session => result?,
-        result = replica_session => result?,
+    async {
+        tokio::select! {
+            () = cancel.cancelled() => return Ok(()),
+            result = tcp_accept_session => result?,
+            result = &mut client_crypto_session => result??,
+            result = dispatch_session => result?,
+            result = clock_session => result?,
+            result = replica_session => result?,
+        }
+        anyhow::bail!("unreachable")
     }
-    anyhow::bail!("unreachable")
+    .await?;
+    client_crypto_session.abort();
+    Ok(())
 }
 
 // cSpell:words pbft upcall
