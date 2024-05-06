@@ -26,9 +26,7 @@ variable "state" {
 }
 
 variable "ami" {
-  type = object({
-    id = string
-  })
+  type    = string
   default = null
 }
 
@@ -61,13 +59,13 @@ data "aws_ami" "ubuntu" {
 }
 
 locals {
-  ami = coalesce(var.ami, data.aws_ami.ubuntu)
+  ami = coalesce(var.ami, data.aws_ami.ubuntu.id)
 }
 
 resource "aws_instance" "main" {
   count = var.n
 
-  ami                    = local.ami.id
+  ami                    = local.ami
   instance_type          = var.type
   subnet_id              = var.network.subnet_id
   vpc_security_group_ids = var.network.vpc_security_group_ids

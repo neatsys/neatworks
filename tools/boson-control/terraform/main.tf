@@ -52,18 +52,17 @@ variable "mode" {
 }
 
 data "aws_ami" "al2023" {
-  most_recent = true
+  provider = aws.control
 
+  most_recent = true
   filter {
     name   = "name"
     values = ["al2023-ami-2023.4.20240416.0-kernel-6.1-x86_64"]
   }
-
   filter {
     name   = "virtualization-type"
     values = ["hvm"]
   }
-
   owners = ["137112412989", "910595266909", "210953353124"] # amazon
 }
 
@@ -82,8 +81,8 @@ module "microbench" {
 
   network = module.microbench_network
   state   = var.state
-  type    = mode == "microbench" ? "c5a.16xlarge" : "t3.micro"
-  ami     = data.aws_ami.al2023
+  type    = var.mode == "microbench" ? "c5a.16xlarge" : "c5a.xlarge"
+  ami     = data.aws_ami.al2023.id
 }
 
 module "microbench_quorum" {
@@ -94,7 +93,7 @@ module "microbench_quorum" {
   }
 
   network = module.microbench_network
-  ami     = data.aws_ami.al2023
+  ami     = data.aws_ami.al2023.id
   state   = var.state
   n       = 10
 }
@@ -152,7 +151,7 @@ module "af" {
 output "instances" {
   value = {
     microbench        = module.microbench.instances
-    microbench_quorum = module.microbench_quorum.instances
+    microbench_quorum = flatten(module.microbench_quorum[*].instances)
     ap                = module.ap.instances
     us                = module.us.instances
     eu                = module.eu.instances

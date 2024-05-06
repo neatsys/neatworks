@@ -40,10 +40,9 @@ async fn main() -> anyhow::Result<()> {
         .timeout(Duration::from_millis(1500))
         .build()?;
     let item = std::env::args().nth(1);
+    let output = terraform_output().await?;
     match item.as_deref() {
         Some("test-mutex") => {
-            let instances = terraform_output("mutex_instances").await?;
-            let clock_instances = terraform_output("quorum_instances").await?;
             mutex_session(
                 client.clone(),
                 instances,
@@ -56,9 +55,6 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("test-cops") => {
-            let client_instances = terraform_output("cops_client_instances").await?;
-            let instances = terraform_output("cops_instances").await?;
-            let clock_instances = terraform_output("quorum_instances").await?;
             cops_session(
                 client.clone(),
                 client_instances.clone(),
@@ -72,8 +68,6 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("mutex") => {
-            let instances = terraform_output("mutex_instances").await?;
-            let clock_instances = terraform_output("quorum_instances").await?;
             for variant in [
                 Variant::Untrusted,
                 Variant::Replicated,
@@ -119,9 +113,6 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("cops") => {
-            let client_instances = terraform_output("cops_client_instances").await?;
-            let instances = terraform_output("cops_instances").await?;
-            let clock_instances = terraform_output("quorum_instances").await?;
             cops_session(
                 client.clone(),
                 client_instances.clone(),

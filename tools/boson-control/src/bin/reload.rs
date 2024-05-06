@@ -1,12 +1,11 @@
 use std::env::args;
 
-use boson_control::{instance_sessions, terraform_output};
-use tokio::process::Command;
+use tokio::{process::Command, task::JoinSet};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let arg = args().nth(1);
-    let sync = arg.as_deref() == Some("sync");
+    let args1 = args().nth(1);
+    let sync = args1.as_deref() == Some("sync");
     if sync {
         println!("Building boson artifact");
         let status = Command::new("cargo")
@@ -24,16 +23,33 @@ async fn main() -> anyhow::Result<()> {
         anyhow::ensure!(status.success(), "Command `cargo build` exit with {status}");
     }
 
-    let mut instances = terraform_output("microbench_quorum_instances").await?;
-    instances.extend(terraform_output("quorum_instances").await?);
-    instances.extend(terraform_output("mutex_instances").await?);
-    instances.extend(terraform_output("cops_instances").await?);
-    instances.extend(terraform_output("cops_client_instances").await?);
-    instance_sessions(&instances, |host| host_session(host, sync)).await
+    let output = boson_control::terraform_output().await?;
+    let mut sessions = JoinSet::new();
+    for instance in [&output.ap, &output.us, &output.eu, &output.sa, &output.af]
+        .into_iter()
+        .flat_map(|region| {
+            region
+                .mutex
+                .iter()
+                .chain(&region.cops)
+                .chain(&region.quorum)
+        })
+        .chain(&output.microbench_quorum)
+    {
+        sessions.spawn(instance_session(
+            format!("ec2-user@{}", instance.public_dns),
+            sync,
+        ));
+    }
+
+    let mut the_result = Ok(());
+    while let Some(result) = sessions.join_next().await {
+        the_result = the_result.and_then(|_| anyhow::Ok(result??))
+    }
+    the_result
 }
 
-async fn host_session(ssh_host: String, sync: bool) -> anyhow::Result<()> {
-    let ssh_host = format!("ec2-user@{ssh_host}");
+async fn instance_session(ssh_host: String, sync: bool) -> anyhow::Result<()> {
     // println!("{ssh_host}");
     if sync {
         let status = Command::new("rsync")

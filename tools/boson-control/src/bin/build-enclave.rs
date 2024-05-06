@@ -5,10 +5,7 @@ use tokio::{io::AsyncWriteExt, process::Command};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let host = terraform_output("microbench_instances")
-        .await?
-        .remove(0)
-        .public_dns;
+    let host = terraform_output().await?.microbench.remove(0).public_dns;
     println!("* Working on microbench instance {host}");
     let host = format!("ec2-user@{host}");
 
@@ -19,7 +16,7 @@ async fn main() -> anyhow::Result<()> {
             String::from("sudo dnf install -y docker-24.0.5-1.amzn2023.0.3 aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel")
             + " && sudo usermod -aG ne ec2-user"
             + " && sudo usermod -aG docker ec2-user"
-            + " && sudo systemctl enable --now nitro-enclaves-allocator.service"
+            // + " && sudo systemctl enable --now nitro-enclaves-allocator.service"
             + " && sudo systemctl enable --now docker"
         )
         .status()

@@ -46,7 +46,7 @@ module "mutex" {
   network = module.network
   state   = var.state
   type    = "c5a.2xlarge"
-  ami     = data.aws_ami.al2023
+  ami     = data.aws_ami.al2023.id
   n       = 20
 }
 
@@ -57,7 +57,7 @@ module "cops" {
   network = module.network
   state   = var.state
   type    = "c5a.8xlarge"
-  ami     = data.aws_ami.al2023
+  ami     = data.aws_ami.al2023.id
 }
 
 module "cops_client" {
@@ -67,7 +67,7 @@ module "cops_client" {
   network = module.network
   state   = var.state
   type    = "c5a.2xlarge"
-  ami     = data.aws_ami.al2023
+  ami     = data.aws_ami.al2023.id
 }
 
 module "quorum" {
@@ -76,14 +76,14 @@ module "quorum" {
   network = module.network
   state   = var.state
   type    = var.mode == "mutex" ? "c5a.8xlarge" : "c5a.2xlarge"
-  ami     = data.aws_ami.al2023
+  ami     = data.aws_ami.al2023.id
   n       = 2
 }
 
 output "instances" {
   value = {
     mutex       = flatten(module.mutex[*].instances)
-    cops        = flatten(module.mutex[*].instances)
+    cops        = flatten(module.cops[*].instances)
     cops_client = flatten(module.cops_client[*].instances)
     quorum      = module.quorum.instances
   }

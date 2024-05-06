@@ -1,7 +1,7 @@
-use std::{collections::BTreeMap, future::Future, net::IpAddr};
+use std::net::IpAddr;
 
 use serde::Deserialize;
-use tokio::{process::Command, task::JoinSet};
+use tokio::process::Command;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Instance {
@@ -10,19 +10,37 @@ pub struct Instance {
     pub public_dns: String,
 }
 
-pub async fn terraform_output(name: &str) -> anyhow::Result<Vec<Instance>> {
+#[derive(Debug, Clone, Deserialize)]
+pub struct TerraformOutput {
+    pub microbench: Vec<Instance>,
+    pub microbench_quorum: Vec<Instance>,
+    pub ap: TerraformOutputRegion,
+    pub us: TerraformOutputRegion,
+    pub eu: TerraformOutputRegion,
+    pub sa: TerraformOutputRegion,
+    pub af: TerraformOutputRegion,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TerraformOutputRegion {
+    pub mutex: Vec<Instance>,
+    pub cops: Vec<Instance>,
+    pub cops_client: Vec<Instance>,
+    pub quorum: Vec<Instance>,
+}
+
+pub async fn terraform_output() -> anyhow::Result<TerraformOutput> {
     let output = Command::new("terraform")
         .args([
             "-chdir=tools/boson-control/terraform",
             "output",
             "-json",
-            name,
+            "instances",
         ])
         .output()
         .await?
         .stdout;
-    let instances = serde_json::from_slice::<Vec<Instance>>(&output)?;
-    Ok(instances)
+    Ok(serde_json::from_slice(&output)?)
 }
 
 impl Instance {
@@ -31,28 +49,13 @@ impl Instance {
     }
 }
 
-pub fn retain_instances(instances: &[Instance], num_per_region: usize) -> Vec<Instance> {
-    let mut region_instances = BTreeMap::<_, Vec<_>>::new();
-    for instance in instances {
-        let instances = region_instances.entry(instance.region()).or_default();
-        if instances.len() < num_per_region {
-            instances.push(instance.clone())
-        }
-    }
-    region_instances.into_values().collect::<Vec<_>>().concat()
-}
-
-pub async fn instance_sessions<F: Future<Output = anyhow::Result<()>> + Send + 'static>(
-    instances: &[Instance],
-    session: impl Fn(String) -> F,
-) -> anyhow::Result<()> {
-    let mut sessions = JoinSet::new();
-    for instance in instances {
-        sessions.spawn(session(instance.public_dns.clone()));
-    }
-    let mut the_result = Ok(());
-    while let Some(result) = sessions.join_next().await {
-        the_result = the_result.and_then(|_| anyhow::Ok(result??))
-    }
-    the_result
+pub async fn ssh(host: impl AsRef<str>, command: impl AsRef<str>) -> anyhow::Result<()> {
+    let status = Command::new("ssh")
+        .arg(host.as_ref())
+        .arg(command.as_ref())
+        .stdout(std::process::Stdio::null())
+        .status()
+        .await?;
+    anyhow::ensure!(status.success());
+    Ok(())
 }
