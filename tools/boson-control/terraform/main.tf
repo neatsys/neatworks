@@ -8,32 +8,32 @@ terraform {
 }
 
 provider "aws" {
-  alias  = "ap-east-1"
+  alias  = "control"
+  region = "ap-south-1"
+}
+
+provider "aws" {
+  alias  = "ap"
   region = "ap-east-1"
 }
 
 provider "aws" {
-  alias  = "ap-southeast-1"
-  region = "ap-southeast-1"
-}
-
-provider "aws" {
-  alias  = "us-west-1"
+  alias  = "us"
   region = "us-west-1"
 }
 
 provider "aws" {
-  alias  = "eu-central-1"
+  alias  = "eu"
   region = "eu-central-1"
 }
 
 provider "aws" {
-  alias  = "sa-east-1"
+  alias  = "sa"
   region = "sa-east-1"
 }
 
 provider "aws" {
-  alias  = "af-south-1"
+  alias  = "af"
   region = "af-south-1"
 }
 
@@ -43,112 +43,120 @@ variable "state" {
 }
 
 variable "mode" {
-  type = string
+  type    = string
+  default = "microbench"
   validation {
     condition     = contains(["mutex", "cops", "microbench"], var.mode)
     error_message = "Unexpected mode."
   }
 }
 
+data "aws_ami" "al2023" {
+  most_recent = true
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-2023.4.20240416.0-kernel-6.1-x86_64"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+
+  owners = ["137112412989", "910595266909", "210953353124"] # amazon
+}
+
+module "microbench_network" {
+  source = "./group_network"
+  providers = {
+    aws = aws.control
+  }
+}
+
 module "microbench" {
   source = "./group"
-  count  = 1 # has been using to build nitro enclaves image so always enable
   providers = {
-    aws = aws.ap-southeast-1
+    aws = aws.control
   }
-  instance_state = var.state
-  instance_type  = "c5a.2xlarge"
+
+  network = module.microbench_network
+  state   = var.state
+  type    = mode == "microbench" ? "c5a.16xlarge" : "t3.micro"
+  ami     = data.aws_ami.al2023
 }
 
 module "microbench_quorum" {
   source = "./group"
   count  = var.mode == "microbench" ? 1 : 0
   providers = {
-    aws = aws.ap-southeast-1
+    aws = aws.control
   }
-  instance_state = var.state
-  instance_count = 10
+
+  network = module.microbench_network
+  ami     = data.aws_ami.al2023
+  state   = var.state
+  n       = 10
 }
 
-module "mutex" {
-  source = "./geo_groups"
-  count  = var.mode == "mutex" ? 1 : 0
+module "ap" {
+  source = "./region"
   providers = {
-    aws.ap-east-1    = aws.ap-east-1
-    aws.us-west-1    = aws.us-west-1
-    aws.eu-central-1 = aws.eu-central-1
-    aws.sa-east-1    = aws.sa-east-1
-    aws.af-south-1   = aws.af-south-1
+    aws = aws.ap
   }
-  instance_state = var.state
-  instance_type  = "c5a.2xlarge"
-  instance_count = 20
+
+  mode  = var.mode
+  state = var.state
 }
 
-module "cops" {
-  source = "./geo_groups"
-  count  = var.mode == "cops" ? 1 : 0
+module "us" {
+  source = "./region"
   providers = {
-    aws.ap-east-1    = aws.ap-east-1
-    aws.us-west-1    = aws.us-west-1
-    aws.eu-central-1 = aws.eu-central-1
-    aws.sa-east-1    = aws.sa-east-1
-    aws.af-south-1   = aws.af-south-1
+    aws = aws.us
   }
-  instance_state = var.state
-  instance_type  = "c5a.8xlarge"
+
+  mode  = var.mode
+  state = var.state
 }
 
-module "cops_client" {
-  source = "./geo_groups"
-  count  = var.mode == "cops" ? 1 : 0
+module "eu" {
+  source = "./region"
   providers = {
-    aws.ap-east-1    = aws.ap-east-1
-    aws.us-west-1    = aws.us-west-1
-    aws.eu-central-1 = aws.eu-central-1
-    aws.sa-east-1    = aws.sa-east-1
-    aws.af-south-1   = aws.af-south-1
+    aws = aws.eu
   }
-  instance_state = var.state
-  instance_type  = "c5a.2xlarge"
+
+  mode  = var.mode
+  state = var.state
 }
 
-module "quorum" {
-  source = "./geo_groups"
-  # count  = contains(["cops", "mutex"], var.mode) ? 1 : 0
-  count = 0
+module "sa" {
+  source = "./region"
   providers = {
-    aws.ap-east-1    = aws.ap-east-1
-    aws.us-west-1    = aws.us-west-1
-    aws.eu-central-1 = aws.eu-central-1
-    aws.sa-east-1    = aws.sa-east-1
-    aws.af-south-1   = aws.af-south-1
+    aws = aws.sa
   }
-  instance_state = var.state
-  instance_type  = "c5a.8xlarge"
-  instance_count = 2
+
+  mode  = var.mode
+  state = var.state
 }
 
-output "microbench_instances" {
-  value = flatten(module.microbench[*].instances)
+module "af" {
+  source = "./region"
+  providers = {
+    aws = aws.af
+  }
+
+  mode  = var.mode
+  state = var.state
 }
 
-output "microbench_quorum_instances" {
-  value = flatten(module.microbench_quorum[*].instances)
-}
-
-output "mutex_instances" {
-  value = flatten(module.mutex[*].instances)
-}
-
-output "cops_instances" {
-  value = flatten(module.cops[*].instances)
-}
-
-output "cops_client_instances" {
-  value = flatten(module.cops_client[*].instances)
-}
-
-output "quorum_instances" {
-  value = flatten(module.quorum[*].instances)
+output "instances" {
+  value = {
+    microbench        = module.microbench.instances
+    microbench_quorum = module.microbench_quorum.instances
+    ap                = module.ap.instances
+    us                = module.us.instances
+    eu                = module.eu.instances
+    sa                = module.sa.instances
+    af                = module.af.instances
+  }
 }

@@ -7,68 +7,41 @@ terraform {
   }
 }
 
-variable "instance_type" {
-  type    = string
-  default = "c5a.xlarge"
-}
-
-variable "instance_count" {
+variable "n" {
   type    = number
   default = 1
 }
 
-variable "instance_state" {
+variable "type" {
   type    = string
-  default = "running"
+  default = "t3.micro"
 }
 
-resource "aws_vpc" "main" {
-  cidr_block           = "10.0.0.0/16"
-  enable_dns_hostnames = true
-}
-
-resource "aws_subnet" "main" {
-  vpc_id                  = resource.aws_vpc.main.id
-  cidr_block              = "10.0.0.0/16"
-  map_public_ip_on_launch = true
-}
-
-resource "aws_internet_gateway" "main" {
-  vpc_id = resource.aws_vpc.main.id
-}
-
-resource "aws_route_table" "main" {
-  vpc_id = resource.aws_vpc.main.id
-
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = resource.aws_internet_gateway.main.id
+variable "state" {
+  type = string
+  validation {
+    condition     = contains(["running", "stopped"], var.state)
+    error_message = "state must be either running or stopped"
   }
 }
 
-resource "aws_route_table_association" "_1" {
-  route_table_id = resource.aws_route_table.main.id
-  subnet_id      = resource.aws_subnet.main.id
+variable "ami" {
+  type = object({
+    id = string
+  })
+  default = null
 }
 
-resource "aws_security_group" "main" {
-  vpc_id = resource.aws_vpc.main.id
+variable "key_name" {
+  type    = string
+  default = "Ephemeral"
+}
 
-  ingress {
-    from_port        = 0
-    to_port          = 0
-    protocol         = "-1"
-    cidr_blocks      = ["0.0.0.0/0"]
-    ipv6_cidr_blocks = ["::/0"]
-  }
-
-  egress {
-    from_port        = 0
-    to_port          = 0
-    protocol         = "-1"
-    cidr_blocks      = ["0.0.0.0/0"]
-    ipv6_cidr_blocks = ["::/0"]
-  }
+variable "network" {
+  type = object({
+    subnet_id              = string,
+    vpc_security_group_ids = list(string),
+  })
 }
 
 data "aws_ami" "ubuntu" {
@@ -87,46 +60,29 @@ data "aws_ami" "ubuntu" {
   owners = ["099720109477"] # Canonical
 }
 
-data "aws_ami" "al2023" {
-  most_recent = true
-
-  filter {
-    name   = "name"
-    values = ["al2023-ami-2023.4.20240416.0-kernel-6.1-x86_64"]
-  }
-
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
-
-  owners = ["137112412989", "910595266909", "210953353124"] # amazon
+locals {
+  ami = coalesce(var.ami, data.aws_ami.ubuntu)
 }
 
 resource "aws_instance" "main" {
-  count = var.instance_count
+  count = var.n
 
-  # ami                    = data.aws_ami.ubuntu.id
-  ami                    = data.aws_ami.al2023.id
-  instance_type          = var.instance_type
-  subnet_id              = resource.aws_subnet.main.id
-  vpc_security_group_ids = [resource.aws_security_group.main.id]
-  key_name               = "Ephemeral"
+  ami                    = local.ami.id
+  instance_type          = var.type
+  subnet_id              = var.network.subnet_id
+  vpc_security_group_ids = var.network.vpc_security_group_ids
+  key_name               = var.key_name
 
   enclave_options {
     enabled = true
   }
-
-  # root_block_device {
-  #   volume_size = 20
-  # }
 }
 
 resource "aws_ec2_instance_state" "_1" {
-  count = var.instance_count
+  count = var.n
 
   instance_id = aws_instance.main[count.index].id
-  state       = var.instance_state
+  state       = var.state
 }
 
 output "instances" {

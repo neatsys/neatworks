@@ -4,13 +4,13 @@ use serde::Deserialize;
 use tokio::{process::Command, task::JoinSet};
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct TerraformOutputInstance {
+pub struct Instance {
     pub public_ip: IpAddr,
     pub private_ip: IpAddr,
     pub public_dns: String,
 }
 
-pub async fn terraform_output(name: &str) -> anyhow::Result<Vec<TerraformOutputInstance>> {
+pub async fn terraform_output(name: &str) -> anyhow::Result<Vec<Instance>> {
     let output = Command::new("terraform")
         .args([
             "-chdir=tools/boson-control/terraform",
@@ -21,20 +21,17 @@ pub async fn terraform_output(name: &str) -> anyhow::Result<Vec<TerraformOutputI
         .output()
         .await?
         .stdout;
-    let instances = serde_json::from_slice::<Vec<TerraformOutputInstance>>(&output)?;
+    let instances = serde_json::from_slice::<Vec<Instance>>(&output)?;
     Ok(instances)
 }
 
-impl TerraformOutputInstance {
+impl Instance {
     pub fn region(&self) -> Option<String> {
         self.public_dns.split('.').nth(1).map(ToString::to_string)
     }
 }
 
-pub fn retain_instances(
-    instances: &[TerraformOutputInstance],
-    num_per_region: usize,
-) -> Vec<TerraformOutputInstance> {
+pub fn retain_instances(instances: &[Instance], num_per_region: usize) -> Vec<Instance> {
     let mut region_instances = BTreeMap::<_, Vec<_>>::new();
     for instance in instances {
         let instances = region_instances.entry(instance.region()).or_default();
@@ -46,7 +43,7 @@ pub fn retain_instances(
 }
 
 pub async fn instance_sessions<F: Future<Output = anyhow::Result<()>> + Send + 'static>(
-    instances: &[TerraformOutputInstance],
+    instances: &[Instance],
     session: impl Fn(String) -> F,
 ) -> anyhow::Result<()> {
     let mut sessions = JoinSet::new();

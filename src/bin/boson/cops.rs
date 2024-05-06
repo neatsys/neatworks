@@ -632,25 +632,39 @@ pub async fn quorum_server_session(
     let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
     let clock_tcp_accept_session =
         tcp::accept_session(clock_tcp_listener, clock_dispatch_session.sender());
-    let client_crypto_session =
-        crypto_executor.run(crypto.clone(), Sender::from(replica_session.sender()));
-    let crypto_session = clock_crypto_executor.run(crypto, Sender::from(clock_session.sender()));
+    let mut crypto_session = tokio::task::spawn_blocking({
+        let replica_session_sender = Sender::from(replica_session.sender());
+        let crypto = crypto.clone();
+        move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(crypto_executor.run(crypto, replica_session_sender))
+        }
+    });
+    let clock_crypto_session =
+        clock_crypto_executor.run(crypto, Sender::from(clock_session.sender()));
     let dispatch_session = dispatch_session.run(&mut dispatch);
     let clock_dispatch_session = clock_dispatch_session.run(&mut clock_dispatch);
     let replica_session = replica_session.run(&mut replica);
     let clock_session = clock_session.run(&mut clock);
-    tokio::select! {
-        () = cancel.cancelled() => return Ok(()),
-        result = tcp_accept_session => result?,
-        result = clock_tcp_accept_session => result?,
-        result = client_crypto_session => result?,
-        result = crypto_session => result?,
-        result = dispatch_session => result?,
-        result = clock_dispatch_session => result?,
-        result = clock_session => result?,
-        result = replica_session => result?,
+    async {
+        tokio::select! {
+            () = cancel.cancelled() => return Ok(()),
+            result = tcp_accept_session => result?,
+            result = clock_tcp_accept_session => result?,
+            result = &mut crypto_session => result??,
+            result = clock_crypto_session => result?,
+            result = dispatch_session => result?,
+            result = clock_dispatch_session => result?,
+            result = clock_session => result?,
+            result = replica_session => result?,
+        }
+        anyhow::bail!("unreachable")
     }
-    anyhow::bail!("unreachable")
+    .await?;
+    crypto_session.abort();
+    Ok(())
 }
 
 pub async fn nitro_enclaves_client_session(
@@ -809,7 +823,7 @@ pub async fn nitro_enclaves_server_session(
 
     let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
     // let client_crypto_session = crypto_executor.run((), Sender::from(replica_session.sender()));
-    let mut client_crypto_session = tokio::task::spawn_blocking({
+    let mut crypto_session = tokio::task::spawn_blocking({
         let replica_session_sender = Sender::from(replica_session.sender());
         move || {
             tokio::runtime::Builder::new_current_thread()
@@ -829,7 +843,7 @@ pub async fn nitro_enclaves_server_session(
         tokio::select! {
             () = cancel.cancelled() => return Ok(()),
             result = tcp_accept_session => result?,
-            result = &mut client_crypto_session => result??,
+            result = &mut crypto_session => result??,
             result = dispatch_session => result?,
             result = clock_session => result?,
             result = replica_session => result?,
@@ -837,7 +851,7 @@ pub async fn nitro_enclaves_server_session(
         anyhow::bail!("unreachable")
     }
     .await?;
-    client_crypto_session.abort();
+    crypto_session.abort();
     Ok(())
 }
 

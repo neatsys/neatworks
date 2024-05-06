@@ -9,7 +9,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use boson_control::{terraform_output, TerraformOutputInstance};
+use boson_control::{terraform_output, Instance};
 use tokio::{
     fs::{create_dir_all, write},
     io::AsyncWriteExt,
@@ -65,8 +65,8 @@ async fn main() -> anyhow::Result<()> {
                 instances.clone(),
                 clock_instances.clone(),
                 Variant::NitroEnclaves,
-                1,
-                0.1,
+                80,
+                0.01,
             )
             .await?;
             Ok(())
@@ -188,8 +188,8 @@ async fn watchdog_session(
 
 async fn mutex_session(
     client: reqwest::Client,
-    instances: Vec<TerraformOutputInstance>,
-    clock_instances: Vec<TerraformOutputInstance>,
+    instances: Vec<Instance>,
+    clock_instances: Vec<Instance>,
     mode: RequestMode,
     variant: Variant,
     num_region_processor: usize,
@@ -388,9 +388,9 @@ async fn mutex_request_session(
 
 async fn cops_session(
     client: reqwest::Client,
-    client_instances: Vec<TerraformOutputInstance>,
-    instances: Vec<TerraformOutputInstance>,
-    clock_instances: Vec<TerraformOutputInstance>,
+    client_instances: Vec<Instance>,
+    instances: Vec<Instance>,
+    clock_instances: Vec<Instance>,
     variant: Variant,
     num_concurrent: usize,
     put_ratio: f64,
