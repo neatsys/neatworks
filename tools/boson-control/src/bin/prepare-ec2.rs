@@ -23,8 +23,9 @@ async fn main() -> anyhow::Result<()> {
 
     let output = boson_control::terraform_output().await?;
     let mut sessions = JoinSet::new();
-    for instance in [&output.ap, &output.us, &output.eu, &output.sa, &output.af]
-        .into_iter()
+    for instance in output
+        .regions
+        .values()
         .flat_map(|region| region.mutex.iter().chain(&region.cops))
     {
         sessions.spawn(boson_control::ssh(
@@ -32,8 +33,9 @@ async fn main() -> anyhow::Result<()> {
             enclave_command.clone(),
         ));
     }
-    for instance in [&output.ap, &output.us, &output.eu, &output.sa, &output.af]
-        .into_iter()
+    for instance in output
+        .regions
+        .values()
         .flat_map(|region| &region.quorum)
         .chain(&output.microbench_quorum)
     {

@@ -152,10 +152,12 @@ output "instances" {
   value = {
     microbench        = module.microbench.instances
     microbench_quorum = flatten(module.microbench_quorum[*].instances)
-    ap                = module.ap.instances
-    us                = module.us.instances
-    eu                = module.eu.instances
-    sa                = module.sa.instances
-    af                = module.af.instances
+    regions = {
+      ap = module.ap.instances
+      us = module.us.instances
+      eu = module.eu.instances
+      sa = module.sa.instances
+      af = module.af.instances
+    }
   }
 }

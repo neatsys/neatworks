@@ -25,8 +25,9 @@ async fn main() -> anyhow::Result<()> {
 
     let output = boson_control::terraform_output().await?;
     let mut sessions = JoinSet::new();
-    for instance in [&output.ap, &output.us, &output.eu, &output.sa, &output.af]
-        .into_iter()
+    for instance in output
+        .regions
+        .values()
         .flat_map(|region| region.mutex.iter().chain(&region.cops))
     {
         sessions.spawn(instance_session(

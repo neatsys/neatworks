@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::{collections::BTreeMap, net::IpAddr};
 
 use serde::Deserialize;
 use tokio::process::Command;
@@ -10,15 +10,17 @@ pub struct Instance {
     pub public_dns: String,
 }
 
+impl Instance {
+    pub fn url(&self) -> String {
+        format!("http://{}:3000", self.public_dns)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct TerraformOutput {
     pub microbench: Vec<Instance>,
     pub microbench_quorum: Vec<Instance>,
-    pub ap: TerraformOutputRegion,
-    pub us: TerraformOutputRegion,
-    pub eu: TerraformOutputRegion,
-    pub sa: TerraformOutputRegion,
-    pub af: TerraformOutputRegion,
+    pub regions: BTreeMap<String, TerraformOutputRegion>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

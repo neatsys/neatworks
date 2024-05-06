@@ -25,8 +25,9 @@ async fn main() -> anyhow::Result<()> {
 
     let output = boson_control::terraform_output().await?;
     let mut sessions = JoinSet::new();
-    for instance in [&output.ap, &output.us, &output.eu, &output.sa, &output.af]
-        .into_iter()
+    for instance in output
+        .regions
+        .values()
         .flat_map(|region| {
             region
                 .mutex
@@ -61,13 +62,11 @@ async fn instance_session(ssh_host: String, sync: bool) -> anyhow::Result<()> {
             .await?;
         anyhow::ensure!(status.success(), "Command `rsync` exit with {status}");
     }
-    let status = Command::new("ssh")
-        .arg(ssh_host)
-        .arg("pkill -x boson; sleep 1; tmux new -d -s boson \"./boson >boson.log\"")
-        // .arg("pkill -x boson; sleep 1; tmux new -d -s boson \"RUST_LOG=info,augustus::lamport_mutex::verifiable=debug ./boson >boson.log\"")
-        // .arg("pkill -x boson; sleep 1; tmux new -d -s boson \"RUST_BACKTRACE=1 ./boson >boson.log\"")
-        .status()
-        .await?;
-    anyhow::ensure!(status.success(), "Command `boson` exit with {status}");
-    Ok(())
+    boson_control::ssh(
+        ssh_host,
+        "pkill -x boson; sleep 1; tmux new -d -s boson \"./boson >boson.log\"",
+        // "pkill -x boson; sleep 1; tmux new -d -s boson \"RUST_LOG=info,augustus::lamport_mutex::verifiable=debug ./boson >boson.log\""
+        // "pkill -x boson; sleep 1; tmux new -d -s boson \"RUST_BACKTRACE=1 ./boson >boson.log\""
+    )
+    .await
 }

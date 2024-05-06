@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fmt::Write,
     future::Future,
     net::SocketAddr,
@@ -9,7 +9,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use boson_control::{terraform_output, Instance};
+use boson_control::{terraform_output, Instance, TerraformOutputRegion};
 use tokio::{
     fs::{create_dir_all, write},
     io::AsyncWriteExt,
@@ -41,12 +41,12 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
     let item = std::env::args().nth(1);
     let output = terraform_output().await?;
+    let regions = output.regions;
     match item.as_deref() {
         Some("test-mutex") => {
             mutex_session(
                 client.clone(),
-                instances,
-                clock_instances,
+                &regions,
                 RequestMode::All,
                 Variant::Replicated,
                 10,
@@ -55,16 +55,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("test-cops") => {
-            cops_session(
-                client.clone(),
-                client_instances.clone(),
-                instances.clone(),
-                clock_instances.clone(),
-                Variant::NitroEnclaves,
-                80,
-                0.01,
-            )
-            .await?;
+            cops_session(client.clone(), &regions, Variant::Untrusted, 80, 0.01).await?;
             Ok(())
         }
         Some("mutex") => {
@@ -75,15 +66,7 @@ async fn main() -> anyhow::Result<()> {
                 Variant::NitroEnclaves,
             ] {
                 for n in 1..=20 {
-                    mutex_session(
-                        client.clone(),
-                        instances.clone(),
-                        clock_instances.clone(),
-                        RequestMode::One,
-                        variant,
-                        n,
-                    )
-                    .await?
+                    mutex_session(client.clone(), &regions, RequestMode::One, variant, n).await?
                 }
             }
             for variant in [
@@ -99,33 +82,19 @@ async fn main() -> anyhow::Result<()> {
                 }
                 .rev()
                 {
-                    mutex_session(
-                        client.clone(),
-                        instances.clone(),
-                        clock_instances.clone(),
-                        RequestMode::All,
-                        variant,
-                        n,
-                    )
-                    .await?
+                    mutex_session(client.clone(), &regions, RequestMode::All, variant, n).await?
                 }
             }
             Ok(())
         }
         Some("cops") => {
-            cops_session(
-                client.clone(),
-                client_instances.clone(),
-                instances.clone(),
-                clock_instances.clone(),
-                Variant::Untrusted,
-                1,
-                0.1,
-            )
-            .await?;
+            cops_session(client.clone(), &regions, Variant::Untrusted, 1, 0.1).await?;
             Ok(())
         }
-        Some("quorum") => bench_quorum_session(client).await,
+        Some("quorum") => {
+            let mut microbench = output.microbench;
+            bench_quorum_session(client, microbench.remove(0), output.microbench_quorum).await
+        }
         _ => Ok(()),
     }
 }
@@ -179,53 +148,33 @@ async fn watchdog_session(
 
 async fn mutex_session(
     client: reqwest::Client,
-    instances: Vec<Instance>,
-    clock_instances: Vec<Instance>,
+    regions: &BTreeMap<String, TerraformOutputRegion>,
     mode: RequestMode,
     variant: Variant,
     num_region_processor: usize,
 ) -> anyhow::Result<()> {
-    // this one will always be taken below
-    let one_instance = instances[0].clone();
-    let mut region_instances = BTreeMap::<_, Vec<_>>::new();
-    for instance in instances {
-        region_instances
-            .entry(instance.region())
-            .or_default()
-            .push(instance.clone())
+    let mut addrs = Vec::new();
+    let mut urls = Vec::new();
+    let mut clock_addrs = Vec::new();
+    let mut clock_urls = Vec::new();
+    for region in regions.values() {
+        anyhow::ensure!(region.quorum.len() >= 2);
+        anyhow::ensure!(!region.mutex.is_empty());
+        addrs.extend(
+            region
+                .mutex
+                .iter()
+                .map(|instance| SocketAddr::from((instance.public_ip, 4000))),
+        );
+        urls.extend(region.mutex.iter().map(Instance::url));
+        clock_addrs.extend(
+            region
+                .quorum
+                .iter()
+                .map(|instance| SocketAddr::from((instance.public_ip, 5000))),
+        );
+        clock_urls.extend(region.quorum.iter().map(Instance::url))
     }
-    let num_region = region_instances.len();
-
-    // let mut clock_instances = Vec::new();
-    let mut instances = Vec::new();
-    for region_instances in region_instances.into_values() {
-        // let mut region_instances = region_instances.into_iter();
-        // clock_instances.extend((&mut region_instances).take(2));
-        let region_instances = region_instances.into_iter();
-        instances.extend(region_instances.take(num_region_processor))
-    }
-    anyhow::ensure!(clock_instances.len() >= num_region * 2);
-    anyhow::ensure!(!instances.is_empty());
-
-    let urls = instances
-        .iter()
-        .map(|instance| format!("http://{}:3000", instance.public_dns))
-        .collect::<Vec<_>>();
-    let one_url = format!("http://{}:3000", one_instance.public_dns);
-    assert!(urls.contains(&one_url));
-    let clock_urls = clock_instances
-        .iter()
-        .map(|instance| format!("http://{}:3000", instance.public_dns))
-        .collect::<Vec<_>>();
-
-    let addrs = instances
-        .iter()
-        .map(|instance| SocketAddr::from((instance.public_ip, 4000)))
-        .collect::<Vec<_>>();
-    let clock_addrs = clock_instances
-        .iter()
-        .map(|instance| SocketAddr::from((instance.public_ip, 5000)))
-        .collect::<Vec<_>>();
 
     let mut watchdog_sessions = JoinSet::new();
     let quorum = boson_control_messages::Quorum {
@@ -276,9 +225,14 @@ async fn mutex_session(
         let out = Arc::new(Mutex::new(Vec::new()));
         match mode {
             RequestMode::One => {
+                // a stably selected instance to send Request
+                // with current scripts this is always select a processor in af-south, unfortunately
+                // leads to not ideal results (to both our and compared systems)
+                let url = urls[0].clone();
+                println!("{url}");
                 while_ok(
                     &mut watchdog_sessions,
-                    mutex_request_session(client.clone(), one_url.clone(), at, out.clone()),
+                    mutex_request_session(client.clone(), url, at, out.clone()),
                 )
                 .await??
             }
@@ -379,40 +333,31 @@ async fn mutex_request_session(
 
 async fn cops_session(
     client: reqwest::Client,
-    client_instances: Vec<Instance>,
-    instances: Vec<Instance>,
-    clock_instances: Vec<Instance>,
+    regions: &BTreeMap<String, TerraformOutputRegion>,
     variant: Variant,
     num_concurrent: usize,
     put_ratio: f64,
 ) -> anyhow::Result<()> {
-    let num_region = instances
-        .iter()
-        .map(|instance| instance.region())
-        .collect::<BTreeSet<_>>()
-        .len();
-    let num_region_client = 1; // TODO
+    let num_region_client = 1; //
 
-    // anyhow::ensure!(clock_instances.len() >= num_region * 2);
-    anyhow::ensure!(instances.len() == num_region);
-    anyhow::ensure!(client_instances.len() == num_region * num_region_client);
-
-    let urls = instances
-        .iter()
-        .map(|instance| format!("http://{}:3000", instance.public_dns))
-        .collect::<Vec<_>>();
-    let clock_urls = clock_instances
-        .iter()
-        .map(|instance| format!("http://{}:3000", instance.public_dns))
-        .collect::<Vec<_>>();
-    let addrs = instances
-        .iter()
-        .map(|instance| SocketAddr::from((instance.public_ip, 4000)))
-        .collect::<Vec<_>>();
-    let clock_addrs = clock_instances
-        .iter()
-        .map(|instance| SocketAddr::from((instance.public_ip, 5000)))
-        .collect::<Vec<_>>();
+    let mut addrs = Vec::new();
+    let mut clock_addrs = Vec::new();
+    let mut urls = Vec::new();
+    let mut clock_urls = Vec::new();
+    for region in regions.values() {
+        anyhow::ensure!(region.cops.len() == 1);
+        anyhow::ensure!(region.cops_client.len() == num_region_client);
+        anyhow::ensure!(region.quorum.len() >= 2);
+        addrs.push(SocketAddr::from((region.cops[0].public_ip, 4000)));
+        urls.push(region.cops[0].url());
+        clock_addrs.extend(
+            region
+                .quorum
+                .iter()
+                .map(|instance| SocketAddr::from((instance.public_ip, 5000))),
+        );
+        clock_urls.extend(region.quorum.iter().map(Instance::url))
+    }
 
     let mut watchdog_sessions = JoinSet::new();
     println!("Start clock services");
@@ -437,7 +382,7 @@ async fn cops_session(
     let variant_config = match variant {
         Variant::Untrusted => Untrusted,
         Variant::Replicated => Replicated(boson_control_messages::Replicated {
-            num_faulty: (instances.len() - 1) / 3,
+            num_faulty: (addrs.len() - 1) / 3,
         }),
         Variant::Quorum => Quorum(quorum),
         Variant::NitroEnclaves => NitroEnclaves,
@@ -462,22 +407,17 @@ async fn cops_session(
     while_ok(&mut watchdog_sessions, sleep(Duration::from_millis(5000))).await?;
     println!("Start clients");
     let mut client_sessions = JoinSet::new();
-    let record_count_per_replica = record_count / instances.len();
+    let record_count_per_replica = record_count / addrs.len();
     let out = Arc::new(Mutex::new(Vec::new()));
-    for (i, instance) in client_instances.iter().enumerate() {
+    for (i, region) in regions.values().enumerate() {
         let addrs = match variant {
             Variant::Replicated => addrs.clone(),
             _ => {
-                let server_instance = instances
-                    .iter()
-                    .find(|server_instance| server_instance.region() == instance.region())
-                    .ok_or(anyhow::format_err!(
-                        "no server in region {:?}",
-                        instance.region()
-                    ))?;
+                let server_instance = &region.cops[0];
                 vec![SocketAddr::from((server_instance.public_ip, 4000))]
             }
         };
+        let instance = &region.cops_client[0];
         let index = i / num_region_client;
         let config = boson_control_messages::CopsClient {
             addrs,
@@ -586,9 +526,11 @@ async fn cops_client_session(
     }
 }
 
-async fn bench_quorum_session(client: reqwest::Client) -> anyhow::Result<()> {
-    let instance = terraform_output("microbench_instances").await?.remove(0);
-    let clock_instances = terraform_output("microbench_quorum_instances").await?;
+async fn bench_quorum_session(
+    client: reqwest::Client,
+    instance: Instance,
+    clock_instances: Vec<Instance>,
+) -> anyhow::Result<()> {
     let clock_urls = clock_instances
         .iter()
         .map(|instance| format!("http://{}:3000", instance.public_dns))
