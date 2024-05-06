@@ -3,6 +3,7 @@ use std::{
     ops::Range,
 };
 
+use hdrhistogram::Histogram;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -55,4 +56,32 @@ pub struct Quorum {
 pub struct QuorumServer {
     pub quorum: Quorum,
     pub index: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CopsClientOk(#[serde(with = "histogram_serialization")] pub Histogram<u64>);
+
+mod histogram_serialization {
+    use hdrhistogram::{
+        serialization::{Deserializer, Serializer, V2Serializer},
+        Histogram,
+    };
+
+    pub fn serialize<S: serde::Serializer>(
+        histogram: &Histogram<u64>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut buf = Vec::new();
+        V2Serializer::new()
+            .serialize(histogram, &mut buf)
+            .map_err(serde::ser::Error::custom)?;
+        s.serialize_bytes(&buf)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Histogram<u64>, D::Error> {
+        let buf = <Vec<u8> as serde::Deserialize<'de>>::deserialize(d)?;
+        Deserializer::new()
+            .deserialize(&mut &*buf)
+            .map_err(serde::de::Error::custom)
+    }
 }

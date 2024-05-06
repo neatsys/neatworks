@@ -15,6 +15,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use hdrhistogram::Histogram;
 use tokio::{
     signal::ctrl_c,
     sync::{
@@ -280,26 +281,19 @@ async fn cops_poll_results(State(state): State<AppState>) -> Response {
             return Ok(None);
         }
         let mut channel = state_channel.take().unwrap();
-        let mut latencies = Vec::new();
+        // i'm not sure so use 3
+        let mut histogram = Histogram::<u64>::new(3)?;
+        // TODO directly record into histograms
         while let Ok(result) = channel.upcall.try_recv() {
-            let Upcall::Latencies(some_latencies) = result else {
+            let Upcall::Latencies(latencies) = result else {
                 anyhow::bail!("unimplemented")
             };
-            latencies.extend(some_latencies)
+            for latency in latencies {
+                histogram.record(latency.as_nanos() as _)?
+            }
         }
         state.session.lock().await.take().unwrap().handle.await??;
-        let throughput = latencies.len() as f32 / 10.;
-        latencies.sort_unstable();
-        // let latency = latencies
-        //     .get(latencies.len() / 2)
-        //     .copied()
-        //     .unwrap_or_default();
-        let latency = latencies.iter().sum::<Duration>() / latencies.len() as u32;
-        let latency_999 = latencies
-            .get(latencies.len() * 999 / 1000)
-            .copied()
-            .unwrap_or_default();
-        Ok(Some((throughput, latency, latency_999)))
+        Ok(Some(boson_control_messages::CopsClientOk(histogram)))
     };
     match task.await {
         Ok(result) => Json(result).into_response(),

@@ -33,6 +33,7 @@ async fn main() -> anyhow::Result<()> {
                 .mutex
                 .iter()
                 .chain(&region.cops)
+                .chain(&region.cops_client)
                 .chain(&region.quorum)
         })
         .chain(&output.microbench_quorum)

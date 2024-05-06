@@ -10,6 +10,7 @@ use std::{
 };
 
 use boson_control::{terraform_output, Instance, TerraformOutputRegion};
+use hdrhistogram::Histogram;
 use tokio::{
     fs::{create_dir_all, write},
     io::AsyncWriteExt,
@@ -55,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("test-cops") => {
-            cops_session(client.clone(), &regions, Variant::Untrusted, 80, 0.01).await?;
+            cops_session(client.clone(), &regions, Variant::Untrusted, 200, 0.5).await?;
             Ok(())
         }
         Some("mutex") => {
@@ -408,7 +409,7 @@ async fn cops_session(
     println!("Start clients");
     let mut client_sessions = JoinSet::new();
     let record_count_per_replica = record_count / addrs.len();
-    let out = Arc::new(Mutex::new(Vec::new()));
+    let out = Arc::new(Mutex::new(Histogram::<u64>::new(3)?));
     for (i, region) in regions.values().enumerate() {
         let addrs = match variant {
             Variant::Replicated => addrs.clone(),
@@ -447,16 +448,9 @@ async fn cops_session(
     while let Some(result) = watchdog_sessions.join_next().await {
         result??
     }
-    let results = Arc::into_inner(out).unwrap().into_inner()?;
-    let throughput = results
-        .iter()
-        .map(|(throughput, _)| throughput)
-        .sum::<f32>();
-    let latency = results
-        .iter()
-        .map(|(throughput, latency)| latency.mul_f32(*throughput))
-        .sum::<Duration>()
-        .div_f32(throughput);
+    let histogram = Arc::into_inner(out).unwrap().into_inner()?;
+    let throughput = histogram.len() as f32 / 10.;
+    let latency = Duration::from_nanos(histogram.value_at_quantile(0.999));
     println!("{throughput} {latency:?}");
     let path = Path::new("tools/boson-control/notebooks/cops");
     create_dir_all(path).await?;
@@ -499,7 +493,7 @@ async fn cops_client_session(
     client: reqwest::Client,
     url: String,
     config: boson_control_messages::CopsClient,
-    out: Arc<Mutex<Vec<(f32, Duration)>>>,
+    out: Arc<Mutex<Histogram<u64>>>,
 ) -> anyhow::Result<()> {
     client
         .post(format!("{url}/cops/start-client"))
@@ -514,13 +508,28 @@ async fn cops_client_session(
             .send()
             .await?
             .error_for_status()?
-            .json::<Option<(f32, Duration, Duration)>>()
+            .json::<Option<boson_control_messages::CopsClientOk>>()
             .await?;
-        if let Some(result) = result {
-            println!("{result:?} {url}");
+        if let Some(boson_control_messages::CopsClientOk(histogram)) = result {
+            let mut lines = vec![url];
+            // for v in histogram.iter_quantiles(1) {
+            //     lines.push(format!(
+            //         "{:7.3}% {:?} ({} samples)",
+            //         v.percentile(),
+            //         Duration::from_nanos(v.value_iterated_to()),
+            //         v.count_at_value()
+            //     ))
+            // }
+            for q in [0.5, 0.99, 0.999] {
+                lines.push(format!(
+                    "{q:4}th {:?}",
+                    Duration::from_nanos(histogram.value_at_quantile(q))
+                ))
+            }
+            println!("{}", lines.join("\n"));
             out.lock()
                 .map_err(|err| anyhow::format_err!("{err}"))?
-                .push((result.0, result.1));
+                .add(histogram)?;
             break Ok(());
         }
     }

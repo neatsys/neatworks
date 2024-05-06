@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
     for instance in output
         .regions
         .values()
-        .flat_map(|region| &region.quorum)
+        .flat_map(|region| region.quorum.iter().chain(&region.cops_client))
         .chain(&output.microbench_quorum)
     {
         sessions.spawn(boson_control::ssh(
