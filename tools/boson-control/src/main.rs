@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("test-cops") => {
-            cops_session(client.clone(), &regions, Variant::Untrusted, 200, 0.5).await?;
+            cops_session(client.clone(), &regions, Variant::Untrusted, 200, 0.01, 5).await?;
             Ok(())
         }
         Some("mutex") => {
@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("cops") => {
-            cops_session(client.clone(), &regions, Variant::Untrusted, 1, 0.1).await?;
+            cops_session(client.clone(), &regions, Variant::Untrusted, 1, 0.1, 5).await?;
             Ok(())
         }
         Some("quorum") => {
@@ -338,6 +338,7 @@ async fn cops_session(
     variant: Variant,
     num_concurrent: usize,
     put_ratio: f64,
+    num_region: usize,
 ) -> anyhow::Result<()> {
     let num_region_client = 1; //
 
@@ -345,7 +346,7 @@ async fn cops_session(
     let mut clock_addrs = Vec::new();
     let mut urls = Vec::new();
     let mut clock_urls = Vec::new();
-    for region in regions.values() {
+    for region in regions.values().take(num_region) {
         anyhow::ensure!(region.cops.len() == 1);
         anyhow::ensure!(region.cops_client.len() == num_region_client);
         anyhow::ensure!(region.quorum.len() >= 2);
@@ -408,9 +409,9 @@ async fn cops_session(
     while_ok(&mut watchdog_sessions, sleep(Duration::from_millis(5000))).await?;
     println!("Start clients");
     let mut client_sessions = JoinSet::new();
-    let record_count_per_replica = record_count / addrs.len();
+    let record_count_per_replica = record_count / regions.len();
     let out = Arc::new(Mutex::new(Histogram::<u64>::new(3)?));
-    for (i, region) in regions.values().enumerate() {
+    for (i, region) in regions.values().take(num_region).enumerate() {
         let addrs = match variant {
             Variant::Replicated => addrs.clone(),
             _ => {
@@ -431,7 +432,7 @@ async fn cops_session(
         };
         client_sessions.spawn(cops_client_session(
             client.clone(),
-            format!("http://{}:3000", instance.public_dns),
+            instance.url(),
             config,
             out.clone(),
         ));
@@ -460,7 +461,13 @@ async fn cops_session(
             SystemTime::UNIX_EPOCH.elapsed()?.as_secs()
         )),
         format!(
-            "{variant:?},{num_concurrent},{put_ratio},{throughput},{}",
+            "{variant:?},{},{num_concurrent},{put_ratio},{throughput},{}",
+            regions
+                .keys()
+                .take(num_region)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("+"),
             latency.as_secs_f32()
         ),
     )
@@ -522,7 +529,7 @@ async fn cops_client_session(
             // }
             for q in [0.5, 0.99, 0.999] {
                 lines.push(format!(
-                    "{q:4}th {:?}",
+                    "{q:<5}th {:?}",
                     Duration::from_nanos(histogram.value_at_quantile(q))
                 ))
             }
