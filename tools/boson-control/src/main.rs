@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("test-cops") => {
-            cops_session(client.clone(), &regions, Variant::Untrusted, 200, 0.01, 5).await?;
+            cops_session(client.clone(), &regions, Variant::Replicated, 8000, 0.03, 5).await?;
             Ok(())
         }
         Some("mutex") => {
@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("cops") => {
-            cops_session(client.clone(), &regions, Variant::Untrusted, 1, 0.1, 5).await?;
+            // TODO
             Ok(())
         }
         Some("quorum") => {

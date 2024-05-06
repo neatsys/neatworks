@@ -1,0 +1,1 @@
+NitroEnclaves,af+ap+eu+sa+us,25,0.01,125068.4,0.058228735
