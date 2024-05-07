@@ -523,16 +523,33 @@ impl<M: ReplicaCommon> OnEvent<(Signed<PrePrepare>, Vec<Request<M::A>>)>
             return Ok(());
         }
 
-        let op_num = pre_prepare.op_num as usize;
-        let replaced = self.log[op_num].pre_prepare.replace(pre_prepare.clone());
+        let op_num = pre_prepare.op_num;
+        let replaced = self.log[op_num as usize]
+            .pre_prepare
+            .replace(pre_prepare.clone());
         assert!(replaced.is_none());
 
-        self.log[op_num].requests.clone_from(&requests);
-        self.log[op_num]
+        self.log[op_num as usize].requests.clone_from(&requests);
+        self.log[op_num as usize]
             .progress
-            .set(ProgressPrepared(op_num as _), timer)?;
+            .set(ProgressPrepared(op_num), timer)?;
 
-        self.net.send(All, (pre_prepare, requests))
+        let digest = pre_prepare.digest;
+        self.net.send(All, (pre_prepare, requests))?;
+
+        // TODO improve readability?
+        if self.num_replica == 1 {
+            let commit = Commit {
+                view_num: self.view_num,
+                op_num: op_num,
+                digest,
+                replica_id: self.id,
+            };
+            self.crypto_worker.submit(Box::new(move |crypto, sender| {
+                sender.send(Signed(crypto.sign(commit)))
+            }))?
+        }
+        Ok(())
     }
 }
 

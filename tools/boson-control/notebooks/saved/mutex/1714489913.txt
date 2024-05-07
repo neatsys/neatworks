@@ -1,8 +1,0 @@
-One,Untrusted,70,0.365528
-One,Untrusted,70,0.3654499
-One,Untrusted,70,0.36546937
-One,Untrusted,70,0.3654062
-One,Untrusted,70,0.3655287
-One,Untrusted,70,0.36541688
-One,Untrusted,70,0.36645776
-One,Untrusted,70,0.36544546

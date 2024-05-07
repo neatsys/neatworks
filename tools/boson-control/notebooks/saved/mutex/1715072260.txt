@@ -1,0 +1,9 @@
+One,Replicated,20,1.2135662
+One,Replicated,20,1.2133577
+One,Replicated,20,1.2130454
+One,Replicated,20,1.2133409
+One,Replicated,20,1.2140386
+One,Replicated,20,1.2134795
+One,Replicated,20,1.2132049
+One,Replicated,20,1.213727
+One,Replicated,20,1.2133836

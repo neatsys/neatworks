@@ -1,0 +1,9 @@
+One,NitroEnclaves,50,0.42972934
+One,NitroEnclaves,50,0.43184397
+One,NitroEnclaves,50,0.43043274
+One,NitroEnclaves,50,0.4186749
+One,NitroEnclaves,50,0.42441723
+One,NitroEnclaves,50,0.43272275
+One,NitroEnclaves,50,0.4321446
+One,NitroEnclaves,50,0.421241
+One,NitroEnclaves,50,0.4291239

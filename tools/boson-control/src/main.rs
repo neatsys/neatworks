@@ -61,15 +61,16 @@ async fn main() -> anyhow::Result<()> {
         }
         Some("mutex") => {
             for variant in [
-                Variant::Untrusted,
-                Variant::Replicated,
+                // Variant::Untrusted,
+                // Variant::Replicated,
                 Variant::Quorum,
-                Variant::NitroEnclaves,
+                // Variant::NitroEnclaves,
             ] {
                 for n in match variant {
                     Variant::Replicated => 1..=10,
-                    Variant::NitroEnclaves => 1..=12,
-                    _ => 1..=16,
+                    Variant::NitroEnclaves => 1..=13,
+                    // _ => 1..=16,
+                    _ => 8..=16,
                 } {
                     mutex_session(client.clone(), &regions, RequestMode::All, variant, n).await?
                 }
@@ -266,7 +267,7 @@ async fn mutex_session(
         //   * connect backoff slow things down
         //   * connect backoff destroys synchronization barrier which may speed things up = =
         // * map based clocks has smaller data size which may get abnormally faster
-        if i >= 0 {
+        if i > 0 {
             for duration in Arc::into_inner(out).unwrap().into_inner()? {
                 writeln!(
                     &mut lines,
