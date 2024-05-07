@@ -34,6 +34,8 @@ impl App for Null {
     }
 }
 
+// pairing with event sending closures, this effectively allows any
+// `impl OnEvent` (either variant) to be running as a `impl App` state machine
 #[derive(Debug)]
 pub struct OnBuf<F>(pub F);
 

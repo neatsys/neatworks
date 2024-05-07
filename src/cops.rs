@@ -3,51 +3,67 @@
 // with COPS (SOSP'11)
 // the implementation contains the COPS variant in the paper, COPS-GT and
 // COPS-CD are not included
-// the implementation is prepared for an arbitrary fault security model.
-// additional checks and proof passing take places
-// the version type `V` in this implementation does not map to the version
-// number in the original work. instead, it roughly maps to the "nearest"
-// dependency set (when i say "roughly" i mean it's the superset of the nearest
-// set). the `V` values returned by server contains the original version number
-// as well: it's a combination of the assigned version number of a `Put` value
-// and the nearest dependency set of that `Put`. that's why the `V` values sent
-// by client and sent (and stored) by server are named `deps` and `version_deps`
-// respectively
-// the `version_deps` is something added to the original work. it enables client
-// to learn about the nearest set of some version of a value in a verifiable way
-// (assuming `V` is verifiable). thus client can check whether the version of
-// values in the following replies consistent with this information, and reject
-// malicious replies that violate causal consistency
-// (at the same time, upon Put requests server also perform checks on submitted
-// `deps`, ensure that it will not be fooled by malicious client and end up in
-// an inconsistent state)
-// the modification is fully backward compatible to the original work. with the
-// trusted setup assumed by the original work, all the added checks will pass
-// and all the dependency checks upon receiving remote key synchronization will
-// return the same result as when in the original work the replica examines its
-// local storage against the received "nearest" set. notice that in this
-// implementation the "nearest" in synchronization messages are also replaced
-// with a `V` type just as in the `PutOk` messages and replica storage which
-// were mentioned above. in conclusion, although maintaining slightly different
-// states for tracking causal dependencies, this implementation maps to a strict
-// superset of the original work, with the additional ability of dealing with
-// arbitrary faulty participants (if paired with a capable `V`)
-// producing `V` typed value potentially takes long latency: it may require the
-// computational expensive incrementally verifiable computation, or asynchronous
-// network communication. so instead of inlined "version bumping" as in the
-// original work, a version service is extracted to asynchronously produce `V`
-// values. this incurs unnecessary overhead for the case that follows the
-// original work's setup (i.e. the referenced `DefaultVersion` implementation),
-// hopefully not critical (or even noticeable) since the work targets geological
-// replication scenario
-// the original work does not talk specifically about the causality policy of
-// the same key across sessions that are not temporarily overlapping with each
-// other. (it also only roughly mentioned the overlapping case i.e. the
-// "conflict resolving" procedure.) for the conflict-free scenario we assume an
-// incremental causality of each key: the causal dependencies of the old version
-// automatically carries to the new version. this policy is equivalent to the
-// original work as long as it ensure to sequentially synchronize all versions
-// of each key
+// the implementation is prepared for a security model that allows certain
+// arbitrary faulty behaviors, mostly related to the partial ordering properties
+// of the causal consistency (i.e. "causal+ consistency" in the original work).
+// the examples of such behaviors are:
+// * not passing down the complete causality information (i.e. `nearest` in the
+//   original work) to remote replicas, inducing them to violate the "execution
+//   thread" rule
+// * ignoring the `nearest` passed by the remote replicas, directly violate the
+//   "execution thread rule"
+// * replying client with malformed version numbers, violate the "gets from"
+//   rule
+// * passing malformed `nearest` to remote replicas that violates partial
+//   ordering properties e.g. the ver1 of key1 depends on the ver2 of key2, and
+//   the ver2 of key2 also depends on the ver1 of key1, leading remote replicas
+//   into deadlock
+// in response to these faulty behaviors, the extensively used version number in
+// the original work has been elaborated with necessary causality information,
+// maps into the `V` type in this implementation. the generic version type
+// allows the implementation to work with different versioning backends, each
+// with unique performance and security (regarding causality properties)
+// tradeoff, with a universal backbone protocol. the implementation requires
+// the version type to not only keep track of the generation of the key (i.e.
+// the original version number), but also the causal dependencies of the
+// generation i.e. it happens after what other `V`s. for example, while a
+// version number only says "ver2", a `V` value of key1 may say "ver2, which
+// happens after and only after ver1 of key2 and ver3 of key42", and the `V`
+// value of key42 may say "ver3, which happens after and only after ver1 of
+// key1", etc
+// (notice that we are implying a serial causality of versions of the same key.
+// this is aligned with the linearizability in local clusters that is assumed
+// by the original work, while the cross cluster conflict detection described
+// in the original work is out of scope)
+// in conclusion, `V` is assumed to be a general mechanism that can keep track
+// of causality among version numbers (and allow reasoning about it), with
+// additional feature that if ignoring the causality information it carries, it
+// can still be viewed as a plain version number as in the original work. so we
+// call it `version_deps` in this implementation
+// because of this additional feature, the version type can be a drop in
+// replacement of the original version number throughout the implementation,
+// with all the "version bumping" replaced with the "causality merging"
+// operation of the underlying `V` type (which corresponds to a
+// `Update`/`UpdateOk` event round in this codebase). additionally, the
+// `nearest` passed along in the asynchronous replication messages (i.e.
+// `SyncKey` in this implementation), whose sole purpose is to inform the
+// causality of the replicated key, can be omitted in the presence of `V`, as
+// long as we are working with a somehow whitebox `V` type allow us to inspect
+// the individual dependencies of keys in the `V` values (which corresponds to
+// `impl AsRef<OrdinaryVersion>` in this codebase)
+// (theoretically clients can do the same thing when issuing put requests, but
+// we assume that in our system setup only replicas can produce `V` values so
+// clients just echo back the `V` values previously replied by replicas.
+// nevertheless the `nearest` compaction technique can still be performed on
+// client side leveraging the partial ordering of `V`)
+// that said, migrating from plain version number to `V` may fundamentally
+// change performance features of the protocol still. after all the system keeps
+// track of more information; in the original work each storage node maintains a
+// key value store that is *assumed* to be causal consistent by the correctness
+// of the protocol and the belief of all storage nodes are correct, while in
+// this implementation at any time the state of a storage node always naturally
+// forms a proof of the causal consistency based on the verifiability of the
+// underlying `V`
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, HashMap, VecDeque},
@@ -604,6 +620,7 @@ impl<
 
 pub fn to_replica_on_buf<V: DeserializeOwned, A: DeserializeOwned>(
     buf: &[u8],
+    // applying difference security policy to messages received from clients and remote replicas
     sender: &mut impl SendReplicaRecvEvent<V, A>,
     sync_sender: &mut impl SendReplicaRecvEvent<V, A>,
 ) -> anyhow::Result<()> {

@@ -456,14 +456,10 @@ impl Verify<Crypto> for cops::GetOk<QuorumClock> {
 }
 
 impl<A: Addr> Verify<Crypto> for cops::Put<QuorumClock, A> {
-    // fn verify_clock(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()> {
-    //     for clock in self.deps.values() {
-    //         clock.verify(num_faulty, crypto)?
-    //     }
-    //     Ok(())
-    // }
-
-    fn verify_clock(&self, _: usize, _: &Crypto) -> anyhow::Result<()> {
+    fn verify_clock(&self, num_faulty: usize, crypto: &Crypto) -> anyhow::Result<()> {
+        for clock in self.deps.values() {
+            clock.verify(num_faulty, crypto)?
+        }
         Ok(())
     }
 }
@@ -891,9 +887,9 @@ pub mod impls {
 
     impl<A: Addr> Verify<()> for cops::Put<NitroEnclavesClock, A> {
         fn verify_clock(&self, _: usize, (): &()) -> anyhow::Result<()> {
-            // for clock in self.deps.values() {
-            //     clock.verify()?;
-            // }
+            for clock in self.deps.values() {
+                clock.verify()?;
+            }
             Ok(())
         }
     }
