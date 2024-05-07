@@ -2,10 +2,7 @@ use std::net::SocketAddr;
 
 use augustus::{
     app,
-    boson::{
-        self, nitro_enclaves_portal_session, NitroEnclavesClock, QuorumClient, QuorumClock,
-        VerifyClock,
-    },
+    boson::{self, nitro_enclaves_portal_session, NitroEnclavesClock, QuorumClient, QuorumClock},
     cops::OrdinaryVersion,
     event::{
         self,
@@ -20,7 +17,7 @@ use augustus::{
         Detach, Dispatch, IndexNet, InvokeNet,
     },
     pbft,
-    worker::{spawning_backend, Submit, Worker},
+    worker::{spawning_backend, Submit},
     workload::{events::InvokeOk, Queue},
 };
 use rand::thread_rng;
@@ -334,11 +331,16 @@ pub async fn quorum_session(
     let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
         Tcp::new(addr)?,
         {
+            // fixing the duplicated verification by removing this verification at all
+            // the causal net update local clock for every ingress clocked messages anyway, so if
+            // the message is malformed, causal net will fail to update local clock with it and
+            // correctly ignore it
             // let mut clocked_sender = VerifyQuorumClock::new(config.num_faulty, recv_crypto_worker);
-            let mut clocked_sender = VerifyClock::new(
-                config.num_faulty,
-                Worker::Inline(crypto.clone(), Sender::from(causal_net_session.sender())),
-            );
+            // let mut clocked_sender = VerifyClock::new(
+            //     config.num_faulty,
+            //     Worker::Inline(crypto.clone(), Sender::from(causal_net_session.sender())),
+            // );
+            let mut clocked_sender = Sender::from(causal_net_session.sender());
             let mut sender = Sender::from(processor_session.sender());
             move |buf: &_| lamport_mutex::verifiable::on_buf(buf, &mut clocked_sender, &mut sender)
         },
@@ -506,9 +508,6 @@ pub async fn nitro_enclaves_session(
     let mut dispatch_session = event::Session::new();
     let mut processor_session = Session::new();
     let mut causal_net_session = Session::new();
-    // verify clocked messages sent by other processors before they are received causal net
-    // a spawning backend may cause out of order receiving of messages from a remote processor
-    // hotfix by using inline worker instead, better solution desired
     // let (recv_crypto_worker, mut recv_crypto_executor) = spawning_backend();
     // sign Ordered messages
     let (processor_crypto_worker, mut processor_crypto_executor) = spawning_backend();
@@ -518,10 +517,11 @@ pub async fn nitro_enclaves_session(
         Tcp::new(addr)?,
         {
             // let mut clocked_sender = VerifyQuorumClock::new(config.num_faulty, recv_crypto_worker);
-            let mut clocked_sender = VerifyClock::new(
-                0,
-                Worker::Inline((), Sender::from(causal_net_session.sender())),
-            );
+            // let mut clocked_sender = VerifyClock::new(
+            //     0,
+            //     Worker::Inline((), Sender::from(causal_net_session.sender())),
+            // );
+            let mut clocked_sender = Sender::from(causal_net_session.sender());
             let mut sender = Sender::from(processor_session.sender());
             move |buf: &_| lamport_mutex::verifiable::on_buf(buf, &mut clocked_sender, &mut sender)
         },

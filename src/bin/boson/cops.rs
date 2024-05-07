@@ -43,15 +43,16 @@ fn create_workload(
     settings0.request_distr = ycsb::SettingsDistr::Uniform;
     settings0.field_count = 1;
     let mut workload0 = ycsb::Workload::new(StdRng::from_rng(&mut rng)?, settings0)?;
-    // workload0.key_num = ycsb::Gen::Uniform(Uniform::from(put_range));
-    workload0.key_num = ycsb::Gen::Uniform(Uniform::from(put_range.clone()));
+    workload0.key_num = ycsb::Gen::Uniform(Uniform::from(put_range));
+    // workload0.key_num = ycsb::Gen::Uniform(Uniform::from(put_range.clone()));
 
     let mut settings1 = ycsb::WorkloadSettings::new_c(record_count);
-    settings1.request_distr = ycsb::SettingsDistr::Uniform;
+    settings1.request_distr = ycsb::SettingsDistr::Zipfian;
     settings1.field_count = 1;
-    // let workload1 = ycsb::Workload::new(StdRng::from_rng(&mut rng)?, settings1)?;
-    let mut workload1 = ycsb::Workload::new(StdRng::from_rng(&mut rng)?, settings1)?;
-    workload1.key_num = ycsb::Gen::Uniform(Uniform::from(put_range));
+    // ensure that every workload C will skew toward the same keys
+    let workload1 = ycsb::Workload::new(StdRng::seed_from_u64(117418), settings1)?;
+    // let mut workload1 = ycsb::Workload::new(StdRng::from_rng(&mut rng)?, settings1)?;
+    // workload1.key_num = ycsb::Gen::Uniform(Uniform::from(put_range));
 
     anyhow::ensure!(put_ratio <= 0.5);
     Ok(Weighted2(
@@ -257,11 +258,7 @@ pub async fn pbft_server_session(
         )),
         pbft::ToClientMessageNet::new(dispatch::Net::from(dispatch_session.sender())),
         Box::new(pbft::CryptoWorker::from(crypto_worker))
-        // Box::new(pbft::CryptoWorker::from(augustus::worker::Worker::Inline(
-        //     crypto,
-        //     Sender::from(replica_session.sender()),
-        // ))) 
-        as Box<dyn Submit<Crypto, dyn pbft::SendCryptoEvent<SocketAddr>> + Send + Sync>,
+            as Box<dyn Submit<Crypto, dyn pbft::SendCryptoEvent<SocketAddr>> + Send + Sync>,
         num_replica,
         num_faulty,
     )));
@@ -301,7 +298,6 @@ pub async fn untrusted_client_session(
 
     let mut sessions = JoinSet::new();
     for _ in 0..num_concurrent {
-        // let tcp_listener = TcpListener::bind((ip, 0)).await?;
         let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?;
         let addr = SocketAddr::from((ip, tcp_listener.local_addr()?.port()));
         let workload = create_workload(
@@ -383,7 +379,6 @@ pub async fn untrusted_server_session(
     };
     let addr = addrs[id as usize];
 
-    // let tcp_listener = TcpListener::bind(addr).await?;
     let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], addr.port()))).await?;
     let mut dispatch_session = event::Session::new();
     let mut replica_session = Session::new();
@@ -428,14 +423,6 @@ pub async fn untrusted_server_session(
         result = dispatch_session => result?,
         result = replica_session => result?,
     }
-    // let mut sessions = JoinSet::new();
-    // sessions.spawn(tcp_accept_session);
-    // sessions.spawn(dispatch_session);
-    // sessions.spawn(replica_session);
-    // tokio::select! {
-    //     () = cancel.cancelled() => return Ok(()),
-    //     Some(result) = sessions.join_next() => result??,
-    // }
     anyhow::bail!("unreachable")
 }
 
@@ -443,6 +430,8 @@ pub async fn quorum_client_session(
     config: CopsClient,
     upcall: impl Clone + SendEvent<Vec<Duration>> + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
+    // the commented code is for verifying clocks
+    // don't have that much computation power on client side during evaluation
     // use augustus::crypto::peer::Crypto;
 
     let CopsClient {
@@ -554,9 +543,7 @@ pub async fn quorum_server_session(
     let addr = addrs[id as usize];
     let crypto = Crypto::new_random(&mut thread_rng());
 
-    // let tcp_listener = TcpListener::bind(addr).await?;
     let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], addr.port()))).await?;
-    // let clock_tcp_listener = TcpListener::bind((addr.ip(), 0)).await?;
     let clock_tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?;
     let clock_addr = SocketAddr::from((addr.ip(), clock_tcp_listener.local_addr()?.port()));
 
@@ -570,6 +557,10 @@ pub async fn quorum_server_session(
     let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
         Tcp::new(addr)?,
         {
+            // not verifying clocks from clients
+            // in current setup clients do not produce clock values, only echo back the ones
+            // previously replied by servers. assuming that would be easily (and trivially) verified
+            // with e.g. symmetrical encryption
             let mut sender = Sender::from(replica_session.sender());
             let mut sync_sender = VerifyClock::new(config.num_faulty, crypto_worker);
             move |buf: &_| cops::to_replica_on_buf(buf, &mut sender, &mut sync_sender)
@@ -632,6 +623,7 @@ pub async fn quorum_server_session(
     let tcp_accept_session = tcp::accept_session(tcp_listener, dispatch_session.sender());
     let clock_tcp_accept_session =
         tcp::accept_session(clock_tcp_listener, clock_dispatch_session.sender());
+    // a "background low priority task" for verifying clocks from remote replicas
     let mut crypto_session = tokio::task::spawn_blocking({
         let replica_session_sender = Sender::from(replica_session.sender());
         let crypto = crypto.clone();
@@ -691,7 +683,6 @@ pub async fn nitro_enclaves_client_session(
 
     let mut sessions = JoinSet::new();
     for index in 0..num_concurrent {
-        // let tcp_listener = TcpListener::bind((ip, 0)).await?;
         let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?;
         let addr = SocketAddr::from((ip, tcp_listener.local_addr()?.port()));
         let workload = create_workload(
@@ -784,7 +775,6 @@ pub async fn nitro_enclaves_server_session(
     };
     let addr = addrs[id as usize];
 
-    // let tcp_listener = TcpListener::bind(addr).await?;
     let tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], addr.port()))).await?;
 
     let mut dispatch_session = event::Session::new();
@@ -795,8 +785,8 @@ pub async fn nitro_enclaves_server_session(
     let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
         Tcp::new(addr)?,
         {
-            let mut sync_sender = VerifyClock::new(0, crypto_worker);
             let mut sender = Sender::from(replica_session.sender());
+            let mut sync_sender = VerifyClock::new(0, crypto_worker);
             move |buf: &_| cops::to_replica_on_buf(buf, &mut sender, &mut sync_sender)
         },
         Once(dispatch_session.sender()),

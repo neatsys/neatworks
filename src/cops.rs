@@ -179,7 +179,7 @@ impl<N, U, V, A> Client<N, U, V, A> {
 pub struct InvokeTimeout;
 
 impl InvokeTimeout {
-    const AFTER: Duration = Duration::from_millis(1000);
+    const AFTER: Duration = Duration::from_millis(2000);
 }
 
 impl<N: ClientNet<A, V>, U, V: Version, A: Addr> OnEvent<Invoke<ycsb::Op>> for Client<N, U, V, A> {
@@ -188,6 +188,14 @@ impl<N: ClientNet<A, V>, U, V: Version, A: Addr> OnEvent<Invoke<ycsb::Op>> for C
         Invoke(op): Invoke<ycsb::Op>,
         timer: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
+        // modelling client sessions with Poisson process that each of the events is whether the
+        // previous session ends now. this would give us exponential distributed session duration
+        // TODO adjustable end probability
+        use rand::Rng as _;
+        if rand::thread_rng().gen_bool(0.2) {
+            self.deps.clear()
+        }
+
         let key = match &op {
             ycsb::Op::Read(key) | ycsb::Op::Update(key, ..) => from_ycsb(key)?,
             _ => anyhow::bail!("unimplemented"),
@@ -201,11 +209,6 @@ impl<N: ClientNet<A, V>, U, V: Version, A: Addr> OnEvent<Invoke<ycsb::Op>> for C
         // Get/Get concurrent could be supported, maybe in future
         // the client will be driven by a close loop without concurrent invocation after all
         anyhow::ensure!(replaced.is_none(), "concurrent op");
-
-        use rand::Rng as _;
-        if rand::thread_rng().gen_bool(0.2) {
-            self.deps.clear()
-        }
 
         match op {
             ycsb::Op::Update(_, index, value) => {
@@ -296,9 +299,9 @@ impl<N, U, V, A> OnEvent<InvokeTimeout> for Client<N, U, V, A> {
         InvokeTimeout: InvokeTimeout,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        // anyhow::bail!("client timeout while working on {:?}", self.working_key)
-        warn!("client timeout while working on {:?}", self.working_key);
-        Ok(())
+        anyhow::bail!("client timeout while working on {:?}", self.working_key)
+        // warn!("client timeout while working on {:?}", self.working_key);
+        // Ok(())
     }
 }
 
@@ -397,14 +400,14 @@ impl<M: ReplicaCommon> OnEvent<Recv<Put<M::V, M::A>>>
         Recv(put): Recv<Put<M::V, M::A>>,
         _: &mut impl Timer<Self>,
     ) -> anyhow::Result<()> {
-        for (id, dep) in &put.deps {
+        for (key, dep) in &put.deps {
             if !self
                 .store
-                .get(id)
+                .get(key)
                 .map(|state| &state.version_deps)
                 .unwrap_or(&self.version_zero)
                 .as_ref()
-                .dep_cmp(dep.as_ref(), *id)
+                .dep_cmp(dep.as_ref(), *key)
                 .is_ge()
             {
                 warn!("malformed Put");
@@ -480,31 +483,32 @@ impl<M: ReplicaCommon> OnEvent<events::UpdateOk<M::V>>
 
 impl<M: ReplicaCommon> Replica<M::N, M::CN, M::VS, M::V, M::A, M> {
     fn can_sync(&self, sync_key: &SyncKey<M::V>) -> bool {
-        // for (id, version) in &sync_key.version_deps.as_ref().0 {
-        let id = &sync_key.key;
-        let version = &sync_key.version_deps.as_ref().0[id];
-        let local_version = self
-            .store
-            .get(id)
-            .and_then(|state| {
-                // the startup insertion
-                if state.version_deps.as_ref().is_genesis() {
-                    None
-                } else {
-                    Some(state.version_deps.as_ref().0[id])
-                }
-            })
-            .unwrap_or_default();
-        if *version
-            > if *id == sync_key.key {
+        for (key, remote_version) in &**sync_key.version_deps.as_ref() {
+            // TODO more efficient dependency check so can remove this filter
+            if *key != sync_key.key {
+                continue;
+            }
+            let local_version = self
+                .store
+                .get(key)
+                .and_then(|state| {
+                    // the startup insertion
+                    if state.version_deps.as_ref().is_genesis() {
+                        None
+                    } else {
+                        Some(state.version_deps.as_ref()[key])
+                    }
+                })
+                .unwrap_or_default();
+            let version = if *key == sync_key.key {
                 local_version + 1
             } else {
                 local_version
+            };
+            if *remote_version > version {
+                return false;
             }
-        {
-            return false;
         }
-        // }
         true
     }
 
@@ -517,7 +521,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::VS, M::V, M::A, M> {
                 state.pending_puts.is_empty(),
                 "conflicting Put across servers"
             );
-            anyhow::ensure!(sync_key.version_deps.as_ref().0.contains_key(&sync_key.key));
+            anyhow::ensure!(sync_key.version_deps.as_ref().contains_key(&sync_key.key));
             if !matches!(
                 sync_key
                     .version_deps
@@ -631,7 +635,9 @@ pub fn to_replica_on_buf<V: DeserializeOwned, A: DeserializeOwned>(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, Default, derive_more::Deref, Serialize, Deserialize,
+)]
 pub struct OrdinaryVersion(pub BTreeMap<KeyId, u32>);
 
 impl AsRef<OrdinaryVersion> for OrdinaryVersion {

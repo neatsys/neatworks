@@ -4,7 +4,7 @@
 // despite the module name, this code also covers the other aspects of the
 // original work, namely the logical clock definition and an abstraction of
 // causally ordered communication
-// (by the way, the module name is chosen to avoid using a too broad `mutex`)
+// (by the way, the module name is chosen to avoid using the too broad `mutex`)
 // the `Clock` here is not lamport clock. it's the abstraction of causality i.e.
 // the happens before relation, that specific implementation may or may not
 // guarantee to have false positive (through the `PartialOrd` interface)
@@ -18,7 +18,11 @@
 // last but not least, a modified version of the mutex protocol that is
 // prepared for tolerating arbitrary faulty behaviors is appended. check the
 // note below for details
-use std::{cmp::Ordering, collections::VecDeque, iter::repeat, mem::replace};
+use std::{
+    cmp::Ordering,
+    iter::repeat,
+    mem::{replace, take},
+};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -46,7 +50,7 @@ pub struct Clocked<M, C> {
 // it does not assign clock values for outgoing messages (so it does not impl
 // `SendMessage<_, _>`), just assign a sequence number for every incoming
 // message. the sequence number will be the same for the same message on every
-// recipient, as guaranteed by the relied replication protocol
+// recipient, as guaranteed by the underlying replication protocol
 // the clock value type i.e. `C` above is `u32`
 pub struct Replicated<E> {
     seq: u32,
@@ -97,20 +101,14 @@ impl<E: SendEvent<Recv<Clocked<M, u32>>>, M> SendEvent<Recv<M>> for Replicated<E
 pub struct Causal<E, CS, N, C, M> {
     clock: C,
     pending_recv: Option<PendingRecv<M, C>>,
-    // erasing address type
-    // this is definitely wrong, at least not right
-    // sadly i cannot think out any other thing that works by now
-    // even more sadly the message type is not erased completely: it still remains above
-    #[allow(clippy::type_complexity)]
-    pending_send: Vec<Box<dyn FnOnce(C, &mut N) -> anyhow::Result<()> + Send + Sync>>,
-
     recv_sender: E,
     clock_service: CS,
     net: N,
 }
 
 struct PendingRecv<M, C> {
-    messages: VecDeque<Clocked<M, C>>,
+    update_messages: Vec<Clocked<M, C>>,
+    messages: Vec<Clocked<M, C>>,
     slow_update: TimerId,
 }
 
@@ -123,7 +121,6 @@ impl<E, CS: SendEvent<Update<C>>, N, C: Clone, M> Causal<E, CS, N, C, M> {
             clock_service,
             net,
             pending_recv: None,
-            pending_send: Default::default(),
         })
     }
 }
@@ -134,10 +131,11 @@ impl<E, CS: SendEvent<Update<C>>, N, C: Clone, M> OnEvent<Init> for Causal<E, CS
     fn on_event(&mut self, Init: Init, timer: &mut impl Timer) -> anyhow::Result<()> {
         let update = Update {
             prev: self.clock.clone(),
-            remote: self.clock.clone(),
+            remotes: Default::default(),
         };
         self.clock_service.send(update)?;
         self.pending_recv = Some(PendingRecv {
+            update_messages: Default::default(),
             messages: Default::default(),
             slow_update: timer.set(SLOW_UPDATE_DURATION)?,
         });
@@ -145,8 +143,8 @@ impl<E, CS: SendEvent<Update<C>>, N, C: Clone, M> OnEvent<Init> for Causal<E, CS
     }
 }
 
-impl<E: SendEvent<Recv<Clocked<M, C>>>, CS: SendEvent<Update<C>>, N, C: Clone, M>
-    OnEvent<Recv<Clocked<M, C>>> for Causal<E, CS, N, C, M>
+impl<E, CS: SendEvent<Update<C>>, N, C: Clone, M> OnEvent<Recv<Clocked<M, C>>>
+    for Causal<E, CS, N, C, M>
 {
     fn on_event(
         &mut self,
@@ -154,21 +152,20 @@ impl<E: SendEvent<Recv<Clocked<M, C>>>, CS: SendEvent<Update<C>>, N, C: Clone, M
         timer: &mut impl Timer,
     ) -> anyhow::Result<()> {
         if let Some(pending_recv) = &mut self.pending_recv {
-            pending_recv.messages.push_back(clocked);
+            pending_recv.messages.push(clocked);
             return Ok(());
         }
-        anyhow::ensure!(self.pending_send.is_empty());
+        let clock = clocked.clock.clone();
         self.pending_recv = Some(PendingRecv {
+            update_messages: vec![clocked],
             messages: Default::default(),
             slow_update: timer.set(SLOW_UPDATE_DURATION)?,
         });
         let update = Update {
             prev: self.clock.clone(),
-            remote: clocked.clock.clone(),
+            remotes: vec![clock],
         };
-        self.clock_service.send(update)?;
-
-        self.recv_sender.send(Recv(clocked))
+        self.clock_service.send(update)
     }
 }
 
@@ -182,21 +179,19 @@ impl<
     > SendMessage<A, M> for Causal<E, CS, N, C, M>
 {
     fn send(&mut self, dest: A, message: M) -> anyhow::Result<()> {
-        let send = move |clock, net: &mut N| {
-            let clocked = Clocked {
-                inner: message,
-                clock,
-            };
-            net.send(dest, clocked)
+        // anyhow::ensure!(!self.clock.is_genesis());
+        let clocked = Clocked {
+            inner: message,
+            clock: self.clock.clone(),
         };
-        if self.pending_recv.is_some() {
-            self.pending_send.push(Box::new(send))
-        } else {
-            send(self.clock.clone(), &mut self.net)?
-        }
-        Ok(())
+        self.net.send(dest, clocked)
     }
 }
+
+// TODO if some clocks in Update is malformed, clock service will silently
+// ignore the Update, leaving Causal gets stuck on waiting UpdateOk forever
+// probably need to work on clock service side as well to solve, but that is
+// not on fast path so also not on my work schedule
 
 impl<E: SendEvent<Recv<Clocked<M, C>>>, M, CS: SendEvent<Update<C>>, N, C: Clock>
     OnEvent<UpdateOk<C>> for Causal<E, CS, N, C, M>
@@ -214,22 +209,32 @@ impl<E: SendEvent<Recv<Clocked<M, C>>>, M, CS: SendEvent<Update<C>>, N, C: Clock
         let Some(pending_recv) = &mut self.pending_recv else {
             anyhow::bail!("missing pending recv queue")
         };
-        if let Some(clocked) = pending_recv.messages.pop_front() {
+        // some very neat (but obscure) pipelining :)
+        for message in replace(
+            &mut pending_recv.update_messages,
+            take(&mut pending_recv.messages),
+        ) {
+            anyhow::ensure!(matches!(
+                self.clock.partial_cmp(&message.clock),
+                Some(Ordering::Greater)
+            ));
+            self.recv_sender.send(Recv(message))?
+        }
+        if pending_recv.update_messages.is_empty() {
+            timer.unset(self.pending_recv.take().unwrap().slow_update)
+        } else {
             let update = Update {
                 prev: self.clock.clone(),
-                remote: clocked.clock.clone(),
+                remotes: pending_recv
+                    .update_messages
+                    .iter()
+                    .map(|message| message.clock.clone())
+                    .collect(),
             };
             self.clock_service.send(update)?;
-            self.recv_sender.send(Recv(clocked))?;
             let slow_update = timer.set(SLOW_UPDATE_DURATION)?;
-            timer.unset(replace(&mut pending_recv.slow_update, slow_update))?;
-        } else {
-            timer.unset(self.pending_recv.take().unwrap().slow_update)?
+            timer.unset(replace(&mut pending_recv.slow_update, slow_update))
         }
-        for send in self.pending_send.drain(..) {
-            send(self.clock.clone(), &mut self.net)?
-        }
-        Ok(())
     }
 }
 
@@ -253,7 +258,7 @@ impl<E, CS, N, C, M> OnTimer for Causal<E, CS, N, C, M> {
 
 pub struct Update<C> {
     pub prev: C,
-    pub remote: C,
+    pub remotes: Vec<C>,
 }
 
 pub struct UpdateOk<C>(pub C);
@@ -272,12 +277,15 @@ impl<E: SendEvent<UpdateOk<LamportClock>>> SendEvent<Update<LamportClock>> for L
     fn send(&mut self, update: Update<LamportClock>) -> anyhow::Result<()> {
         // IR2. (b) upon receiving a message m, process P_j sets C_j greater than or equal to its
         // present value and greater than T_m
-        // this would sound like `update.prev.max(update.remote + 1)`, but the definition of
+        // this would sound like `max(update.prev, max(update.remotes) + 1)`, but the definition of
         // `Update` is to "return the clock value of the event happens after observing `remote`
         // based on `prev`", so there is actually an implicit IR1 follows
         // IR1. Each process P_i increments C_i between any two successive events.
-        // and this would be a little bit optimization over the naive `_.max(_ + 1) + 1`
-        let counter = update.prev.max(update.remote) + 1;
+        // and this would be a little bit simplification over the naive `max(_, max(_) + 1) + 1`
+        let counter = update
+            .prev
+            .max(update.remotes.into_iter().max().unwrap_or_default())
+            + 1;
         self.0.send(UpdateOk(counter))
     }
 }

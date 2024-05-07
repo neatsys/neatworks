@@ -248,22 +248,23 @@ impl Gen {
         Ok(match distr {
             SettingsDistr::Constant => Self::Constant(n),
             SettingsDistr::Uniform => Self::Uniform(Uniform::new(0, n)),
-            SettingsDistr::Zipfian if scrambled => {
+            // according to https://stackoverflow.com/a/41448684 upstream's `ZipfianGenerator`
+            // effectively set this `s` parameter (and the `a` parameter of `Zeta::new` below) to
+            // 100
+            // however during testing, that results in only `min` i.e. 1 is ever yielded that means
+            // only single key will ever be accessed, which hardly be expected
+            // while tuning the parameter, i realize the absolute number of different values that
+            // will be yielded is controlled solely by this parameter, not by e.g. `n`
+            // yet to investigate into this, but suspect the hotspot distribution is to solve this
+            // issue
+            SettingsDistr::Zipfian if !scrambled => Self::Zipf(Zipf::new(n as _, 100.)?),
+            SettingsDistr::Zipfian => {
                 Self::ScrambledZipf(GenScrambledZipf {
                     min: 0, // only for key chooser
                     item_count: n,
-                    // according to https://stackoverflow.com/a/41448684 upstream's
-                    // `ZipfianGenerator` effectively set this `a` parameter to 100
-                    // however during testing, that results in only `min` i.e. 1 is ever yielded
-                    // that means only single key will every be accessed, which hardly be expected
-                    // while tuning the parameter, i realize the absolute number of different values
-                    // that will be yielded is controlled solely by this parameter, not by e.g. `n`
-                    // yet to investigate into this, but suspect the hotspot distribution is to
-                    // solve this issue
-                    zeta: Zeta::new(6.)?,
+                    zeta: Zeta::new(100.)?,
                 })
             }
-            SettingsDistr::Zipfian => Self::Zipf(Zipf::new(n as _, 6.)?),
             SettingsDistr::Latest => anyhow::bail!("unimplemented"),
         })
     }

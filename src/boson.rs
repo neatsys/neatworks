@@ -29,7 +29,7 @@ pub struct Lamport<E>(pub E, pub u8);
 impl<E: SendEvent<Update<C>>, C> SendEvent<lamport_mutex::events::Update<C>> for Lamport<E> {
     fn send(&mut self, update: lamport_mutex::Update<C>) -> anyhow::Result<()> {
         self.0
-            .send(Update(update.prev, vec![update.remote], self.1 as _))
+            .send(Update(update.prev, update.remotes, self.1 as _))
     }
 }
 
