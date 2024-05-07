@@ -49,8 +49,8 @@ async fn main() -> anyhow::Result<()> {
                 client.clone(),
                 &regions,
                 RequestMode::All,
-                Variant::Replicated,
-                10,
+                Variant::NitroEnclaves,
+                12,
             )
             .await?;
             Ok(())
@@ -66,24 +66,22 @@ async fn main() -> anyhow::Result<()> {
                 Variant::Quorum,
                 Variant::NitroEnclaves,
             ] {
-                for n in 1..=20 {
-                    mutex_session(client.clone(), &regions, RequestMode::One, variant, n).await?
-                }
-            }
-            for variant in [
-                Variant::Quorum,
-                Variant::NitroEnclaves,
-                Variant::Replicated,
-                Variant::Untrusted,
-            ] {
                 for n in match variant {
                     Variant::Replicated => 1..=10,
                     Variant::NitroEnclaves => 1..=12,
                     _ => 1..=16,
-                }
-                .rev()
-                {
+                } {
                     mutex_session(client.clone(), &regions, RequestMode::All, variant, n).await?
+                }
+            }
+            for variant in [
+                Variant::Untrusted,
+                Variant::Replicated,
+                Variant::Quorum,
+                Variant::NitroEnclaves,
+            ] {
+                for n in 1..=16 {
+                    mutex_session(client.clone(), &regions, RequestMode::One, variant, n).await?
                 }
             }
             Ok(())
@@ -165,9 +163,16 @@ async fn mutex_session(
             region
                 .mutex
                 .iter()
+                .take(num_region_processor)
                 .map(|instance| SocketAddr::from((instance.public_ip, 4000))),
         );
-        urls.extend(region.mutex.iter().map(Instance::url));
+        urls.extend(
+            region
+                .mutex
+                .iter()
+                .take(num_region_processor)
+                .map(Instance::url),
+        );
         clock_addrs.extend(
             region
                 .quorum
@@ -256,10 +261,12 @@ async fn mutex_session(
                 .await??
             }
         }
-        // i == 0 for 1. warm up network stack 2. map based clocks has smaller data size which
-        // causes abnormal result
-        // i == 1 just not work well when Variant == Quorum and 16 region processors, not sure why
-        if i >= 2 {
+        // i == 0 for
+        // * warm up network stack
+        //   * connect backoff slow things down
+        //   * connect backoff destroys synchronization barrier which may speed things up = =
+        // * map based clocks has smaller data size which may get abnormally faster
+        if i >= 0 {
             for duration in Arc::into_inner(out).unwrap().into_inner()? {
                 writeln!(
                     &mut lines,

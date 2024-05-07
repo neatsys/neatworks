@@ -45,9 +45,9 @@ module "mutex" {
 
   network = module.network
   state   = var.state
-  type    = "c5a.2xlarge"
+  type    = "c5a.xlarge"
   ami     = data.aws_ami.al2023.id
-  n       = 20
+  n       = 16
 }
 
 module "cops" {

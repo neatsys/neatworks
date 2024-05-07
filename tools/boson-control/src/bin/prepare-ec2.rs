@@ -16,7 +16,7 @@ async fn main() -> anyhow::Result<()> {
         + if is_cops {
             " && echo -e \"---\nmemory_mib: 2048\\ncpu_count: 24\" | sudo tee /etc/nitro_enclaves/allocator.yaml"
         } else {
-            " && echo -e \"---\nmemory_mib: 2048\\ncpu_count: 4\" | sudo tee /etc/nitro_enclaves/allocator.yaml"
+            " && echo -e \"---\nmemory_mib: 2048\\ncpu_count: 2\" | sudo tee /etc/nitro_enclaves/allocator.yaml"
         }
         + " && sudo systemctl restart nitro-enclaves-allocator.service"
         + " && sudo sysctl -w net.core.somaxconn=20000";

@@ -38,7 +38,7 @@ pub trait Buf: AsRef<[u8]> + Into<Vec<u8>> + Send + Sync + Clone + From<Vec<u8>>
 // not blanket impl here because we further require `Buf` to be "cheaply" cloned
 impl Buf for bytes::Bytes {}
 
-const MAX_BUF_LEN: usize = 1 << 20; // hard limit of single serialized message
+const MAX_BUF_LEN: usize = 16 << 20; // hard limit of single serialized message
 
 // terms about nets that used in this codebase
 // raw net: implementation of `SendMessage<_, impl Buf>`

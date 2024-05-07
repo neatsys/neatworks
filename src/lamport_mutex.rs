@@ -225,6 +225,7 @@ impl<E: SendEvent<Recv<Clocked<M, C>>>, M, CS: SendEvent<Update<C>>, N, C: Clock
         } else {
             let update = Update {
                 prev: self.clock.clone(),
+                // TODO filter out clocks that happens before some others?
                 remotes: pending_recv
                     .update_messages
                     .iter()
