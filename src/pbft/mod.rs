@@ -949,7 +949,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
             return Ok(());
         };
         assert!(log_entry.commits.is_empty());
-        if log_entry.prepares.is_empty() {
+        if log_entry.prepares.is_empty() && self.num_replica != 1 {
             return Ok(()); // shortcut: probably safe to commit as well
         }
 
