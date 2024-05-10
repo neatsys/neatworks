@@ -51,6 +51,11 @@ variable "mode" {
   }
 }
 
+variable "throughput" {
+  type    = bool
+  default = false
+}
+
 data "aws_ami" "al2023" {
   provider = aws.control
 
@@ -95,11 +100,13 @@ module "microbench_quorum" {
   network = module.microbench_network
   ami     = data.aws_ami.al2023.id
   state   = var.state
-  n       = 10
+  type    = var.throughput ? "c5a.16xlarge" : "t3.micro"
+  n       = var.throughput ? 2 : 10
 }
 
 module "ap" {
   source = "./region"
+  count = var.mode == "microbench" ? 0 : 1
   providers = {
     aws = aws.ap
   }
@@ -110,6 +117,7 @@ module "ap" {
 
 module "us" {
   source = "./region"
+  count = var.mode == "microbench" ? 0 : 1
   providers = {
     aws = aws.us
   }
@@ -120,6 +128,7 @@ module "us" {
 
 module "eu" {
   source = "./region"
+  count = var.mode == "microbench" ? 0 : 1
   providers = {
     aws = aws.eu
   }
@@ -130,6 +139,7 @@ module "eu" {
 
 module "sa" {
   source = "./region"
+  count = var.mode == "microbench" ? 0 : 1
   providers = {
     aws = aws.sa
   }
@@ -140,6 +150,7 @@ module "sa" {
 
 module "af" {
   source = "./region"
+  count = var.mode == "microbench" ? 0 : 1
   providers = {
     aws = aws.af
   }
@@ -152,12 +163,12 @@ output "instances" {
   value = {
     microbench        = module.microbench.instances
     microbench_quorum = flatten(module.microbench_quorum[*].instances)
-    regions = {
-      ap = module.ap.instances
-      us = module.us.instances
-      eu = module.eu.instances
-      sa = module.sa.instances
-      af = module.af.instances
+    regions = var.mode == "microbench" ? {} : {
+      ap = module.ap[0].instances
+      us = module.us[0].instances
+      eu = module.eu[0].instances
+      sa = module.sa[0].instances
+      af = module.af[0].instances
     }
   }
 }

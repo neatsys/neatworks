@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
         .timeout(Duration::from_millis(1500))
         .build()?;
     let item = std::env::args().nth(1);
-    let output = terraform_output().await?;
+    let mut output = terraform_output().await?;
     let regions = output.regions;
     match item.as_deref() {
         Some("test-mutex") => {
@@ -91,9 +91,32 @@ async fn main() -> anyhow::Result<()> {
             // TODO
             Ok(())
         }
-        Some("quorum") => {
-            let mut microbench = output.microbench;
-            bench_quorum_session(client, microbench.remove(0), output.microbench_quorum).await
+        Some("microbench") => {
+            let instance = output.microbench.remove(0);
+            let status = Command::new("cargo")
+                .args([
+                    "build",
+                    "--profile",
+                    "artifact",
+                    "--example",
+                    "boson-bench-clock",
+                    "--features",
+                    "nitro-enclaves",
+                ])
+                .status()
+                .await?;
+            anyhow::ensure!(status.success());
+            let status = Command::new("rsync")
+                .arg("target/artifact/examples/boson-bench-clock")
+                .arg(format!("ec2-user@{}:", instance.public_dns))
+                .status()
+                .await?;
+            anyhow::ensure!(status.success());
+            for num_cpu in [2, 4, 8].into_iter().chain((16..=32).step_by(4)) {
+                bench_nitro_enclaves_session(instance.clone(), num_cpu, Some(100)).await?;
+            }
+            // bench_quorum_session(client, microbench.remove(0), output.microbench_quorum).await
+            Ok(())
         }
         _ => Ok(()),
     }
@@ -550,6 +573,85 @@ async fn cops_client_session(
     }
 }
 
+async fn bench_nitro_enclaves_session(
+    instance: Instance,
+    num_cpu: usize,
+    num_concurrent: Option<usize>,
+) -> anyhow::Result<()> {
+    let status = Command::new("ssh")
+        .arg(format!("ec2-user@{}", instance.public_dns))
+        .arg(
+            format!("echo -e \"---\nmemory_mib: 2048\\ncpu_count: {num_cpu}\" | sudo tee /etc/nitro_enclaves/allocator.yaml")
+            + " && sudo systemctl restart nitro-enclaves-allocator.service"
+            + &format!(" && nitro-cli run-enclave --cpu-count {num_cpu} --memory 2048 --enclave-cid 16 --eif-path app.eif")
+        )
+        .status()
+        .await?;
+    anyhow::ensure!(status.success());
+    let child = Command::new("ssh")
+        .arg(format!("ec2-user@{}", instance.public_dns))
+        .arg(format!("./boson-bench-clock"))
+        .stdout(Stdio::piped())
+        .spawn()?;
+    sleep(Duration::from_millis(1200)).await;
+    let config = boson_control_messages::Microbench {
+        variant: boson_control_messages::Variant::NitroEnclaves,
+        ip: instance.public_ip,
+        num_concurrent,
+    };
+    let buf = serde_json::to_vec(&config)?;
+    TcpStream::connect((&*instance.public_dns, 3000))
+        .await?
+        .write_all(&buf)
+        .await?;
+    let output = child.wait_with_output().await?;
+    anyhow::ensure!(output.status.success());
+    let status = Command::new("ssh")
+        .arg(format!("ec2-user@{}", instance.public_dns))
+        .arg(
+            String::from("nitro-cli terminate-enclave --all")
+                + " && sudo systemctl stop nitro-enclaves-allocator.service"
+                + " && sudo chcpu -e 1-63",
+        )
+        .status()
+        .await?;
+    anyhow::ensure!(status.success());
+    let lines = String::from_utf8(output.stdout)?
+        .lines()
+        .filter_map(|line| {
+            if line.trim().is_empty() {
+                None
+            } else {
+                Some(format!(
+                    "NitroEnclaves,{num_cpu},{}{line}",
+                    num_concurrent.map(|n| format!("{n},")).unwrap_or_default()
+                ))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let path = format!(
+        "tools/boson-control/notebooks/clock-{}/",
+        if num_concurrent.is_some() {
+            "throughput"
+        } else {
+            "latency"
+        }
+    );
+    let path = Path::new(&path);
+    create_dir_all(path).await?;
+    write(
+        path.join(format!(
+            "{}.txt",
+            SystemTime::UNIX_EPOCH.elapsed()?.as_secs()
+        )),
+        lines,
+    )
+    .await?;
+    Ok(())
+}
+
 async fn bench_quorum_session(
     client: reqwest::Client,
     instance: Instance,
@@ -587,7 +689,7 @@ async fn bench_quorum_session(
         }
 
         while_ok(&mut watchdog_sessions, async {
-            let command = Command::new("ssh")
+            let child = Command::new("ssh")
                 .arg(format!("ec2-user@{}", instance.public_dns))
                 .arg(format!("./boson-bench-clock quorum {}", instance.public_ip))
                 .stdout(Stdio::piped())
@@ -598,7 +700,7 @@ async fn bench_quorum_session(
                 .await?
                 .write_all(&buf)
                 .await?;
-            let output = command.wait_with_output().await?;
+            let output = child.wait_with_output().await?;
             anyhow::ensure!(output.status.success());
             lines.extend(output.stdout);
             anyhow::Ok(())

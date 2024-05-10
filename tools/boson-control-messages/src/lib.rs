@@ -61,6 +61,13 @@ pub struct QuorumServer {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CopsClientOk(#[serde(with = "histogram_serialization")] pub Histogram<u64>);
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Microbench {
+    pub variant: Variant,
+    pub ip: IpAddr,
+    pub num_concurrent: Option<usize>,
+}
+
 mod histogram_serialization {
     use hdrhistogram::{
         serialization::{Deserializer, Serializer, V2Serializer},

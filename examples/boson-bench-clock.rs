@@ -1,9 +1,8 @@
 use std::{
-    env::args,
     fmt::Write,
     future::pending,
-    net::SocketAddr,
-    time::{Duration, SystemTime},
+    net::{IpAddr, SocketAddr},
+    time::Duration,
 };
 
 use augustus::{
@@ -26,33 +25,26 @@ use augustus::{
     },
     worker::{spawning_backend, Submit},
 };
-use boson_control_messages::Quorum;
+use boson_control_messages::{Microbench, Quorum, Variant};
 use rand::thread_rng;
 use tokio::{
-    fs::write,
     io::AsyncReadExt as _,
     net::TcpListener,
     sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-    time::{sleep, Instant},
+    time::{sleep, timeout, Instant},
 };
 
 const CID: u32 = 16;
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    enum Variant {
-        NitroEnclaves,
-        Quorum,
-    }
-    let variant = args().nth(1);
-    let variant = match variant.as_deref() {
-        Some("nitro-enclaves") => Variant::NitroEnclaves,
-        Some("quorum") => Variant::Quorum,
-        _ => anyhow::bail!("unimplemented"),
-    };
+    let (mut stream, _) = TcpListener::bind("0.0.0.0:3000").await?.accept().await?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await?;
 
-    let now = SystemTime::UNIX_EPOCH.elapsed().unwrap().as_secs();
-    let (portal_session, session) = match variant {
+    let config = serde_json::from_slice::<Microbench>(&buf)?;
+
+    let (portal_session, session) = match config.variant {
         Variant::NitroEnclaves => {
             let (update_sender, update_receiver) = unbounded_channel();
             let (update_ok_sender, mut update_ok_receiver) = unbounded_channel::<UpdateOk<_>>();
@@ -76,41 +68,49 @@ async fn main() -> anyhow::Result<()> {
                         Ok(())
                     };
                     let mut lines = String::new();
-                    for size in (0..=16).step_by(2).map(|n| 1 << n) {
-                        bench_session(
-                            size,
-                            0,
-                            &update_sender,
-                            &mut update_ok_receiver,
-                            verify,
-                            &mut lines,
-                        )
-                        .await?
-                    }
-                    for num_merged in 0..=15 {
-                        bench_session(
+                    if let Some(num_concurrent) = config.num_concurrent {
+                        stress_bench_session(
                             1 << 10,
-                            num_merged,
+                            0,
+                            num_concurrent,
                             &update_sender,
                             &mut update_ok_receiver,
-                            verify,
                             &mut lines,
                         )
-                        .await?
+                        .await?;
+                        println!("{lines}")
+                    } else {
+                        for size in (0..=16).step_by(2).map(|n| 1 << n) {
+                            bench_session(
+                                size,
+                                0,
+                                &update_sender,
+                                &mut update_ok_receiver,
+                                verify,
+                                &mut lines,
+                            )
+                            .await?
+                        }
+                        for num_merged in 0..=15 {
+                            bench_session(
+                                1 << 10,
+                                num_merged,
+                                &update_sender,
+                                &mut update_ok_receiver,
+                                verify,
+                                &mut lines,
+                            )
+                            .await?
+                        }
+                        println!("{lines}")
                     }
-                    write(format!("clock-nitro-enclaves-{now}.txt",), lines).await?;
                     anyhow::Ok(())
                 }),
             )
         }
-        Variant::Quorum => {
-            let (mut stream, _) = TcpListener::bind("0.0.0.0:3000").await?.accept().await?;
-            let mut buf = Vec::new();
-            stream.read_to_end(&mut buf).await?;
-
-            let config = serde_json::from_slice::<Quorum>(&buf)?;
+        Variant::Quorum(quorum_config) => {
             let crypto = Crypto::new_random(&mut thread_rng());
-            let num_faulty = config.num_faulty;
+            let num_faulty = quorum_config.num_faulty;
             let (update_sender, update_receiver) = unbounded_channel();
             let (update_ok_sender, mut update_ok_receiver) = unbounded_channel::<UpdateOk<_>>();
             tokio::spawn({
@@ -122,7 +122,8 @@ async fn main() -> anyhow::Result<()> {
             });
             (
                 tokio::spawn(quorum_client_session(
-                    config,
+                    quorum_config,
+                    config.ip,
                     crypto.clone(),
                     update_receiver,
                     update_ok_sender,
@@ -175,6 +176,7 @@ async fn main() -> anyhow::Result<()> {
                 }),
             )
         }
+        _ => anyhow::bail!("unimplemented"),
     };
     'select: {
         tokio::select! {
@@ -215,22 +217,58 @@ where
         eprintln!("{size:8} {num_merged:3} {elapsed:?}");
         writeln!(lines, "{size},{num_merged},{}", elapsed.as_secs_f32())?;
         verify(clock)?
-        // let document = clock.verify()?;
-        // anyhow::ensure!(document.is_some())
     }
+    Ok(())
+}
+
+async fn stress_bench_session<C: TryFrom<OrdinaryVersion> + Clone + Send + Sync + 'static>(
+    size: usize,
+    num_merged: usize,
+    num_concurrent: usize,
+    update_sender: &UnboundedSender<Update<C>>,
+    update_ok_receiver: &mut UnboundedReceiver<UpdateOk<C>>,
+    lines: &mut String,
+) -> anyhow::Result<()>
+where
+    C::Error: Into<anyhow::Error>,
+{
+    let clock = C::try_from(OrdinaryVersion((0..size).map(|i| (i as _, 0)).collect()))
+        .map_err(Into::into)?;
+    for i in 0..num_concurrent {
+        update_sender.send(Update(clock.clone(), Default::default(), i as _))?;
+    }
+    let mut count = 0;
+    let close_loops_session = async {
+        while let Some((id, clock)) = update_ok_receiver.recv().await {
+            count += 1;
+            let update = Update(clock.clone(), vec![clock.clone(); num_merged], id);
+            update_sender.send(update)?
+        }
+        anyhow::Ok(())
+    };
+    match timeout(Duration::from_secs(10), close_loops_session).await {
+        Err(_) => {}
+        Ok(result) => {
+            result?;
+            anyhow::bail!("unreachable")
+        }
+    }
+    eprintln!("concurrent {num_concurrent} count {count}");
+    writeln!(
+        lines,
+        "{size},{num_merged},{num_concurrent},{}",
+        count as f32 / 10.
+    )?;
     Ok(())
 }
 
 async fn quorum_client_session(
     config: Quorum,
+    ip: IpAddr,
     crypto: Crypto,
     mut update_receiver: UnboundedReceiver<Update<QuorumClock>>,
     update_ok_sender: UnboundedSender<UpdateOk<QuorumClock>>,
 ) -> anyhow::Result<()> {
-    let ip = args()
-        .nth(2)
-        .ok_or(anyhow::format_err!("missing ip"))?
-        .parse()?;
     let clock_tcp_listener = TcpListener::bind(SocketAddr::from(([0; 4], 0))).await?;
     let clock_addr = SocketAddr::new(ip, clock_tcp_listener.local_addr()?.port());
 
