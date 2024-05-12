@@ -15,7 +15,7 @@ async fn instance_session(host: String, is_cops: bool) -> anyhow::Result<()> {
     } else {
         "nitro-cli run-enclave --cpu-count 2 --memory 2048 --enclave-cid 16 --eif-path app.eif"
     };
-    boson_control::ssh(&host, command).await
+    cover_control::ssh(&host, command).await
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -23,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
     let arg = args().nth(1);
     let is_cops = arg.as_deref() == Some("cops");
 
-    let output = boson_control::terraform_output().await?;
+    let output = cover_control::terraform_output().await?;
     let mut sessions = JoinSet::new();
     for instance in output
         .regions

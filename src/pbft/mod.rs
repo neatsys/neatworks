@@ -541,7 +541,7 @@ impl<M: ReplicaCommon> OnEvent<(Signed<PrePrepare>, Vec<Request<M::A>>)>
         if self.num_replica == 1 {
             let commit = Commit {
                 view_num: self.view_num,
-                op_num: op_num,
+                op_num,
                 digest,
                 replica_id: self.id,
             };

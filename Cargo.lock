@@ -150,8 +150,8 @@ dependencies = [
  "axum",
  "bincode",
  "blake2",
- "boson-control-messages",
  "bytes",
+ "cover-control-messages",
  "crossbeam-queue",
  "derive-where",
  "derive_more",
@@ -404,29 +404,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "boson-control"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "boson-control-messages",
- "hdrhistogram",
- "rand",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "boson-control-messages"
-version = "0.1.0"
-dependencies = [
- "hdrhistogram",
- "serde",
-]
-
-[[package]]
 name = "bumpalo"
 version = "3.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -547,6 +524,29 @@ name = "core-foundation-sys"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06ea2b9bc92be3c2baa9334a323ebca2d6f074ff852cd1d7b11064035cd3868f"
+
+[[package]]
+name = "cover-control"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cover-control-messages",
+ "hdrhistogram",
+ "rand",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "cover-control-messages"
+version = "0.1.0"
+dependencies = [
+ "hdrhistogram",
+ "serde",
+]
 
 [[package]]
 name = "cpufeatures"

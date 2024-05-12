@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use augustus::{
     app,
-    boson::{self, nitro_enclaves_portal_session, NitroEnclavesClock, QuorumClient, QuorumClock},
+    cover::{self, nitro_enclaves_portal_session, NitroEnclavesClock, QuorumClient, QuorumClock},
     cops::OrdinaryVersion,
     event::{
         self,
@@ -41,17 +41,17 @@ pub enum Event {
 }
 
 pub async fn untrusted_session(
-    config: boson_control_messages::Mutex,
+    config: cover_control_messages::Mutex,
     mut events: UnboundedReceiver<Event>,
     upcall: impl SendEvent<RequestOk> + Send + Sync + 'static,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     use lamport_mutex::Processor;
 
-    let boson_control_messages::Mutex {
+    let cover_control_messages::Mutex {
         id,
         addrs,
-        variant: boson_control_messages::Variant::Untrusted,
+        variant: cover_control_messages::Variant::Untrusted,
         ..
     } = config
     else {
@@ -135,7 +135,7 @@ pub async fn untrusted_session(
 }
 
 pub async fn replicated_session(
-    config: boson_control_messages::Mutex,
+    config: cover_control_messages::Mutex,
     mut events: UnboundedReceiver<Event>,
     upcall: impl SendEvent<RequestOk> + Send + Sync + 'static,
     cancel: CancellationToken,
@@ -145,10 +145,10 @@ pub async fn replicated_session(
         lamport_mutex::Processor,
     };
 
-    let boson_control_messages::Mutex {
+    let cover_control_messages::Mutex {
         id,
         addrs,
-        variant: boson_control_messages::Variant::Replicated(config),
+        variant: cover_control_messages::Variant::Replicated(config),
         ..
     } = config
     else {
@@ -288,7 +288,7 @@ pub async fn replicated_session(
 }
 
 pub async fn quorum_session(
-    config: boson_control_messages::Mutex,
+    config: cover_control_messages::Mutex,
     mut events: UnboundedReceiver<Event>,
     upcall: impl SendEvent<RequestOk> + Send + Sync + 'static,
     cancel: CancellationToken,
@@ -298,10 +298,10 @@ pub async fn quorum_session(
         lamport_mutex::verifiable::Processor,
     };
 
-    let boson_control_messages::Mutex {
+    let cover_control_messages::Mutex {
         id,
         addrs,
-        variant: boson_control_messages::Variant::Quorum(config),
+        variant: cover_control_messages::Variant::Quorum(config),
         num_faulty,
     } = config
     else {
@@ -350,7 +350,7 @@ pub async fn quorum_session(
         Tcp::new(clock_addr)?,
         {
             let mut sender = Sender::from(clock_session.sender());
-            move |buf: &_| sender.send(Recv(deserialize::<Verifiable<boson::AnnounceOk>>(buf)?))
+            move |buf: &_| sender.send(Recv(deserialize::<Verifiable<cover::AnnounceOk>>(buf)?))
         },
         Once(clock_dispatch_session.sender()),
     )?));
@@ -367,7 +367,7 @@ pub async fn quorum_session(
         QuorumClock::try_from(OrdinaryVersion::default())?,
         Box::new(Sender::from(processor_session.sender()))
             as Box<dyn lamport_mutex::SendRecvEvent<QuorumClock> + Send + Sync>,
-        boson::Lamport(Sender::from(clock_session.sender()), id),
+        cover::Lamport(Sender::from(clock_session.sender()), id),
         lamport_mutex::verifiable::MessageNet::<_, QuorumClock>::new(IndexNet::new(
             dispatch::Net::from(dispatch_session.sender()),
             addrs.clone(),
@@ -379,18 +379,18 @@ pub async fn quorum_session(
         clock_addr,
         crypto.public_key(),
         config.num_faulty,
-        Box::new(boson::quorum_client::CryptoWorker::from(crypto_worker))
+        Box::new(cover::quorum_client::CryptoWorker::from(crypto_worker))
             as Box<
-                dyn Submit<Crypto, dyn boson::quorum_client::SendCryptoEvent<SocketAddr>>
+                dyn Submit<Crypto, dyn cover::quorum_client::SendCryptoEvent<SocketAddr>>
                     + Send
                     + Sync,
             >,
-        boson::Lamport(
+        cover::Lamport(
             Box::new(Sender::from(causal_net_session.sender()))
                 as Box<dyn SendEvent<lamport_mutex::events::UpdateOk<QuorumClock>> + Send + Sync>,
             id,
         ),
-        augustus::net::MessageNet::<_, Verifiable<boson::Announce<SocketAddr>>>::new(
+        augustus::net::MessageNet::<_, Verifiable<cover::Announce<SocketAddr>>>::new(
             IndexNet::new(
                 dispatch::Net::from(clock_dispatch_session.sender()),
                 config.addrs,
@@ -484,17 +484,17 @@ pub async fn quorum_session(
 }
 
 pub async fn nitro_enclaves_session(
-    config: boson_control_messages::Mutex,
+    config: cover_control_messages::Mutex,
     mut events: UnboundedReceiver<Event>,
     upcall: impl SendEvent<RequestOk> + Send + Sync + 'static,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     use augustus::{crypto::peer::Crypto, lamport_mutex::verifiable::Processor};
 
-    let boson_control_messages::Mutex {
+    let cover_control_messages::Mutex {
         id,
         addrs,
-        variant: boson_control_messages::Variant::NitroEnclaves,
+        variant: cover_control_messages::Variant::NitroEnclaves,
         num_faulty,
     } = config
     else {
@@ -540,7 +540,7 @@ pub async fn nitro_enclaves_session(
         NitroEnclavesClock::try_from(OrdinaryVersion::default())?,
         Box::new(Sender::from(processor_session.sender()))
             as Box<dyn lamport_mutex::SendRecvEvent<NitroEnclavesClock> + Send + Sync>,
-        boson::Lamport(clock_sender, id),
+        cover::Lamport(clock_sender, id),
         lamport_mutex::verifiable::MessageNet::<_, NitroEnclavesClock>::new(IndexNet::new(
             dispatch::Net::from(dispatch_session.sender()),
             addrs.clone(),
@@ -584,7 +584,7 @@ pub async fn nitro_enclaves_session(
     let clock_session = nitro_enclaves_portal_session(
         16,
         clock_receiver,
-        boson::Lamport(Sender::from(causal_net_session.sender()), id),
+        cover::Lamport(Sender::from(causal_net_session.sender()), id),
     );
     let causal_net_session = async move { causal_net_session.run(&mut causal_net).await };
 

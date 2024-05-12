@@ -1,12 +1,12 @@
 [package]
-name = "boson-control"
+name = "cover-control"
 version = "0.1.0"
 edition = "2021"
-default-run = "boson-control"
+default-run = "cover-control"
 
 [dependencies]
 anyhow = { version = "1.0.79", features = ["backtrace"] }
-boson-control-messages = { version = "0.1.0", path = "../boson-control-messages" }
+cover-control-messages = { version = "0.1.0", path = "../cover-control-messages" }
 reqwest = { version = "0.12.3", default-features = false, features = ["json"] }
 tokio = { version = "1.35.1", features = ["macros", "net", "time", "rt", "process", "fs", "io-util"] }
 serde = { version = "1.0.196", features = ["derive"] }

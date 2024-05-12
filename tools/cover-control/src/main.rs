@@ -9,7 +9,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use boson_control::{terraform_output, Instance, TerraformOutputRegion};
+use cover_control::{terraform_output, Instance, TerraformOutputRegion};
 use hdrhistogram::Histogram;
 use tokio::{
     fs::{create_dir_all, write},
@@ -99,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
                     "--profile",
                     "artifact",
                     "--example",
-                    "boson-bench-clock",
+                    "cover-bench-clock",
                     "--features",
                     "nitro-enclaves",
                 ])
@@ -107,7 +107,7 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
             anyhow::ensure!(status.success());
             let status = Command::new("rsync")
-                .arg("target/artifact/examples/boson-bench-clock")
+                .arg("target/artifact/examples/cover-bench-clock")
                 .arg(format!("ec2-user@{}:", instance.public_dns))
                 .status()
                 .await?;
@@ -207,13 +207,13 @@ async fn mutex_session(
     }
 
     let mut watchdog_sessions = JoinSet::new();
-    let quorum = boson_control_messages::Quorum {
+    let quorum = cover_control_messages::Quorum {
         addrs: clock_addrs,
         num_faulty: 1,
     };
     let cancel = CancellationToken::new();
     for (i, url) in clock_urls.iter().enumerate() {
-        let config = boson_control_messages::QuorumServer {
+        let config = cover_control_messages::QuorumServer {
             quorum: quorum.clone(),
             index: i,
         };
@@ -225,17 +225,17 @@ async fn mutex_session(
         ));
     }
     while_ok(&mut watchdog_sessions, sleep(Duration::from_millis(5000))).await?;
-    use boson_control_messages::Variant::*;
+    use cover_control_messages::Variant::*;
     let variant_config = match variant {
         Variant::Untrusted => Untrusted,
-        Variant::Replicated => Replicated(boson_control_messages::Replicated {
+        Variant::Replicated => Replicated(cover_control_messages::Replicated {
             num_faulty: num_region_processor - 1,
         }),
         Variant::Quorum => Quorum(quorum),
         Variant::NitroEnclaves => NitroEnclaves,
     };
     for (index, url) in urls.iter().enumerate() {
-        let config = boson_control_messages::Mutex {
+        let config = cover_control_messages::Mutex {
             addrs: addrs.clone(),
             id: index as _,
             num_faulty: num_region_processor - 1,
@@ -307,7 +307,7 @@ async fn mutex_session(
         result??
     }
     // print!("{lines}");
-    let path = Path::new("tools/boson-control/notebooks/mutex");
+    let path = Path::new("tools/cover-control/notebooks/mutex");
     create_dir_all(path).await?;
     write(
         path.join(format!(
@@ -323,7 +323,7 @@ async fn mutex_session(
 async fn mutex_watchdog_session(
     client: reqwest::Client,
     url: String,
-    config: boson_control_messages::Mutex,
+    config: cover_control_messages::Mutex,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     client
@@ -394,13 +394,13 @@ async fn cops_session(
 
     let mut watchdog_sessions = JoinSet::new();
     println!("Start clock services");
-    let quorum = boson_control_messages::Quorum {
+    let quorum = cover_control_messages::Quorum {
         addrs: clock_addrs.clone(),
         num_faulty: 1,
     };
     let cancel = CancellationToken::new();
     for (i, url) in clock_urls.iter().enumerate() {
-        let config = boson_control_messages::QuorumServer {
+        let config = cover_control_messages::QuorumServer {
             quorum: quorum.clone(),
             index: i,
         };
@@ -411,10 +411,10 @@ async fn cops_session(
             cancel.clone(),
         ));
     }
-    use boson_control_messages::Variant::*;
+    use cover_control_messages::Variant::*;
     let variant_config = match variant {
         Variant::Untrusted => Untrusted,
-        Variant::Replicated => Replicated(boson_control_messages::Replicated {
+        Variant::Replicated => Replicated(cover_control_messages::Replicated {
             num_faulty: (addrs.len() - 1) / 3,
         }),
         Variant::Quorum => Quorum(quorum),
@@ -424,7 +424,7 @@ async fn cops_session(
     let record_count = 500;
     for (i, url) in urls.iter().enumerate() {
         println!("{url}");
-        let config = boson_control_messages::CopsServer {
+        let config = cover_control_messages::CopsServer {
             addrs: addrs.clone(),
             id: i as _,
             record_count,
@@ -452,7 +452,7 @@ async fn cops_session(
         };
         let instance = &region.cops_client[0];
         let index = i / num_region_client;
-        let config = boson_control_messages::CopsClient {
+        let config = cover_control_messages::CopsClient {
             addrs,
             ip: instance.public_ip,
             num_concurrent,
@@ -484,7 +484,7 @@ async fn cops_session(
     let throughput = histogram.len() as f32 / 10.;
     let latency = Duration::from_nanos(histogram.value_at_quantile(0.999));
     println!("{throughput} {latency:?}");
-    let path = Path::new("tools/boson-control/notebooks/cops");
+    let path = Path::new("tools/cover-control/notebooks/cops");
     create_dir_all(path).await?;
     write(
         path.join(format!(
@@ -509,7 +509,7 @@ async fn cops_session(
 async fn cops_server_watchdog_session(
     client: reqwest::Client,
     url: String,
-    config: boson_control_messages::CopsServer,
+    config: cover_control_messages::CopsServer,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     client
@@ -530,7 +530,7 @@ async fn cops_server_watchdog_session(
 async fn cops_client_session(
     client: reqwest::Client,
     url: String,
-    config: boson_control_messages::CopsClient,
+    config: cover_control_messages::CopsClient,
     out: Arc<Mutex<Histogram<u64>>>,
 ) -> anyhow::Result<()> {
     client
@@ -546,9 +546,9 @@ async fn cops_client_session(
             .send()
             .await?
             .error_for_status()?
-            .json::<Option<boson_control_messages::CopsClientOk>>()
+            .json::<Option<cover_control_messages::CopsClientOk>>()
             .await?;
-        if let Some(boson_control_messages::CopsClientOk(histogram)) = result {
+        if let Some(cover_control_messages::CopsClientOk(histogram)) = result {
             let mut lines = vec![url];
             // for v in histogram.iter_quantiles(1) {
             //     lines.push(format!(
@@ -590,12 +590,12 @@ async fn bench_nitro_enclaves_session(
     anyhow::ensure!(status.success());
     let child = Command::new("ssh")
         .arg(format!("ec2-user@{}", instance.public_dns))
-        .arg(format!("./boson-bench-clock"))
+        .arg("./cover-bench-clock")
         .stdout(Stdio::piped())
         .spawn()?;
     sleep(Duration::from_millis(1200)).await;
-    let config = boson_control_messages::Microbench {
-        variant: boson_control_messages::Variant::NitroEnclaves,
+    let config = cover_control_messages::Microbench {
+        variant: cover_control_messages::Variant::NitroEnclaves,
         ip: instance.public_ip,
         num_concurrent,
     };
@@ -632,7 +632,7 @@ async fn bench_nitro_enclaves_session(
         .join("\n");
 
     let path = format!(
-        "tools/boson-control/notebooks/clock-{}/",
+        "tools/cover-control/notebooks/clock-{}/",
         if num_concurrent.is_some() {
             "throughput"
         } else {
@@ -652,7 +652,7 @@ async fn bench_nitro_enclaves_session(
     Ok(())
 }
 
-async fn bench_quorum_session(
+pub async fn bench_quorum_session(
     client: reqwest::Client,
     instance: Instance,
     clock_instances: Vec<Instance>,
@@ -667,7 +667,7 @@ async fn bench_quorum_session(
         .collect::<Vec<_>>();
     let mut lines = Vec::new();
     for num_faulty in 0..10 {
-        let quorum = boson_control_messages::Quorum {
+        let quorum = cover_control_messages::Quorum {
             addrs: clock_addrs.clone(),
             num_faulty,
         };
@@ -676,7 +676,7 @@ async fn bench_quorum_session(
         let mut watchdog_sessions = JoinSet::new();
         let cancel = CancellationToken::new();
         for (i, url) in clock_urls.iter().enumerate() {
-            let config = boson_control_messages::QuorumServer {
+            let config = cover_control_messages::QuorumServer {
                 quorum: quorum.clone(),
                 index: i,
             };
@@ -691,7 +691,7 @@ async fn bench_quorum_session(
         while_ok(&mut watchdog_sessions, async {
             let child = Command::new("ssh")
                 .arg(format!("ec2-user@{}", instance.public_dns))
-                .arg(format!("./boson-bench-clock quorum {}", instance.public_ip))
+                .arg(format!("./cover-bench-clock quorum {}", instance.public_ip))
                 .stdout(Stdio::piped())
                 .spawn()?;
             sleep(Duration::from_millis(1000)).await;
@@ -714,7 +714,7 @@ async fn bench_quorum_session(
     }
     write(
         format!(
-            "tools/boson-control/notebooks/clock-quorum-{}.txt",
+            "tools/cover-control/notebooks/clock-quorum-{}.txt",
             SystemTime::UNIX_EPOCH.elapsed()?.as_secs()
         ),
         lines,
@@ -726,7 +726,7 @@ async fn bench_quorum_session(
 async fn quorum_watchdog_session(
     client: reqwest::Client,
     url: String,
-    config: boson_control_messages::QuorumServer,
+    config: cover_control_messages::QuorumServer,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     client

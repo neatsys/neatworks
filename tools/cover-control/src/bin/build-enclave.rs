@@ -1,6 +1,6 @@
 use std::process::Stdio;
 
-use boson_control::terraform_output;
+use cover_control::terraform_output;
 use tokio::{io::AsyncWriteExt, process::Command};
 
 #[tokio::main(flavor = "current_thread")]

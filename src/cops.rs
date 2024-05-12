@@ -84,7 +84,7 @@ use crate::{
     workload::events::{Invoke, InvokeOk},
 };
 
-// "key" under COPS context, "id" under Boson's logical clock context
+// "key" under COPS context, "id" under cover's logical clock context
 pub type KeyId = u64;
 
 pub trait Version: AsRef<OrdinaryVersion> + Clone {}

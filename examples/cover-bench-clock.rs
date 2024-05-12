@@ -6,7 +6,7 @@ use std::{
 };
 
 use augustus::{
-    boson::{
+    cover::{
         self, nitro_enclaves_portal_session, NitroEnclavesClock, QuorumClient, QuorumClock, Update,
         UpdateOk,
     },
@@ -25,7 +25,7 @@ use augustus::{
     },
     worker::{spawning_backend, Submit},
 };
-use boson_control_messages::{Microbench, Quorum, Variant};
+use cover_control_messages::{Microbench, Quorum, Variant};
 use rand::thread_rng;
 use tokio::{
     io::AsyncReadExt as _,
@@ -280,7 +280,7 @@ async fn quorum_client_session(
         Tcp::new(clock_addr)?,
         {
             let mut sender = Sender::from(clock_session.sender());
-            move |buf: &_| sender.send(Recv(deserialize::<Verifiable<boson::AnnounceOk>>(buf)?))
+            move |buf: &_| sender.send(Recv(deserialize::<Verifiable<cover::AnnounceOk>>(buf)?))
         },
         Once(clock_dispatch_session.sender()),
     )?));
@@ -288,14 +288,14 @@ async fn quorum_client_session(
         clock_addr,
         crypto.public_key(),
         config.num_faulty,
-        Box::new(boson::quorum_client::CryptoWorker::from(crypto_worker))
+        Box::new(cover::quorum_client::CryptoWorker::from(crypto_worker))
             as Box<
-                dyn Submit<Crypto, dyn boson::quorum_client::SendCryptoEvent<SocketAddr>>
+                dyn Submit<Crypto, dyn cover::quorum_client::SendCryptoEvent<SocketAddr>>
                     + Send
                     + Sync,
             >,
         update_ok_sender,
-        augustus::net::MessageNet::<_, Verifiable<boson::Announce<SocketAddr>>>::new(
+        augustus::net::MessageNet::<_, Verifiable<cover::Announce<SocketAddr>>>::new(
             IndexNet::new(
                 dispatch::Net::from(clock_dispatch_session.sender()),
                 config.addrs,

@@ -1,5 +1,5 @@
 [package]
-name = "boson-control-messages"
+name = "cover-control-messages"
 version = "0.1.0"
 edition = "2021"
 

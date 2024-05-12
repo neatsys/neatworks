@@ -2,14 +2,14 @@ use tokio::task::JoinSet;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let output = boson_control::terraform_output().await?;
+    let output = cover_control::terraform_output().await?;
     let mut sessions = JoinSet::new();
     for instance in output
         .regions
         .values()
         .flat_map(|region| region.mutex.iter().chain(&region.cops))
     {
-        sessions.spawn(boson_control::ssh(
+        sessions.spawn(cover_control::ssh(
             format!("ec2-user@{}", instance.public_dns),
             "nitro-cli terminate-enclave --all",
         ));

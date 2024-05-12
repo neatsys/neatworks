@@ -7,7 +7,7 @@ async fn main() -> anyhow::Result<()> {
     let args1 = args().nth(1);
     let sync = args1.as_deref() == Some("sync");
     if sync {
-        println!("Building boson artifact");
+        println!("Building cover artifact");
         let status = Command::new("cargo")
             .args([
                 "build",
@@ -16,14 +16,14 @@ async fn main() -> anyhow::Result<()> {
                 "--features",
                 "nitro-enclaves",
                 "--bin",
-                "boson",
+                "cover",
             ])
             .status()
             .await?;
         anyhow::ensure!(status.success(), "Command `cargo build` exit with {status}");
     }
 
-    let output = boson_control::terraform_output().await?;
+    let output = cover_control::terraform_output().await?;
     let mut sessions = JoinSet::new();
     for instance in output
         .regions
@@ -56,18 +56,18 @@ async fn instance_session(ssh_host: String, sync: bool) -> anyhow::Result<()> {
     if sync {
         let status = Command::new("rsync")
             .arg("-az")
-            .arg("target/artifact/boson")
-            // .arg("target/debug/boson")
+            .arg("target/artifact/cover")
+            // .arg("target/debug/cover")
             .arg(format!("{ssh_host}:"))
             .status()
             .await?;
         anyhow::ensure!(status.success(), "Command `rsync` exit with {status}");
     }
-    boson_control::ssh(
+    cover_control::ssh(
         ssh_host,
-        "pkill -x boson; sleep 1; tmux new -d -s boson \"./boson >boson.log\"",
-        // "pkill -x boson; sleep 1; tmux new -d -s boson \"RUST_LOG=info,augustus::lamport_mutex::verifiable=debug ./boson >boson.log\""
-        // "pkill -x boson; sleep 1; tmux new -d -s boson \"RUST_BACKTRACE=1 ./boson >boson.log\""
+        "pkill -x cover; sleep 1; tmux new -d -s cover \"./cover >cover.log\"",
+        // "pkill -x cover; sleep 1; tmux new -d -s cover \"RUST_LOG=info,augustus::lamport_mutex::verifiable=debug ./cover >cover.log\""
+        // "pkill -x cover; sleep 1; tmux new -d -s cover \"RUST_BACKTRACE=1 ./cover >cover.log\""
     )
     .await
 }

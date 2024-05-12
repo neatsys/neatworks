@@ -21,14 +21,14 @@ async fn main() -> anyhow::Result<()> {
         + " && sudo systemctl restart nitro-enclaves-allocator.service"
         + " && sudo sysctl -w net.core.somaxconn=20000";
 
-    let output = boson_control::terraform_output().await?;
+    let output = cover_control::terraform_output().await?;
     let mut sessions = JoinSet::new();
     for instance in output
         .regions
         .values()
         .flat_map(|region| region.mutex.iter().chain(&region.cops))
     {
-        sessions.spawn(boson_control::ssh(
+        sessions.spawn(cover_control::ssh(
             format!("ec2-user@{}", instance.public_dns),
             enclave_command.clone(),
         ));
@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
         .flat_map(|region| region.quorum.iter().chain(&region.cops_client))
         .chain(&output.microbench_quorum)
     {
-        sessions.spawn(boson_control::ssh(
+        sessions.spawn(cover_control::ssh(
             format!("ec2-user@{}", instance.public_dns),
             command.clone(),
         ));

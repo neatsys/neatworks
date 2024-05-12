@@ -134,7 +134,7 @@ async fn ok(State(state): State<AppState>) -> StatusCode {
 
 async fn mutex_start(
     State(state): State<AppState>,
-    Json(config): Json<boson_control_messages::Mutex>,
+    Json(config): Json<cover_control_messages::Mutex>,
 ) -> StatusCode {
     if let Err(err) = async {
         let mut session = state.session.lock().await;
@@ -142,7 +142,7 @@ async fn mutex_start(
         let (event_sender, event_receiver) = unbounded_channel();
         let (upcall_sender, upcall_receiver) = unbounded_channel();
         let cancel = CancellationToken::new();
-        use boson_control_messages::Variant::*;
+        use cover_control_messages::Variant::*;
         let handle = match &config.variant {
             Untrusted => state.handle.spawn(mutex::untrusted_session(
                 config,
@@ -231,7 +231,7 @@ async fn mutex_request(State(state): State<AppState>, at: Json<SystemTime>) -> R
 
 async fn cops_start_client(
     State(state): State<AppState>,
-    Json(config): Json<boson_control_messages::CopsClient>,
+    Json(config): Json<cover_control_messages::CopsClient>,
 ) -> StatusCode {
     if let Err(err) = async {
         let mut session = state.session.lock().await;
@@ -239,7 +239,7 @@ async fn cops_start_client(
         let (event_sender, _) = unbounded_channel();
         let (upcall_sender, upcall_receiver) = unbounded_channel();
         let cancel = CancellationToken::new();
-        use boson_control_messages::Variant::*;
+        use cover_control_messages::Variant::*;
         let handle = match &config.variant {
             Untrusted => state
                 .handle
@@ -293,7 +293,7 @@ async fn cops_poll_results(State(state): State<AppState>) -> Response {
             }
         }
         state.session.lock().await.take().unwrap().handle.await??;
-        Ok(Some(boson_control_messages::CopsClientOk(histogram)))
+        Ok(Some(cover_control_messages::CopsClientOk(histogram)))
     };
     match task.await {
         Ok(result) => Json(result).into_response(),
@@ -303,7 +303,7 @@ async fn cops_poll_results(State(state): State<AppState>) -> Response {
 
 async fn cops_start_server(
     State(state): State<AppState>,
-    Json(config): Json<boson_control_messages::CopsServer>,
+    Json(config): Json<cover_control_messages::CopsServer>,
 ) -> StatusCode {
     if let Err(err) = async {
         let mut session = state.session.lock().await;
@@ -311,7 +311,7 @@ async fn cops_start_server(
         let (event_sender, _) = unbounded_channel();
         let (_, upcall_receiver) = unbounded_channel();
         let cancel = CancellationToken::new();
-        use boson_control_messages::Variant::*;
+        use cover_control_messages::Variant::*;
         let handle = match &config.variant {
             Untrusted => state
                 .handle
@@ -344,7 +344,7 @@ async fn cops_start_server(
 
 async fn start_quorum(
     State(state): State<AppState>,
-    Json(config): Json<boson_control_messages::QuorumServer>,
+    Json(config): Json<cover_control_messages::QuorumServer>,
 ) -> StatusCode {
     if let Err(err) = async {
         let mut session = state.session.lock().await;

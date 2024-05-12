@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use augustus::{
-    boson::{self, QuorumServer},
+    cover::{self, QuorumServer},
     crypto::peer::{Crypto, Verifiable},
     event::{
         self,
@@ -29,7 +29,7 @@ fn adjust(addr: SocketAddr) -> SocketAddr {
 }
 
 pub async fn session(
-    config: boson_control_messages::QuorumServer,
+    config: cover_control_messages::QuorumServer,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let addr = config.quorum.addrs[config.index];
@@ -44,10 +44,10 @@ pub async fn session(
     let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
         Tcp::new(addr)?,
         {
-            let mut sender = boson::VerifyClock::new(config.quorum.num_faulty, recv_crypto_worker);
+            let mut sender = cover::VerifyClock::new(config.quorum.num_faulty, recv_crypto_worker);
             move |buf: &_| {
                 sender.send(Recv(
-                    deserialize::<Verifiable<boson::Announce<SocketAddr>>>(buf)?,
+                    deserialize::<Verifiable<cover::Announce<SocketAddr>>>(buf)?,
                 ))
             }
         },
@@ -63,7 +63,7 @@ pub async fn session(
         recv_crypto_executor.run(crypto.clone(), Sender::from(server_session.sender()));
     let send_crypto_session = send_crypto_executor.run(
         crypto,
-        MessageNet::<_, Verifiable<boson::AnnounceOk>>::new(dispatch::Net::from(
+        MessageNet::<_, Verifiable<cover::AnnounceOk>>::new(dispatch::Net::from(
             dispatch_session.sender(),
         )),
     );

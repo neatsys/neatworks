@@ -2,7 +2,7 @@ use std::{future::Future, mem::take, net::SocketAddr, ops::Range, pin::Pin, time
 
 use augustus::{
     app::{self, ycsb, App},
-    boson::{self, nitro_enclaves_portal_session, QuorumClient, QuorumClock, VerifyClock},
+    cover::{self, nitro_enclaves_portal_session, QuorumClient, QuorumClock, VerifyClock},
     cops::{self, OrdinaryVersion, OrdinaryVersionService},
     event::{
         self,
@@ -19,7 +19,7 @@ use augustus::{
     worker::{spawning_backend, Submit},
     workload::{CloseLoop, Iter, Json, OpLatency, Upcall, Weighted2, Workload},
 };
-use boson_control_messages::{CopsClient, CopsServer, Variant};
+use cover_control_messages::{CopsClient, CopsServer, Variant};
 use rand::{rngs::StdRng, thread_rng, Rng, SeedableRng};
 use rand_distr::Uniform;
 use tokio::{net::TcpListener, sync::mpsc::unbounded_channel, task::JoinSet, time::sleep};
@@ -471,14 +471,14 @@ pub async fn quorum_client_session(
         let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
             Tcp::new(addr)?,
             {
-                // let mut sender = boson::VerifyQuorumClock::new(config.num_faulty, crypto_worker);
+                // let mut sender = cover::VerifyQuorumClock::new(config.num_faulty, crypto_worker);
                 let mut sender = Sender::from(client_session.sender());
                 move |buf: &_| cops::to_client_on_buf(buf, &mut sender)
             },
             Once(dispatch_session.sender()),
         )?));
         let mut client = Blanket(Buffered::from(
-            cops::Client::<_, _, boson::QuorumClock, _>::new(
+            cops::Client::<_, _, cover::QuorumClock, _>::new(
                 addr,
                 replica_addr,
                 cops::ToReplicaMessageNet::new(dispatch::Net::from(dispatch_session.sender())),
@@ -571,7 +571,7 @@ pub async fn quorum_server_session(
         Tcp::new(clock_addr)?,
         {
             let mut sender = Sender::from(clock_session.sender());
-            move |buf: &_| sender.send(Recv(deserialize::<Verifiable<boson::AnnounceOk>>(buf)?))
+            move |buf: &_| sender.send(Recv(deserialize::<Verifiable<cover::AnnounceOk>>(buf)?))
         },
         Once(clock_dispatch_session.sender()),
     )?));
@@ -584,7 +584,7 @@ pub async fn quorum_server_session(
                 id as usize,
             )),
             cops::ToClientMessageNet::new(dispatch::Net::from(dispatch_session.sender())),
-            boson::Cops(Sender::from(clock_session.sender())),
+            cover::Cops(Sender::from(clock_session.sender())),
         ),
     ));
     let mut settings = ycsb::WorkloadSettings::new(record_count);
@@ -599,19 +599,19 @@ pub async fn quorum_server_session(
         clock_addr,
         crypto.public_key(),
         config.num_faulty,
-        Box::new(boson::quorum_client::CryptoWorker::from(
+        Box::new(cover::quorum_client::CryptoWorker::from(
             clock_crypto_worker,
         ))
             as Box<
-                dyn Submit<Crypto, dyn boson::quorum_client::SendCryptoEvent<SocketAddr>>
+                dyn Submit<Crypto, dyn cover::quorum_client::SendCryptoEvent<SocketAddr>>
                     + Send
                     + Sync,
             >,
-        boson::Cops(Box::new(Sender::from(replica_session.sender()))
+        cover::Cops(Box::new(Sender::from(replica_session.sender()))
             as Box<
                 dyn SendEvent<cops::events::UpdateOk<QuorumClock>> + Send + Sync,
             >),
-        augustus::net::MessageNet::<_, Verifiable<boson::Announce<SocketAddr>>>::new(
+        augustus::net::MessageNet::<_, Verifiable<cover::Announce<SocketAddr>>>::new(
             IndexNet::new(
                 dispatch::Net::from(clock_dispatch_session.sender()),
                 config.addrs,
@@ -700,7 +700,7 @@ pub async fn nitro_enclaves_client_session(
         let mut dispatch = event::Unify(event::Buffered::from(Dispatch::new(
             Tcp::new(addr)?,
             {
-                // let mut sender = boson::VerifyQuorumClock::new(config.num_faulty, crypto_worker);
+                // let mut sender = cover::VerifyQuorumClock::new(config.num_faulty, crypto_worker);
                 let mut sender = Sender::from(client_session.sender());
                 move |buf: &_| cops::to_client_on_buf(buf, &mut sender)
             },
@@ -709,7 +709,7 @@ pub async fn nitro_enclaves_client_session(
         let mut client = Blanket(Buffered::from(cops::Client::<
             _,
             _,
-            boson::NitroEnclavesClock,
+            cover::NitroEnclavesClock,
             _,
         >::new(
             addr,
@@ -793,14 +793,14 @@ pub async fn nitro_enclaves_server_session(
     )?));
     let mut replica = Blanket(Buffered::from(
         cops::Replica::<_, _, _, _, SocketAddr>::new(
-            boson::NitroEnclavesClock::try_from(OrdinaryVersion::default())?,
+            cover::NitroEnclavesClock::try_from(OrdinaryVersion::default())?,
             cops::ToReplicaMessageNet::<_, _, SocketAddr>::new(IndexNet::new(
                 dispatch::Net::from(dispatch_session.sender()),
                 addrs,
                 id as usize,
             )),
             cops::ToClientMessageNet::new(dispatch::Net::from(dispatch_session.sender())),
-            boson::Cops(clock_sender),
+            cover::Cops(clock_sender),
         ),
     ));
     let mut settings = ycsb::WorkloadSettings::new(record_count);
@@ -826,7 +826,7 @@ pub async fn nitro_enclaves_server_session(
     let clock_session = nitro_enclaves_portal_session(
         16,
         clock_receiver,
-        boson::Cops(Sender::from(replica_session.sender())),
+        cover::Cops(Sender::from(replica_session.sender())),
     );
     let replica_session = replica_session.run(&mut replica);
     async {

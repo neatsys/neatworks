@@ -394,7 +394,7 @@ impl<CN: SendMessage<All, Message>, U, C> OnEvent<events::Request> for Processor
     ) -> anyhow::Result<()> {
         let replaced = replace(&mut self.requesting, true);
         anyhow::ensure!(!replaced, "concurrent request");
-        // this is just for boson evaluation, not a universal invariant
+        // this is just for cover evaluation, not a universal invariant
         let replaced = replace(&mut self.requests_cleared, false);
         anyhow::ensure!(replaced, "requests never cleared since last request");
         // in this protocol we always expect to loopback `Recv(_)` our own messages

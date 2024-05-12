@@ -34,7 +34,7 @@ pub struct TerraformOutputRegion {
 pub async fn terraform_output() -> anyhow::Result<TerraformOutput> {
     let output = Command::new("terraform")
         .args([
-            "-chdir=tools/boson-control/terraform",
+            "-chdir=tools/cover-control/terraform",
             "output",
             "-json",
             "instances",

@@ -11,8 +11,8 @@ members = [
     "tools/replication-control-messages",
     "tools/entropy-control",
     "tools/entropy-control-messages", 
-    "tools/boson-control", 
-    "tools/boson-control-messages",
+    "tools/cover-control", 
+    "tools/cover-control-messages",
 ]
 
 [profile.dev]
@@ -41,7 +41,7 @@ name = "entropy"
 required-features = ["wirehair", "reqwest"]
 
 [[bin]]
-name = "boson"
+name = "cover"
 required-features = ["nitro-enclaves"]
 
 [[example]]
@@ -49,7 +49,7 @@ name = "nitro-enclaves-clock-validator"
 required-features = ["nitro-enclaves"]
 
 [[example]]
-name = "boson-bench-clock"
+name = "cover-bench-clock"
 required-features = ["nitro-enclaves"]
 
 [dependencies]
@@ -61,6 +61,7 @@ bytes = "1.5.0"
 crossbeam-queue = "0.3.11"
 derive_more = "0.99.17"
 derive-where = "1.2.7"
+hdrhistogram = "7.5.4"
 lru = "0.12.2"
 nix = { version = "0.28.0", features = ["socket", "sched", "resource"] }
 primitive-types = { version = "0.12.2", features = ["serde"] }
@@ -85,7 +86,7 @@ serde_json = "1.0.114"
 sha2 = "0.10.8"
 scc = "2.0.19"
 
-boson-control-messages = { version = "0.1.0", path = "tools/boson-control-messages" }
+cover-control-messages = { version = "0.1.0", path = "tools/cover-control-messages" }
 aws-nitro-enclaves-nsm-api = { version = "0.4.0", optional = true }
 aws-nitro-enclaves-attestation = { git = "https://github.com/neatsys/aws-nitro-enclaves-attestation", version = "0.1.0", optional = true }
 
@@ -94,7 +95,6 @@ wirehair = { git = "https://github.com/neatsys/wirehair", version = "0.1.2", opt
 reqwest = { version = "0.12.4", features = ["json", "multipart"], optional = true }
 
 replication-control-messages = { version = "0.1.0", path = "tools/replication-control-messages" }
-hdrhistogram = "7.5.4"
 
 [dev-dependencies]
 proptest = "1.4.0"
