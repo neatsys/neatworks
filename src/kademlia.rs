@@ -891,15 +891,18 @@ mod tests {
     // into property test
     #[test]
     fn refresh_buckets() -> anyhow::Result<()> {
-        let origin = PeerRecord::new(Crypto::new_random(&mut thread_rng()).public_key(), ());
-        let buckets = Buckets::new(origin.clone());
-        let mut peer = Peer::<_, _, _, Unreachable, _>::new(
-            buckets,
-            BlackHole,
-            Unreachable,
-            CryptoWorker::<_, Unreachable>::from(Worker::Null),
-        );
-        peer.refresh_buckets()
+        for _ in 0..100 {
+            let origin = PeerRecord::new(Crypto::new_random(&mut thread_rng()).public_key(), ());
+            let buckets = Buckets::new(origin.clone());
+            let mut peer = Peer::<_, _, _, Unreachable, _>::new(
+                buckets,
+                BlackHole,
+                Unreachable,
+                CryptoWorker::<_, Unreachable>::from(Worker::Null),
+            );
+            peer.refresh_buckets()?
+        }
+        Ok(())
     }
 }
 

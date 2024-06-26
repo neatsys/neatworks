@@ -9,8 +9,8 @@ jobs:
   build_and_test:
     name: Build and test
     runs-on: ubuntu-latest
-    continue-on-error: ${{ matrix.toolchain != 'stable' }}
     strategy:
+      fail-fast: false
       matrix:
         toolchain: [stable, beta]
         # toolchain: [stable, beta, nightly]
