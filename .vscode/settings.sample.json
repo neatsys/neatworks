@@ -1,10 +1,23 @@
 {
     "rust-analyzer.cargo.features": [
-        "all",
         // "wirehair",
+        "ordinary",
     ],
     "rust-analyzer.server.extraEnv": {
         "CHALK_OVERFLOW_DEPTH": "100000000",
-        "CHALK_SOLVER_MAX_SIZE": "10000000"
+        "CHALK_SOLVER_MAX_SIZE": "10000000",
     },
+    "files.associations": {
+        "settings.sample.json": "jsonc",
+    },
+    "json.schemas": [
+        {
+            "fileMatch": [
+                "settings.sample.json"
+            ],
+            "schema": {
+                "allowTrailingCommas": true
+            }
+        }
+    ]
 }

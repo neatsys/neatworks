@@ -46,7 +46,7 @@ use augustus::event::{
 };
 use tokio::time::Instant;
 
-struct Foo;
+pub struct Foo;
 
 #[derive(Debug, derive_more::Display, derive_more::Error)]
 struct Exit;
@@ -76,7 +76,7 @@ impl OnTimer for Foo {
     }
 }
 
-struct Bar<E> {
+pub struct Bar<E> {
     sender: E,
     timer_id: Option<TimerId>,
     start: Instant,

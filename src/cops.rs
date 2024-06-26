@@ -457,7 +457,7 @@ impl<M: ReplicaCommon> OnEvent<events::UpdateOk<M::V>>
                 .partial_cmp(state.version_deps.as_ref()),
             Some(Ordering::Greater)
         ));
-        state.value = put.value.clone();
+        state.value.clone_from(&put.value);
         state.version_deps = update_ok.version_deps.clone();
         let put_ok = PutOk {
             version_deps: update_ok.version_deps.clone(),

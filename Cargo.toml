@@ -29,7 +29,7 @@ strip = true
 
 # cSpell:disable
 [features]
-all = [
+ordinary = [
     "tikv-jemallocator",
     "nitro-enclaves",
     "reqwest",

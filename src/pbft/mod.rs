@@ -19,6 +19,15 @@ use crate::{
     workload::events::{Invoke, InvokeOk},
 };
 
+#[derive(Debug)]
+pub struct Config {
+    pub num_replica: usize,
+    pub num_faulty: usize,
+    pub client_resend_interval: Duration,
+    pub view_change_delay: Duration,
+    pub max_batch_size: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PrePrepare {
     view_num: u32,
@@ -76,9 +85,14 @@ pub struct QueryNewView {
     replica_id: u8,
 }
 
-pub trait ToReplicaNet<A>:
+pub trait UplinkNet<A>: SendMessage<u8, Request<A>> + SendMessage<All, Request<A>> {}
+impl<T: SendMessage<u8, Request<A>> + SendMessage<All, Request<A>>, A> UplinkNet<A> for T {}
+
+pub trait DownlinkNet<A>: SendMessage<A, Reply> {}
+impl<T: SendMessage<A, Reply>, A> DownlinkNet<A> for T {}
+
+pub trait PeerNet<A>:
     SendMessage<u8, Request<A>>
-    + SendMessage<All, Request<A>>
     + SendMessage<All, (Verifiable<PrePrepare>, Vec<Request<A>>)>
     + SendMessage<All, Verifiable<Prepare>>
     + SendMessage<All, Verifiable<Commit>>
@@ -90,7 +104,6 @@ pub trait ToReplicaNet<A>:
 }
 impl<
         T: SendMessage<u8, Request<A>>
-            + SendMessage<All, Request<A>>
             + SendMessage<All, (Verifiable<PrePrepare>, Vec<Request<A>>)>
             + SendMessage<All, Verifiable<Prepare>>
             + SendMessage<All, Verifiable<Commit>>
@@ -99,7 +112,7 @@ impl<
             + SendMessage<u8, QueryNewView>
             + SendMessage<u8, Verifiable<NewView>>,
         A,
-    > ToReplicaNet<A> for T
+    > PeerNet<A> for T
 {
 }
 
@@ -147,7 +160,7 @@ impl<N, U, A> Client<N, U, A> {
 // const CLIENT_RESEND_INTERVAL: Duration = Duration::from_millis(800);
 const CLIENT_RESEND_INTERVAL: Duration = Duration::from_millis(800000);
 
-impl<N: ToReplicaNet<A>, U, A: Addr> OnEvent<Invoke> for Client<N, U, A> {
+impl<N: UplinkNet<A>, U, A: Addr> OnEvent<Invoke> for Client<N, U, A> {
     fn on_event(&mut self, Invoke(op): Invoke, timer: &mut impl Timer<Self>) -> anyhow::Result<()> {
         anyhow::ensure!(self.invoke.is_none(), "concurrent invocation");
         self.seq += 1;
@@ -166,7 +179,7 @@ impl<N: ToReplicaNet<A>, U, A: Addr> OnEvent<Invoke> for Client<N, U, A> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Resend;
 
-impl<N: ToReplicaNet<A>, U, A: Addr> OnEvent<Resend> for Client<N, U, A> {
+impl<N: UplinkNet<A>, U, A: Addr> OnEvent<Resend> for Client<N, U, A> {
     fn on_event(&mut self, Resend: Resend, _: &mut impl Timer<Self>) -> anyhow::Result<()> {
         warn!("Resend timeout on seq {}", self.seq);
         self.do_send(All)
@@ -220,32 +233,29 @@ impl<N, U, A: Addr> Client<N, U, A> {
     }
 }
 
-pub trait ToClientNet<A>: SendMessage<A, Reply> {}
-impl<T: SendMessage<A, Reply>, A> ToClientNet<A> for T {}
-
 pub trait SendCryptoEvent<A>:
     SendEvent<(Signed<PrePrepare>, Vec<Request<A>>)>
-    + SendEvent<(Verified<PrePrepare>, Vec<Request<A>>)>
     + SendEvent<Signed<Prepare>>
-    + SendEvent<Verified<Prepare>>
     + SendEvent<Signed<Commit>>
-    + SendEvent<Verified<Commit>>
     + SendEvent<Signed<ViewChange>>
-    + SendEvent<Verified<ViewChange>>
     + SendEvent<Signed<NewView>>
+    + SendEvent<(Verified<PrePrepare>, Vec<Request<A>>)>
+    + SendEvent<Verified<Prepare>>
+    + SendEvent<Verified<Commit>>
+    + SendEvent<Verified<ViewChange>>
     + SendEvent<Verified<NewView>>
 {
 }
 impl<
         T: SendEvent<(Signed<PrePrepare>, Vec<Request<A>>)>
-            + SendEvent<(Verified<PrePrepare>, Vec<Request<A>>)>
             + SendEvent<Signed<Prepare>>
-            + SendEvent<Verified<Prepare>>
             + SendEvent<Signed<Commit>>
-            + SendEvent<Verified<Commit>>
             + SendEvent<Signed<ViewChange>>
-            + SendEvent<Verified<ViewChange>>
             + SendEvent<Signed<NewView>>
+            + SendEvent<(Verified<PrePrepare>, Vec<Request<A>>)>
+            + SendEvent<Verified<Prepare>>
+            + SendEvent<Verified<Commit>>
+            + SendEvent<Verified<ViewChange>>
             + SendEvent<Verified<NewView>>,
         A,
     > SendCryptoEvent<A> for T
@@ -275,7 +285,7 @@ type Quorums<K, M> = BTreeMap<K, Quorum<M>>;
 
 #[derive(Debug, Clone)]
 #[derive_where(PartialEq, Eq, Hash; S, A)]
-pub struct Replica<N, CN, CW, S, A, _M = (N, CN, CW, S, A)> {
+pub struct Replica<PN, DN, CW, S, A, _M = (PN, DN, CW, S, A)> {
     id: u8,
     num_replica: usize,
     num_faulty: usize,
@@ -309,11 +319,11 @@ pub struct Replica<N, CN, CW, S, A, _M = (N, CN, CW, S, A)> {
     pending_commits: BTreeMap<u32, Vec<Verifiable<Commit>>>,
 
     #[derive_where(skip(EqHashOrd))]
-    net: N,
+    net: PN,
     #[derive_where(skip(EqHashOrd))]
-    client_net: CN, // C for client
+    client_net: DN,
     #[derive_where(skip(EqHashOrd))]
-    crypto_worker: CW, // C for crypto
+    crypto_worker: CW,
 
     _m: std::marker::PhantomData<_M>,
 }
@@ -422,22 +432,22 @@ impl<N, CN, CW, S, A, M> Replica<N, CN, CW, S, A, M> {
 }
 
 pub trait ReplicaCommon {
-    type N: ToReplicaNet<Self::A>;
-    type CN: ToClientNet<Self::A>;
+    type PN: PeerNet<Self::A>;
+    type DN: DownlinkNet<Self::A>;
     type CW: Submit<Crypto, dyn SendCryptoEvent<Self::A>>;
     type S: App;
     type A: Addr;
 }
-impl<N, CN, CW, S, A> ReplicaCommon for (N, CN, CW, S, A)
+impl<PN, DN, CW, S, A> ReplicaCommon for (PN, DN, CW, S, A)
 where
-    N: ToReplicaNet<A>,
-    CN: ToClientNet<A>,
+    PN: PeerNet<A>,
+    DN: DownlinkNet<A>,
     CW: Submit<Crypto, dyn SendCryptoEvent<A>>,
     S: App,
     A: Addr,
 {
-    type N = N;
-    type CN = CN;
+    type PN = PN;
+    type DN = DN;
     type CW = CW;
     type S = S;
     type A = A;
@@ -446,7 +456,9 @@ where
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DoViewChange(u32); // view number to enter
 
-impl<M: ReplicaCommon> OnEvent<Recv<Request<M::A>>> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+impl<M: ReplicaCommon> OnEvent<Recv<Request<M::A>>>
+    for Replica<M::PN, M::DN, M::CW, M::S, M::A, M>
+{
     fn on_event(
         &mut self,
         Recv(request): Recv<Request<M::A>>,
@@ -482,7 +494,7 @@ impl<M: ReplicaCommon> OnEvent<Recv<Request<M::A>>> for Replica<M::N, M::CN, M::
     }
 }
 
-impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+impl<M: ReplicaCommon> Replica<M::PN, M::DN, M::CW, M::S, M::A, M> {
     fn close_batch(&mut self) -> anyhow::Result<()> {
         assert!(self.is_primary());
         assert!(!self.view_change());
@@ -511,7 +523,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
 pub struct ProgressPrepared(u32); // op number
 
 impl<M: ReplicaCommon> OnEvent<(Signed<PrePrepare>, Vec<Request<M::A>>)>
-    for Replica<M::N, M::CN, M::CW, M::S, M::A, M>
+    for Replica<M::PN, M::DN, M::CW, M::S, M::A, M>
 {
     fn on_event(
         &mut self,
@@ -558,7 +570,7 @@ impl<M: ReplicaCommon> OnEvent<(Signed<PrePrepare>, Vec<Request<M::A>>)>
 // should be safe since we are just resending old PrePrepare
 // (if the old PrePrepare is gone (probably because of a view change), the timer
 // should be gone along with it)
-impl<M: ReplicaCommon> OnEvent<ProgressPrepared> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+impl<M: ReplicaCommon> OnEvent<ProgressPrepared> for Replica<M::PN, M::DN, M::CW, M::S, M::A, M> {
     fn on_event(
         &mut self,
         ProgressPrepared(op_num): ProgressPrepared,
@@ -578,7 +590,7 @@ impl<M: ReplicaCommon> OnEvent<ProgressPrepared> for Replica<M::N, M::CN, M::CW,
 }
 
 impl<M: ReplicaCommon> OnEvent<Recv<(Verifiable<PrePrepare>, Vec<Request<M::A>>)>>
-    for Replica<M::N, M::CN, M::CW, M::S, M::A, M>
+    for Replica<M::PN, M::DN, M::CW, M::S, M::A, M>
 {
     fn on_event(
         &mut self,
@@ -628,7 +640,7 @@ impl<M: ReplicaCommon> OnEvent<Recv<(Verifiable<PrePrepare>, Vec<Request<M::A>>)
 }
 
 impl<M: ReplicaCommon> OnEvent<(Verified<PrePrepare>, Vec<Request<M::A>>)>
-    for Replica<M::N, M::CN, M::CW, M::S, M::A, M>
+    for Replica<M::PN, M::DN, M::CW, M::S, M::A, M>
 {
     fn on_event(
         &mut self,
@@ -675,7 +687,7 @@ impl<M: ReplicaCommon> OnEvent<(Verified<PrePrepare>, Vec<Request<M::A>>)>
     }
 }
 
-impl<M: ReplicaCommon> OnEvent<Signed<Prepare>> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+impl<M: ReplicaCommon> OnEvent<Signed<Prepare>> for Replica<M::PN, M::DN, M::CW, M::S, M::A, M> {
     fn on_event(
         &mut self,
         Signed(prepare): Signed<Prepare>,
@@ -693,7 +705,7 @@ impl<M: ReplicaCommon> OnEvent<Signed<Prepare>> for Replica<M::N, M::CN, M::CW, 
 }
 
 impl<M: ReplicaCommon> OnEvent<Recv<Verifiable<Prepare>>>
-    for Replica<M::N, M::CN, M::CW, M::S, M::A, M>
+    for Replica<M::PN, M::DN, M::CW, M::S, M::A, M>
 {
     fn on_event(
         &mut self,
@@ -718,7 +730,7 @@ impl<M: ReplicaCommon> OnEvent<Recv<Verifiable<Prepare>>>
     }
 }
 
-impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+impl<M: ReplicaCommon> Replica<M::PN, M::DN, M::CW, M::S, M::A, M> {
     fn submit_prepare(&mut self, prepare: Verifiable<Prepare>) -> anyhow::Result<bool> {
         if prepare.view_num != self.view_num || self.view_change() {
             if prepare.view_num >= self.view_num {
@@ -759,7 +771,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     }
 }
 
-impl<M: ReplicaCommon> OnEvent<Verified<Prepare>> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+impl<M: ReplicaCommon> OnEvent<Verified<Prepare>> for Replica<M::PN, M::DN, M::CW, M::S, M::A, M> {
     fn on_event(
         &mut self,
         Verified(prepare): Verified<Prepare>,
@@ -787,7 +799,7 @@ impl<M: ReplicaCommon> OnEvent<Verified<Prepare>> for Replica<M::N, M::CN, M::CW
     }
 }
 
-impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+impl<M: ReplicaCommon> Replica<M::PN, M::DN, M::CW, M::S, M::A, M> {
     fn insert_prepare(&mut self, prepare: Verifiable<Prepare>) -> anyhow::Result<()> {
         let prepare_quorum = self.prepare_quorums.entry(prepare.op_num).or_default();
         prepare_quorum.insert(prepare.replica_id, prepare.clone());
@@ -823,7 +835,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     }
 }
 
-impl<M: ReplicaCommon> OnEvent<Signed<Commit>> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+impl<M: ReplicaCommon> OnEvent<Signed<Commit>> for Replica<M::PN, M::DN, M::CW, M::S, M::A, M> {
     fn on_event(
         &mut self,
         Signed(commit): Signed<Commit>,
@@ -841,7 +853,7 @@ impl<M: ReplicaCommon> OnEvent<Signed<Commit>> for Replica<M::N, M::CN, M::CW, M
 }
 
 impl<M: ReplicaCommon> OnEvent<Recv<Verifiable<Commit>>>
-    for Replica<M::N, M::CN, M::CW, M::S, M::A, M>
+    for Replica<M::PN, M::DN, M::CW, M::S, M::A, M>
 {
     fn on_event(
         &mut self,
@@ -861,7 +873,7 @@ impl<M: ReplicaCommon> OnEvent<Recv<Verifiable<Commit>>>
     }
 }
 
-impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+impl<M: ReplicaCommon> Replica<M::PN, M::DN, M::CW, M::S, M::A, M> {
     fn submit_commit(&mut self, commit: Verifiable<Commit>) -> anyhow::Result<bool> {
         if commit.view_num != self.view_num || self.view_change() {
             if commit.view_num >= self.view_num {
@@ -894,7 +906,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     }
 }
 
-impl<M: ReplicaCommon> OnEvent<Verified<Commit>> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+impl<M: ReplicaCommon> OnEvent<Verified<Commit>> for Replica<M::PN, M::DN, M::CW, M::S, M::A, M> {
     fn on_event(
         &mut self,
         Verified(commit): Verified<Commit>,
@@ -925,7 +937,7 @@ impl<M: ReplicaCommon> OnEvent<Verified<Commit>> for Replica<M::N, M::CN, M::CW,
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct StateTransfer(u32);
 
-impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+impl<M: ReplicaCommon> Replica<M::PN, M::DN, M::CW, M::S, M::A, M> {
     fn insert_commit(
         &mut self,
         commit: Verifiable<Commit>,
@@ -1015,7 +1027,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     }
 }
 
-impl<M: ReplicaCommon> OnEvent<StateTransfer> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+impl<M: ReplicaCommon> OnEvent<StateTransfer> for Replica<M::PN, M::DN, M::CW, M::S, M::A, M> {
     fn on_event(
         &mut self,
         StateTransfer(op_num): StateTransfer,
@@ -1028,7 +1040,7 @@ impl<M: ReplicaCommon> OnEvent<StateTransfer> for Replica<M::N, M::CN, M::CW, M:
     }
 }
 
-impl<M: ReplicaCommon> OnEvent<Recv<QueryNewView>> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+impl<M: ReplicaCommon> OnEvent<Recv<QueryNewView>> for Replica<M::PN, M::DN, M::CW, M::S, M::A, M> {
     fn on_event(
         &mut self,
         Recv(query_new_view): Recv<QueryNewView>,
@@ -1047,7 +1059,7 @@ impl<M: ReplicaCommon> OnEvent<Recv<QueryNewView>> for Replica<M::N, M::CN, M::C
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProgressViewChange;
 
-impl<M: ReplicaCommon> OnEvent<DoViewChange> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+impl<M: ReplicaCommon> OnEvent<DoViewChange> for Replica<M::PN, M::DN, M::CW, M::S, M::A, M> {
     fn on_event(
         &mut self,
         DoViewChange(view_num): DoViewChange,
@@ -1068,7 +1080,7 @@ impl<M: ReplicaCommon> OnEvent<DoViewChange> for Replica<M::N, M::CN, M::CW, M::
     }
 }
 
-impl<M: ReplicaCommon> OnEvent<ProgressViewChange> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+impl<M: ReplicaCommon> OnEvent<ProgressViewChange> for Replica<M::PN, M::DN, M::CW, M::S, M::A, M> {
     fn on_event(
         &mut self,
         ProgressViewChange: ProgressViewChange,
@@ -1081,7 +1093,7 @@ impl<M: ReplicaCommon> OnEvent<ProgressViewChange> for Replica<M::N, M::CN, M::C
     }
 }
 
-impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+impl<M: ReplicaCommon> Replica<M::PN, M::DN, M::CW, M::S, M::A, M> {
     fn do_view_change(&mut self) -> Result<(), anyhow::Error> {
         let log = self
             .log
@@ -1105,7 +1117,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     }
 }
 
-impl<M: ReplicaCommon> OnEvent<Signed<ViewChange>> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+impl<M: ReplicaCommon> OnEvent<Signed<ViewChange>> for Replica<M::PN, M::DN, M::CW, M::S, M::A, M> {
     fn on_event(
         &mut self,
         Signed(view_change): Signed<ViewChange>,
@@ -1141,7 +1153,7 @@ fn verify_view_change(
 }
 
 impl<M: ReplicaCommon> OnEvent<Recv<Verifiable<ViewChange>>>
-    for Replica<M::N, M::CN, M::CW, M::S, M::A, M>
+    for Replica<M::PN, M::DN, M::CW, M::S, M::A, M>
 {
     fn on_event(
         &mut self,
@@ -1167,7 +1179,7 @@ impl<M: ReplicaCommon> OnEvent<Recv<Verifiable<ViewChange>>>
 }
 
 impl<M: ReplicaCommon> OnEvent<Verified<ViewChange>>
-    for Replica<M::N, M::CN, M::CW, M::S, M::A, M>
+    for Replica<M::PN, M::DN, M::CW, M::S, M::A, M>
 {
     fn on_event(
         &mut self,
@@ -1224,7 +1236,7 @@ fn pre_prepares_for_view_changes(
     Ok(pre_prepares)
 }
 
-impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+impl<M: ReplicaCommon> Replica<M::PN, M::DN, M::CW, M::S, M::A, M> {
     fn insert_view_change(
         &mut self,
         view_change: Verifiable<ViewChange>,
@@ -1276,7 +1288,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
     }
 }
 
-impl<M: ReplicaCommon> OnEvent<Signed<NewView>> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+impl<M: ReplicaCommon> OnEvent<Signed<NewView>> for Replica<M::PN, M::DN, M::CW, M::S, M::A, M> {
     fn on_event(
         &mut self,
         Signed(new_view): Signed<NewView>,
@@ -1293,7 +1305,7 @@ impl<M: ReplicaCommon> OnEvent<Signed<NewView>> for Replica<M::N, M::CN, M::CW, 
     }
 }
 
-impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+impl<M: ReplicaCommon> Replica<M::PN, M::DN, M::CW, M::S, M::A, M> {
     fn enter_view(
         &mut self,
         new_view: Verifiable<NewView>,
@@ -1361,7 +1373,7 @@ impl<M: ReplicaCommon> Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
 }
 
 impl<M: ReplicaCommon> OnEvent<Recv<Verifiable<NewView>>>
-    for Replica<M::N, M::CN, M::CW, M::S, M::A, M>
+    for Replica<M::PN, M::DN, M::CW, M::S, M::A, M>
 {
     fn on_event(
         &mut self,
@@ -1409,7 +1421,7 @@ impl<M: ReplicaCommon> OnEvent<Recv<Verifiable<NewView>>>
     }
 }
 
-impl<M: ReplicaCommon> OnEvent<Verified<NewView>> for Replica<M::N, M::CN, M::CW, M::S, M::A, M> {
+impl<M: ReplicaCommon> OnEvent<Verified<NewView>> for Replica<M::PN, M::DN, M::CW, M::S, M::A, M> {
     fn on_event(
         &mut self,
         Verified(new_view): Verified<NewView>,
