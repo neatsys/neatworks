@@ -122,14 +122,14 @@ impl DowncastEvent for TimerData {
 #[derive(Debug, Clone, derive_more::From)]
 enum CryptoEvent {
     SignedPrePrepare(Signed<PrePrepare>, Vec<Request<Addr>>),
-    VerifiedPrePrepare(Verified<PrePrepare>, Vec<Request<Addr>>),
     SignedPrepare(Signed<Prepare>),
-    VerifiedPrepare(Verified<Prepare>),
     SignedCommit(Signed<Commit>),
-    VerifiedCommit(Verified<Commit>),
     SignedViewChange(Signed<ViewChange>),
-    VerifiedViewChange(Verified<ViewChange>),
     SignedNewView(Signed<NewView>),
+    VerifiedPrePrepare(Verified<PrePrepare>, Vec<Request<Addr>>),
+    VerifiedPrepare(Verified<Prepare>),
+    VerifiedCommit(Verified<Commit>),
+    VerifiedViewChange(Verified<ViewChange>),
     VerifiedNewView(Verified<NewView>),
 }
 
@@ -330,7 +330,7 @@ impl<W: Workload<Op = Payload, Result = Payload>, F: Filter + Clone, const CHECK
                     (Addr::Client(index), Message::ToClient(message)) => self.clients
                         [index as usize]
                         .state
-                        .on_event(Recv(message), timer)?,
+                        .on_event(Recv(message), timer),
                     (Addr::Replica(index), Message::ToReplica(message)) => {
                         struct Inline<'a, S, T>(&'a mut S, &'a mut T);
                         impl<S: OnEventRichTimer<M>, M, T: RichTimer<S>> SendEvent<M> for Inline<'_, S, T> {
@@ -338,7 +338,7 @@ impl<W: Workload<Op = Payload, Result = Payload>, F: Filter + Clone, const CHECK
                                 self.0.on_event(event, self.1)
                             }
                         }
-                        message.send(&mut Inline(&mut self.replicas[index as usize], timer))?
+                        message.send(&mut Inline(&mut self.replicas[index as usize], timer))
                     }
                     _ => anyhow::bail!("unimplemented"),
                 }
@@ -361,16 +361,14 @@ impl<W: Workload<Op = Payload, Result = Payload>, F: Filter + Clone, const CHECK
                 timer.step_timer(&timer_id)?;
                 match (addr, timer_data) {
                     (Addr::Client(index), TimerData::Resend) => {
-                        self.clients[index as usize].state.on_event(Resend, timer)?
+                        self.clients[index as usize].state.on_event(Resend, timer)
                     }
                     (Addr::Replica(index), event) => {
                         let replica = &mut self.replicas[index as usize];
                         match event {
-                            TimerData::ProgressPrepared(event) => replica.on_event(event, timer)?,
-                            TimerData::DoViewChange(event) => replica.on_event(event, timer)?,
-                            TimerData::ProgressViewChange(event) => {
-                                replica.on_event(event, timer)?
-                            }
+                            TimerData::ProgressPrepared(event) => replica.on_event(event, timer),
+                            TimerData::DoViewChange(event) => replica.on_event(event, timer),
+                            TimerData::ProgressViewChange(event) => replica.on_event(event, timer),
                             _ => anyhow::bail!("unimplemented"),
                         }
                     }
@@ -378,28 +376,17 @@ impl<W: Workload<Op = Payload, Result = Payload>, F: Filter + Clone, const CHECK
                 }
             }
         }
-        self.flush()
+    }
+
+    fn fix(&mut self) -> anyhow::Result<()> {
+        State::fix(self)
     }
 }
 
 impl<W: Workload<Op = Payload, Result = Payload>, F: Filter, const CHECK: bool>
     State<W, W::OpContext, F, CHECK>
 {
-    fn launch(&mut self) -> anyhow::Result<()> {
-        for client in &mut self.clients {
-            client.close_loop.on_event(Init, &mut UnreachableTimer)?
-        }
-        self.flush()
-    }
-
-    fn launch_client(&mut self, index: usize) -> anyhow::Result<()> {
-        self.clients[index]
-            .close_loop
-            .on_event(Init, &mut UnreachableTimer)?;
-        self.flush()
-    }
-
-    fn flush(&mut self) -> anyhow::Result<()> {
+    fn fix(&mut self) -> anyhow::Result<()> {
         let mut rerun = true;
         while replace(&mut rerun, false) {
             for (index, replica) in self.replicas.iter_mut().enumerate() {
@@ -481,6 +468,20 @@ impl<W: Workload<Op = Payload, Result = Payload>, F: Filter, const CHECK: bool>
             && client.close_loop.sender.is_empty()));
         Ok(())
     }
+
+    fn launch(&mut self) -> anyhow::Result<()> {
+        for client in &mut self.clients {
+            client.close_loop.on_event(Init, &mut UnreachableTimer)?
+        }
+        self.fix()
+    }
+
+    fn launch_client(&mut self, index: usize) -> anyhow::Result<()> {
+        self.clients[index]
+            .close_loop
+            .on_event(Init, &mut UnreachableTimer)?;
+        self.fix()
+    }
 }
 
 #[derive(Debug, derive_more::Display, derive_more::Error)]
@@ -493,7 +494,8 @@ pub trait SimulateState: crate::search::State {
             anyhow::bail!(ProgressExhausted)
         };
         anyhow::ensure!(events.is_empty(), "simulate step returns multiple events");
-        self.step(event)
+        self.step(event)?;
+        self.fix()
     }
 }
 

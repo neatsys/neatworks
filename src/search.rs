@@ -5,7 +5,7 @@ use std::{
     hash::{BuildHasherDefault, Hash},
     iter::repeat,
     num::NonZeroUsize,
-    panic::{catch_unwind, UnwindSafe},
+    panic::{catch_unwind, AssertUnwindSafe, UnwindSafe},
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::SeqCst},
         Arc, Barrier, Condvar, Mutex,
@@ -27,18 +27,17 @@ pub trait State {
 
     fn step(&mut self, event: Self::Event) -> anyhow::Result<()>;
 
-    fn step_catch_unwind(mut self, event: Self::Event) -> anyhow::Result<Self>
-    where
-        Self: UnwindSafe + Sized,
-        Self::Event: UnwindSafe,
-    {
-        catch_unwind(move || {
-            self.step(event)?;
-            Ok(self)
-        })
-        .map_err(error_from_panic)
-        .and_then(identity)
+    fn fix(&mut self) -> anyhow::Result<()> {
+        Ok(())
     }
+}
+
+fn step<S: State>(state: &mut S, event: S::Event) -> anyhow::Result<()> {
+    // TODO revise whether this panic safety reasoning is correct
+    catch_unwind(AssertUnwindSafe(|| state.step(event)))
+        .map_err(error_from_panic)
+        .and_then(identity)?;
+    state.fix()
 }
 
 #[derive(Debug, Clone)]
@@ -373,13 +372,11 @@ fn breath_first_worker<S, T, I, G, P>(
             // println!("check events");
             for event in state.events() {
                 // println!("step {event:?}");
-                let next_state = match state.clone().step_catch_unwind(event.clone()) {
-                    Ok(next_state) => next_state,
-                    Err(err) => {
-                        search_finish(SearchWorkerResult::Error(state, event, err));
-                        break 'depth;
-                    }
-                };
+                let mut next_state = state.clone();
+                if let Err(err) = step(&mut next_state, event.clone()) {
+                    search_finish(SearchWorkerResult::Error(state, event, err));
+                    break 'depth;
+                }
                 let next_dry_state = Arc::new(next_state.clone().into());
                 // do not replace a previously-found state, which may be reached with a shorter
                 // trace from initial state
@@ -474,13 +471,10 @@ fn random_depth_first_worker<S, T, I, G, P>(
             let Some(event) = events.choose(&mut thread_rng()).cloned() else {
                 break;
             };
-            state = match state.step_catch_unwind(event.clone()) {
-                Ok(next_state) => next_state,
-                Err(err) => {
-                    search_finish(SearchResult::Err(trace, event, err));
-                    break;
-                }
-            };
+            if let Err(err) = step(&mut state, event.clone()) {
+                search_finish(SearchResult::Err(trace, event, err));
+                break;
+            }
             num_state.fetch_add(1, SeqCst);
             trace.push((event, state.clone().into()));
             if let Err(err) = (settings.invariant)(&state) {

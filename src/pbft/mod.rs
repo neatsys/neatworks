@@ -78,7 +78,8 @@ pub struct NewView {
 // TODO currently every NewView covers the "whole history", so a single NewView can bring a replica
 // into the view no matter where it previously was at
 // after checkpoint is implemented, QueryNewView should be with the latest checkpoint this replica
-// knows, and all the necessary sub-map of the `new_views` should be replied
+// knows, and all the necessary sub-map of the `new_views` should be replied (which probably implies
+// yet another message type, sending multiple NewView should work but only in a poor fashion)
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct QueryNewView {
     view_num: u32,

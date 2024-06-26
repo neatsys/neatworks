@@ -289,6 +289,12 @@ pub mod erased {
     #[allow(clippy::complexity)]
     pub struct Event<S, T>(Box<dyn FnOnce(&mut S, &mut T) -> anyhow::Result<()> + Send>);
 
+    impl<S, T> Debug for Event<S, T> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_tuple("Event").field(&"..").finish()
+        }
+    }
+
     pub trait OnEvent<M> {
         fn on_event(&mut self, event: M, timer: &mut impl Timer) -> anyhow::Result<()>;
     }
