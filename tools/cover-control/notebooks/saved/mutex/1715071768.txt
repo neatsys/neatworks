@@ -1,9 +1,0 @@
-One,Untrusted,25,0.34085837
-One,Untrusted,25,0.340829
-One,Untrusted,25,0.3406075
-One,Untrusted,25,0.34076914
-One,Untrusted,25,0.34077543
-One,Untrusted,25,0.34086418
-One,Untrusted,25,0.34099588
-One,Untrusted,25,0.34075615
-One,Untrusted,25,0.34093633

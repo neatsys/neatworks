@@ -1,9 +1,0 @@
-One,Replicated,65,1.4592712
-One,Replicated,65,1.4479861
-One,Replicated,65,1.4577265
-One,Replicated,65,1.4611671
-One,Replicated,65,1.4593906
-One,Replicated,65,1.4535724
-One,Replicated,65,1.4426842
-One,Replicated,65,1.4534698
-One,Replicated,65,1.458021

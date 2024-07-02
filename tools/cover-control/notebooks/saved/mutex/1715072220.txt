@@ -1,9 +1,0 @@
-One,Replicated,15,1.2181233
-One,Replicated,15,1.2178172
-One,Replicated,15,1.2175386
-One,Replicated,15,1.2178359
-One,Replicated,15,1.2178323
-One,Replicated,15,1.2176194
-One,Replicated,15,1.2175903
-One,Replicated,15,1.2177563
-One,Replicated,15,1.2175705

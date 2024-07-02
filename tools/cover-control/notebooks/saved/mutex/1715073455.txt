@@ -1,9 +1,0 @@
-One,NitroEnclaves,35,0.39644635
-One,NitroEnclaves,35,0.39478445
-One,NitroEnclaves,35,0.4072636
-One,NitroEnclaves,35,0.39133698
-One,NitroEnclaves,35,0.3915429
-One,NitroEnclaves,35,0.39676785
-One,NitroEnclaves,35,0.39147654
-One,NitroEnclaves,35,0.39106378
-One,NitroEnclaves,35,0.39328268
