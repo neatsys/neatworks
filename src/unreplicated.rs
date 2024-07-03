@@ -151,14 +151,14 @@ impl<A, C: ServerContext<A>> OnErasedEvent<Recv<Request<A>>, C> for ServerState 
 }
 
 pub mod context {
-    use crate::event::{task::ScheduleState, Erase, ErasedEvent};
+    use crate::event::task::EraseScheduleState;
 
     use super::*;
 
     pub struct Client<N, U, A> {
         pub net: N,
         pub upcall: U,
-        pub schedule: Erase<ClientState<A>, Self, ScheduleState<ErasedEvent<ClientState<A>, Self>>>,
+        pub schedule: EraseScheduleState<ClientState<A>, Self>,
     }
 
     impl<N, U, A: Addr> ClientContext<A> for Client<N, U, A>
@@ -168,8 +168,7 @@ pub mod context {
     {
         type Net = N;
         type Upcall = U;
-        type Schedule =
-            Erase<ClientState<A>, Self, ScheduleState<ErasedEvent<ClientState<A>, Self>>>;
+        type Schedule = EraseScheduleState<ClientState<A>, Self>;
         fn net(&mut self) -> &mut Self::Net {
             &mut self.net
         }

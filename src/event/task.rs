@@ -8,7 +8,7 @@ use tokio::{
     time::interval,
 };
 
-use super::{OnEvent, ScheduleEvent, SendEvent, TimerId};
+use super::{Erase, ErasedEvent, OnEvent, ScheduleEvent, SendEvent, TimerId};
 
 impl<M: Into<N>, N> SendEvent<M> for UnboundedSender<N> {
     fn send(&mut self, event: M) -> anyhow::Result<()> {
@@ -30,7 +30,14 @@ pub async fn run<M, C>(
     receiver: &mut UnboundedReceiver<M>,
 ) -> anyhow::Result<()> {
     let (_sender, mut schedule_receiver) = unbounded_channel();
-    run_with_schedule(state, context, receiver, &mut schedule_receiver, |_| unreachable!()).await
+    run_with_schedule(
+        state,
+        context,
+        receiver,
+        &mut schedule_receiver,
+        |_| unreachable!(),
+    )
+    .await
 }
 
 #[derive_where(Debug)]
@@ -111,3 +118,5 @@ pub async fn run_with_schedule<M, C>(
         }
     }
 }
+
+pub type EraseScheduleState<S, C> = Erase<S, C, ScheduleState<ErasedEvent<S, C>>>;

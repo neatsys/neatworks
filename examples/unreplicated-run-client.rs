@@ -4,14 +4,16 @@ use bytes::Bytes;
 use neatworks::{
     event::{
         task::{run_with_schedule, ScheduleState},
-        Erase, Erased,
+        Erase, Erased, SendEvent,
     },
     net::{combinators::Forward, task::udp},
     unreplicated,
-    workload::events::InvokeOk,
+    workload::events::{Invoke, InvokeOk},
 };
 use rand::random;
-use tokio::{net::UdpSocket, sync::mpsc::unbounded_channel};
+use tokio::{net::UdpSocket, select, sync::mpsc::unbounded_channel, time::Instant};
+
+mod utils;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
@@ -30,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
     let (sender, mut receiver) = unbounded_channel();
     let net_task = udp::run(
         &socket,
-        unreplicated::codec::client_decode(Erase::new(sender)),
+        unreplicated::codec::client_decode(Erase::new(sender.clone())),
     );
     let client_task = run_with_schedule(
         Erased::new(unreplicated::ClientState::new(random(), addr)),
@@ -39,5 +41,22 @@ async fn main() -> anyhow::Result<()> {
         &mut schedule_receiver,
         |context| &mut *context.schedule,
     );
-    Ok(())
+    let invoke_task = async {
+        let mut sender = Erase::new(sender);
+        for _ in 0..10 {
+            let start = Instant::now();
+            sender.send(Invoke(Default::default()))?;
+            let recv = upcall_receiver.recv().await;
+            anyhow::ensure!(recv.is_some());
+            println!("{:?}", start.elapsed())
+        }
+        anyhow::Ok(())
+    };
+    utils::run_until(invoke_task, async {
+        select! {
+            result = net_task => result,
+            result = client_task => result,
+        }
+    })
+    .await
 }

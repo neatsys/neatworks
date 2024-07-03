@@ -7,6 +7,8 @@ use neatworks::{
 };
 use tokio::{net::UdpSocket, select, signal::ctrl_c, sync::mpsc::unbounded_channel};
 
+mod utils;
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let socket = Arc::new(UdpSocket::bind("localhost:3000").await?);
@@ -35,14 +37,13 @@ async fn main() -> anyhow::Result<()> {
 async fn run_until_interrupted(
     task: impl Future<Output = anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
-    let interrupt_task = async {
-        ctrl_c().await?;
-        println!();
-        anyhow::Ok(())
-    };
-    select! {
-        result = task => result?,
-        result = interrupt_task => return result,
-    }
-    anyhow::bail!("unexpected termination of forever task")
+    utils::run_until(
+        async {
+            ctrl_c().await?;
+            println!();
+            anyhow::Ok(())
+        },
+        task,
+    )
+    .await
 }
