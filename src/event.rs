@@ -7,10 +7,24 @@ pub trait SendEvent<M> {
     fn send(&mut self, event: M) -> anyhow::Result<()>;
 }
 
+impl<E: SendEvent<M>, M> SendEvent<M> for &mut E {
+    fn send(&mut self, event: M) -> anyhow::Result<()> {
+        E::send(self, event)
+    }
+}
+
 pub trait OnEvent<C> {
     type Event;
 
     fn on_event(&mut self, event: Self::Event, context: &mut C) -> anyhow::Result<()>;
+}
+
+impl<S: OnEvent<C>, C> OnEvent<C> for &mut S {
+    type Event = S::Event;
+
+    fn on_event(&mut self, event: Self::Event, context: &mut C) -> anyhow::Result<()> {
+        S::on_event(self, event, context)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -22,11 +36,11 @@ pub trait ScheduleEvent<M> {
     fn unset(&mut self, id: TimerId) -> anyhow::Result<()>;
 }
 
-pub struct Erased<S, C>(S, PhantomData<C>);
+pub struct Erased<C, S>(S, PhantomData<C>);
 
 type ErasedEvent<S, C> = Box<dyn FnOnce(&mut S, &mut C) -> anyhow::Result<()> + Send>;
 
-impl<S, C> OnEvent<C> for Erased<S, C> {
+impl<S, C> OnEvent<C> for Erased<C, S> {
     type Event = ErasedEvent<S, C>;
 
     fn on_event(&mut self, event: Self::Event, context: &mut C) -> anyhow::Result<()> {
@@ -38,10 +52,10 @@ pub trait OnErasedEvent<M, C> {
     fn on_event(&mut self, event: M, context: &mut C) -> anyhow::Result<()>;
 }
 
-pub struct ErasedSender<E, S, C>(E, PhantomData<(S, C)>);
+pub struct ErasedSender<S, C, E>(E, PhantomData<(S, C)>);
 
 impl<E: SendEvent<ErasedEvent<S, C>>, S: OnErasedEvent<M, C>, C, M: Send + 'static> SendEvent<M>
-    for ErasedSender<E, S, C>
+    for ErasedSender<S, C, E>
 {
     fn send(&mut self, event: M) -> anyhow::Result<()> {
         self.0.send(Box::new(move |state, context| {

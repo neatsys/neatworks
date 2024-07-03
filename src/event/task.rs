@@ -24,7 +24,7 @@ async fn must_recv<M>(receiver: &mut UnboundedReceiver<M>) -> anyhow::Result<M> 
 
 pub async fn run<M, C>(
     receiver: &mut UnboundedReceiver<M>,
-    state: &mut impl OnEvent<C, Event = M>,
+    mut state: impl OnEvent<C, Event = M>,
     context: &mut C,
 ) -> anyhow::Result<()> {
     loop {
@@ -72,7 +72,7 @@ impl<M> ScheduleEvent<M> for ScheduleState<M> {
 pub async fn run_schedule<M: Clone, C: AsMut<ScheduleState<M>>>(
     receiver: &mut UnboundedReceiver<M>,
     schedule_receiver: &mut UnboundedReceiver<u32>,
-    state: &mut impl OnEvent<C, Event = M>,
+    mut state: impl OnEvent<C, Event = M>,
     context: &mut C,
 ) -> anyhow::Result<()> {
     loop {
