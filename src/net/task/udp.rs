@@ -3,10 +3,7 @@ use std::{net::SocketAddr, sync::Arc};
 use bytes::Bytes;
 use tokio::{net::UdpSocket, spawn};
 
-use crate::{
-    event::SendEvent,
-    net::events::{Recv, Send},
-};
+use crate::{event::SendEvent, net::events::Send};
 
 impl SendEvent<Send<SocketAddr, Bytes>> for Arc<UdpSocket> {
     fn send(&mut self, Send(remote, message): Send<SocketAddr, Bytes>) -> anyhow::Result<()> {
@@ -22,11 +19,11 @@ impl SendEvent<Send<SocketAddr, Bytes>> for Arc<UdpSocket> {
 
 pub async fn run(
     socket: &UdpSocket,
-    mut sender: impl SendEvent<Recv<Bytes>>,
+    mut on_buf: impl FnMut(&[u8]) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let mut buf = vec![0; 64 << 10];
     loop {
         let (len, _) = socket.recv_from(&mut buf).await?;
-        sender.send(Recv(Bytes::copy_from_slice(&buf[..len])))?
+        on_buf(&buf[..len])?
     }
 }

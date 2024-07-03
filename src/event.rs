@@ -1,6 +1,8 @@
 use std::{marker::PhantomData, time::Duration};
 
-pub mod semantic;
+use derive_more::{Deref, DerefMut, Display, Error};
+use derive_where::derive_where;
+
 pub mod task;
 
 pub trait SendEvent<M> {
@@ -27,16 +29,30 @@ impl<S: OnEvent<C>, C> OnEvent<C> for &mut S {
     }
 }
 
+#[derive(Debug, Display, Error)]
+pub struct Exit;
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TimerId(u32);
 
 pub trait ScheduleEvent<M> {
-    fn set(&mut self, period: Duration, event: M) -> anyhow::Result<TimerId>;
+    fn set(
+        &mut self,
+        period: Duration,
+        event: impl FnMut() -> M + Send + 'static,
+    ) -> anyhow::Result<TimerId>;
 
     fn unset(&mut self, id: TimerId) -> anyhow::Result<()>;
 }
 
-pub struct Erased<C, S>(S, PhantomData<C>);
+#[derive_where(Debug; S)]
+#[derive(Deref, DerefMut)]
+pub struct Erased<C, S>(
+    #[deref]
+    #[deref_mut]
+    S,
+    PhantomData<C>,
+);
 
 impl<C, S> Erased<C, S> {
     pub fn new(state: S) -> Self {
@@ -44,7 +60,7 @@ impl<C, S> Erased<C, S> {
     }
 }
 
-type ErasedEvent<S, C> = Box<dyn FnOnce(&mut S, &mut C) -> anyhow::Result<()> + Send>;
+pub type ErasedEvent<S, C> = Box<dyn FnOnce(&mut S, &mut C) -> anyhow::Result<()> + Send>;
 
 impl<S, C> OnEvent<C> for Erased<C, S> {
     type Event = ErasedEvent<S, C>;
@@ -58,20 +74,46 @@ pub trait OnErasedEvent<M, C> {
     fn on_event(&mut self, event: M, context: &mut C) -> anyhow::Result<()>;
 }
 
-pub struct ErasedSender<S, C, E>(E, PhantomData<(S, C)>);
+#[derive_where(Debug; E)]
+#[derive(Deref, DerefMut)]
+pub struct Erase<S, C, E>(
+    #[deref]
+    #[deref_mut]
+    E,
+    PhantomData<(S, C)>,
+);
 
-impl<S, C, E> ErasedSender<S, C, E> {
+impl<S, C, E> Erase<S, C, E> {
     pub fn new(inner: E) -> Self {
         Self(inner, Default::default())
     }
 }
 
 impl<E: SendEvent<ErasedEvent<S, C>>, S: OnErasedEvent<M, C>, C, M: Send + 'static> SendEvent<M>
-    for ErasedSender<S, C, E>
+    for Erase<S, C, E>
 {
     fn send(&mut self, event: M) -> anyhow::Result<()> {
         self.0.send(Box::new(move |state, context| {
             state.on_event(event, context)
         }))
+    }
+}
+
+impl<T: ScheduleEvent<ErasedEvent<S, C>>, S: OnErasedEvent<M, C>, C, M: Send + 'static>
+    ScheduleEvent<M> for Erase<S, C, T>
+{
+    fn set(
+        &mut self,
+        period: Duration,
+        mut event: impl FnMut() -> M + Send + 'static,
+    ) -> anyhow::Result<TimerId> {
+        self.0.set(period, move || {
+            let event = event();
+            Box::new(move |state, context| state.on_event(event, context))
+        })
+    }
+
+    fn unset(&mut self, id: TimerId) -> anyhow::Result<()> {
+        self.0.unset(id)
     }
 }

@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
+use derive_where::derive_where;
 use tokio::{
     select, spawn,
-    sync::mpsc::{UnboundedReceiver, UnboundedSender},
+    sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
     task::AbortHandle,
     time::interval,
 };
@@ -11,7 +12,8 @@ use super::{OnEvent, ScheduleEvent, SendEvent, TimerId};
 
 impl<M: Into<N>, N> SendEvent<M> for UnboundedSender<N> {
     fn send(&mut self, event: M) -> anyhow::Result<()> {
-        UnboundedSender::send(self, event.into()).map_err(|_| anyhow::format_err!("send error"))
+        UnboundedSender::send(self, event.into())
+            .map_err(|_| anyhow::format_err!("unexpected send channel closed"))
     }
 }
 
@@ -23,24 +25,38 @@ async fn must_recv<M>(receiver: &mut UnboundedReceiver<M>) -> anyhow::Result<M> 
 }
 
 pub async fn run<M, C>(
-    receiver: &mut UnboundedReceiver<M>,
-    mut state: impl OnEvent<C, Event = M>,
+    state: impl OnEvent<C, Event = M>,
     context: &mut C,
+    receiver: &mut UnboundedReceiver<M>,
 ) -> anyhow::Result<()> {
-    loop {
-        let event = must_recv(receiver).await?;
-        state.on_event(event, context)?
-    }
+    let (_sender, mut schedule_receiver) = unbounded_channel();
+    run_with_schedule(state, context, receiver, &mut schedule_receiver, |_| unreachable!()).await
 }
 
+#[derive_where(Debug)]
 pub struct ScheduleState<M> {
     count: u32,
-    events: HashMap<u32, (AbortHandle, M)>,
+    #[derive_where(skip)]
+    events: HashMap<u32, (AbortHandle, Box<dyn FnMut() -> M + Send>)>,
     sender: UnboundedSender<u32>,
 }
 
+impl<M> ScheduleState<M> {
+    pub fn new(sender: UnboundedSender<u32>) -> Self {
+        Self {
+            sender,
+            count: 0,
+            events: Default::default(),
+        }
+    }
+}
+
 impl<M> ScheduleEvent<M> for ScheduleState<M> {
-    fn set(&mut self, period: std::time::Duration, event: M) -> anyhow::Result<super::TimerId> {
+    fn set(
+        &mut self,
+        period: std::time::Duration,
+        event: impl FnMut() -> M + Send + 'static,
+    ) -> anyhow::Result<super::TimerId> {
         self.count += 1;
         let id = self.count;
         let sender = self.sender.clone();
@@ -56,7 +72,7 @@ impl<M> ScheduleEvent<M> for ScheduleState<M> {
             }
         })
         .abort_handle();
-        self.events.insert(id, (handle, event));
+        self.events.insert(id, (handle, Box::new(event)));
         Ok(TimerId(id))
     }
 
@@ -69,11 +85,12 @@ impl<M> ScheduleEvent<M> for ScheduleState<M> {
     }
 }
 
-pub async fn run_schedule<M: Clone, C: AsMut<ScheduleState<M>>>(
-    receiver: &mut UnboundedReceiver<M>,
-    schedule_receiver: &mut UnboundedReceiver<u32>,
+pub async fn run_with_schedule<M, C>(
     mut state: impl OnEvent<C, Event = M>,
     context: &mut C,
+    receiver: &mut UnboundedReceiver<M>,
+    schedule_receiver: &mut UnboundedReceiver<u32>,
+    schedule_mut: impl Fn(&mut C) -> &mut ScheduleState<M>,
 ) -> anyhow::Result<()> {
     loop {
         enum Select<M> {
@@ -86,10 +103,10 @@ pub async fn run_schedule<M: Clone, C: AsMut<ScheduleState<M>>>(
         } {
             Select::Recv(event) => state.on_event(event, context)?,
             Select::ScheduleRecv(id) => {
-                let Some((_, event)) = context.as_mut().events.get(&id) else {
+                let Some((_, event)) = schedule_mut(context).events.get_mut(&id) else {
                     continue;
                 };
-                state.on_event(event.clone(), context)?
+                state.on_event(event(), context)?
             }
         }
     }

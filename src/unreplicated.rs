@@ -4,14 +4,12 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    event::{
-        semantic::{Invoke, InvokeOk},
-        OnErasedEvent, ScheduleEvent, SendEvent, TimerId,
-    },
+    event::{OnErasedEvent, ScheduleEvent, SendEvent, TimerId},
     net::{
         events::{Recv, Send},
         Addr,
     },
+    workload::events::{Invoke, InvokeOk},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -42,6 +40,17 @@ struct Outstanding {
     timer: TimerId,
 }
 
+impl<A> ClientState<A> {
+    pub fn new(id: u32, addr: A) -> Self {
+        Self {
+            id,
+            addr,
+            seq: 0,
+            outstanding: Default::default(),
+        }
+    }
+}
+
 pub mod client {
     #[derive(Debug)]
     pub struct Resend;
@@ -63,7 +72,7 @@ impl<A: Addr, C: ClientContext<A>> OnErasedEvent<Invoke<Bytes>, C> for ClientSta
             op,
             timer: context
                 .schedule()
-                .set(Duration::from_millis(100), client::Resend)?,
+                .set(Duration::from_millis(100), || client::Resend)?,
         });
         anyhow::ensure!(replaced.is_none());
         self.send_request(context)
@@ -142,23 +151,25 @@ impl<A, C: ServerContext<A>> OnErasedEvent<Recv<Request<A>>, C> for ServerState 
 }
 
 pub mod context {
+    use crate::event::{task::ScheduleState, Erase, ErasedEvent};
+
     use super::*;
 
-    pub struct Client<N, U, T> {
+    pub struct Client<N, U, A> {
         pub net: N,
         pub upcall: U,
-        pub schedule: T,
+        pub schedule: Erase<ClientState<A>, Self, ScheduleState<ErasedEvent<ClientState<A>, Self>>>,
     }
 
-    impl<N, U, T, A> ClientContext<A> for Client<N, U, T>
+    impl<N, U, A: Addr> ClientContext<A> for Client<N, U, A>
     where
         N: SendEvent<Send<(), Request<A>>>,
         U: SendEvent<InvokeOk<Bytes>>,
-        T: ScheduleEvent<client::Resend>,
     {
         type Net = N;
         type Upcall = U;
-        type Schedule = T;
+        type Schedule =
+            Erase<ClientState<A>, Self, ScheduleState<ErasedEvent<ClientState<A>, Self>>>;
         fn net(&mut self) -> &mut Self::Net {
             &mut self.net
         }
@@ -182,5 +193,31 @@ pub mod context {
         fn net(&mut self) -> &mut Self::Net {
             &mut self.net
         }
+    }
+}
+
+pub mod codec {
+    use crate::codec::{bincode_decode, Encode};
+
+    use super::*;
+
+    pub fn client_encode<A: Addr, N>(net: N) -> Encode<Request<A>, N> {
+        Encode::bincode(net)
+    }
+
+    pub fn client_decode<'a>(
+        mut sender: impl SendEvent<Recv<Reply>> + 'a,
+    ) -> impl FnMut(&[u8]) -> anyhow::Result<()> + 'a {
+        move |buf| sender.send(Recv(bincode_decode(buf)?))
+    }
+
+    pub fn server_encode<N>(net: N) -> Encode<Reply, N> {
+        Encode::bincode(net)
+    }
+
+    pub fn server_decode<'a, A: Addr>(
+        mut sender: impl SendEvent<Recv<Request<A>>> + 'a,
+    ) -> impl FnMut(&[u8]) -> anyhow::Result<()> + 'a {
+        move |buf| sender.send(Recv(bincode_decode(buf)?))
     }
 }

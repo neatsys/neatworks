@@ -1,11 +1,8 @@
 use std::{future::Future, sync::Arc};
 
 use neatworks::{
-    event::{task::run, Erased, ErasedSender},
-    net::{
-        combinators::{BincodeDecode, BincodeEncode},
-        task::udp,
-    },
+    event::{task::run, Erase, Erased},
+    net::task::udp,
     unreplicated,
 };
 use tokio::{net::UdpSocket, select, signal::ctrl_c, sync::mpsc::unbounded_channel};
@@ -14,14 +11,17 @@ use tokio::{net::UdpSocket, select, signal::ctrl_c, sync::mpsc::unbounded_channe
 async fn main() -> anyhow::Result<()> {
     let socket = Arc::new(UdpSocket::bind("localhost:3000").await?);
     let mut context = unreplicated::context::Server {
-        net: BincodeEncode(socket.clone()),
+        net: unreplicated::codec::server_encode(socket.clone()),
     };
     let (sender, mut receiver) = unbounded_channel();
-    let net_task = udp::run(&socket, BincodeDecode::new(ErasedSender::new(sender)));
+    let net_task = udp::run(
+        &socket,
+        unreplicated::codec::server_decode(Erase::new(sender)),
+    );
     let server_task = run(
-        &mut receiver,
         Erased::new(unreplicated::ServerState::new()),
         &mut context,
+        &mut receiver,
     );
     run_until_interrupted(async {
         select! {
