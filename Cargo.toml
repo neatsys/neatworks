@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = { version = "1.0.86", features = ["backtrace"] }
+bytes = { version = "1.6.0", features = ["serde"] }
+derive_more = "0.99.18"
+serde = { version = "1.0.203", features = ["derive"] }
+tokio = { version = "1.38.0", features = ["macros", "rt", "sync", "time"] }
