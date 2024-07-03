@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     event::{
@@ -13,6 +14,7 @@ use crate::{
     },
 };
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Request<A> {
     seq: u32,
     op: Bytes,
@@ -20,7 +22,7 @@ pub struct Request<A> {
     client_addr: A,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Reply {
     seq: u32,
     result: Bytes,
@@ -45,9 +47,13 @@ pub mod client {
     pub struct Resend;
 }
 
-pub trait ClientContext<CA>:
-    SendEvent<Send<(), Request<CA>>> + SendEvent<InvokeOk<Bytes>> + ScheduleEvent<client::Resend>
-{
+pub trait ClientContext<A> {
+    type Net: SendEvent<Send<(), Request<A>>>;
+    type Upcall: SendEvent<InvokeOk<Bytes>>;
+    type Schedule: ScheduleEvent<client::Resend>;
+    fn net(&mut self) -> &mut Self::Net;
+    fn upcall(&mut self) -> &mut Self::Upcall;
+    fn schedule(&mut self) -> &mut Self::Schedule;
 }
 
 impl<A: Addr, C: ClientContext<A>> OnErasedEvent<Invoke<Bytes>, C> for ClientState<A> {
@@ -55,7 +61,9 @@ impl<A: Addr, C: ClientContext<A>> OnErasedEvent<Invoke<Bytes>, C> for ClientSta
         self.seq += 1;
         let replaced = self.outstanding.replace(Outstanding {
             op,
-            timer: context.set(Duration::from_millis(100), client::Resend)?,
+            timer: context
+                .schedule()
+                .set(Duration::from_millis(100), client::Resend)?,
         });
         anyhow::ensure!(replaced.is_none());
         self.send_request(context)
@@ -75,7 +83,7 @@ impl<A: Addr> ClientState<A> {
                 .op
                 .clone(),
         };
-        context.send(Send((), request))
+        context.net().send(Send((), request))
     }
 }
 
@@ -87,8 +95,8 @@ impl<A, C: ClientContext<A>> OnErasedEvent<Recv<Reply>, C> for ClientState<A> {
         let Some(outstanding) = self.outstanding.take() else {
             return Ok(());
         };
-        context.unset(outstanding.timer)?;
-        context.send(InvokeOk(reply.result))
+        context.schedule().unset(outstanding.timer)?;
+        context.upcall().send(InvokeOk(reply.result))
     }
 }
 
@@ -99,19 +107,28 @@ impl<A: Addr, C: ClientContext<A>> OnErasedEvent<client::Resend, C> for ClientSt
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct ServerState {
     replies: BTreeMap<u32, Reply>,
 }
 
-pub trait ServerContext<A>: SendEvent<Send<A, Reply>> {}
+impl ServerState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+pub trait ServerContext<A> {
+    type Net: SendEvent<Send<A, Reply>>;
+    fn net(&mut self) -> &mut Self::Net;
+}
 
 impl<A, C: ServerContext<A>> OnErasedEvent<Recv<Request<A>>, C> for ServerState {
     fn on_event(&mut self, Recv(request): Recv<Request<A>>, context: &mut C) -> anyhow::Result<()> {
         match self.replies.get(&request.client_id) {
             Some(reply) if reply.seq > request.seq => return Ok(()),
             Some(reply) if reply.seq == request.seq => {
-                return context.send(Send(request.client_addr, reply.clone()))
+                return context.net().send(Send(request.client_addr, reply.clone()))
             }
             _ => {}
         }
@@ -120,6 +137,50 @@ impl<A, C: ServerContext<A>> OnErasedEvent<Recv<Request<A>>, C> for ServerState 
             result: Default::default(), // TODO
         };
         self.replies.insert(request.client_id, reply.clone());
-        context.send(Send(request.client_addr, reply))
+        context.net().send(Send(request.client_addr, reply))
+    }
+}
+
+pub mod context {
+    use super::*;
+
+    pub struct Client<N, U, T> {
+        pub net: N,
+        pub upcall: U,
+        pub schedule: T,
+    }
+
+    impl<N, U, T, A> ClientContext<A> for Client<N, U, T>
+    where
+        N: SendEvent<Send<(), Request<A>>>,
+        U: SendEvent<InvokeOk<Bytes>>,
+        T: ScheduleEvent<client::Resend>,
+    {
+        type Net = N;
+        type Upcall = U;
+        type Schedule = T;
+        fn net(&mut self) -> &mut Self::Net {
+            &mut self.net
+        }
+        fn upcall(&mut self) -> &mut Self::Upcall {
+            &mut self.upcall
+        }
+        fn schedule(&mut self) -> &mut Self::Schedule {
+            &mut self.schedule
+        }
+    }
+
+    pub struct Server<N> {
+        pub net: N,
+    }
+
+    impl<N, A> ServerContext<A> for Server<N>
+    where
+        N: SendEvent<Send<A, Reply>>,
+    {
+        type Net = N;
+        fn net(&mut self) -> &mut Self::Net {
+            &mut self.net
+        }
     }
 }

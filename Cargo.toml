@@ -9,4 +9,4 @@ bincode = "1.3.3"
 bytes = { version = "1.6.0", features = ["serde"] }
 derive_more = "0.99.18"
 serde = { version = "1.0.203", features = ["derive"] }
-tokio = { version = "1.38.0", features = ["macros", "net", "rt", "sync", "time"] }
+tokio = { version = "1.38.0", features = ["macros", "net", "rt", "signal", "sync", "time"] }

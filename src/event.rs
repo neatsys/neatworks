@@ -38,6 +38,12 @@ pub trait ScheduleEvent<M> {
 
 pub struct Erased<C, S>(S, PhantomData<C>);
 
+impl<C, S> Erased<C, S> {
+    pub fn new(state: S) -> Self {
+        Self(state, Default::default())
+    }
+}
+
 type ErasedEvent<S, C> = Box<dyn FnOnce(&mut S, &mut C) -> anyhow::Result<()> + Send>;
 
 impl<S, C> OnEvent<C> for Erased<C, S> {
@@ -53,6 +59,12 @@ pub trait OnErasedEvent<M, C> {
 }
 
 pub struct ErasedSender<S, C, E>(E, PhantomData<(S, C)>);
+
+impl<S, C, E> ErasedSender<S, C, E> {
+    pub fn new(inner: E) -> Self {
+        Self(inner, Default::default())
+    }
+}
 
 impl<E: SendEvent<ErasedEvent<S, C>>, S: OnErasedEvent<M, C>, C, M: Send + 'static> SendEvent<M>
     for ErasedSender<S, C, E>

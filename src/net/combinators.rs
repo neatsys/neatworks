@@ -31,6 +31,12 @@ impl<N: SendEvent<Send<A, Bytes>>, A, M: Serialize> SendEvent<Send<A, M>> for Bi
 
 pub struct BincodeDecode<M, E>(pub E, PhantomData<M>);
 
+impl<M, E> BincodeDecode<M, E> {
+    pub fn new(inner: E) -> Self {
+        Self(inner, Default::default())
+    }
+}
+
 impl<E: SendEvent<Recv<M>>, M: DeserializeOwned> SendEvent<Recv<Bytes>> for BincodeDecode<M, E> {
     fn send(&mut self, Recv(message): Recv<Bytes>) -> anyhow::Result<()> {
         let decoded = bincode::options()
