@@ -117,7 +117,3 @@ impl<T: ScheduleEvent<ErasedEvent<S, C>>, S: OnErasedEvent<M, C>, C, M: Send + '
         self.0.unset(id)
     }
 }
-
-pub trait RecursionOn<C> {
-    type Out;
-}

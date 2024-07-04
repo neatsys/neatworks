@@ -59,17 +59,13 @@ pub mod client {
 pub trait ClientContext<A> {
     type Net: SendEvent<Send<(), Request<A>>>;
     type Upcall: SendEvent<InvokeOk<Bytes>>;
-    // type Schedule: ScheduleEvent<client::Resend>;
-    type Schedule;
+    type Schedule: ScheduleEvent<client::Resend>;
     fn net(&mut self) -> &mut Self::Net;
     fn upcall(&mut self) -> &mut Self::Upcall;
     fn schedule(&mut self) -> &mut Self::Schedule;
 }
 
-impl<A: Addr, C: ClientContext<A>> OnErasedEvent<Invoke<Bytes>, C> for ClientState<A>
-where
-    C::Schedule: ScheduleEvent<client::Resend>,
-{
+impl<A: Addr, C: ClientContext<A>> OnErasedEvent<Invoke<Bytes>, C> for ClientState<A> {
     fn on_event(&mut self, Invoke(op): Invoke<Bytes>, context: &mut C) -> anyhow::Result<()> {
         self.seq += 1;
         let replaced = self.outstanding.replace(Outstanding {
@@ -100,10 +96,7 @@ impl<A: Addr> ClientState<A> {
     }
 }
 
-impl<A, C: ClientContext<A>> OnErasedEvent<Recv<Reply>, C> for ClientState<A>
-where
-    C::Schedule: ScheduleEvent<client::Resend>,
-{
+impl<A, C: ClientContext<A>> OnErasedEvent<Recv<Reply>, C> for ClientState<A> {
     fn on_event(&mut self, Recv(reply): Recv<Reply>, context: &mut C) -> anyhow::Result<()> {
         if reply.seq != self.seq {
             return Ok(());
@@ -158,25 +151,32 @@ impl<A, C: ServerContext<A>> OnErasedEvent<Recv<Request<A>>, C> for ServerState 
 }
 
 pub mod context {
-    use crate::event::RecursionOn;
+    use crate::event::task::erase::{ScheduleOf, ScheduleState};
 
     use super::*;
 
-    pub struct Client<N, U, T: RecursionOn<Self>> {
+    pub struct Client<N, U, T: ClientScheduleOn<Self>> {
         pub net: N,
         pub upcall: U,
         pub schedule: T::Out,
     }
 
-    impl<N, U, T: RecursionOn<Self>, A> ClientContext<A> for Client<N, U, T>
+    pub trait ClientScheduleOn<C> {
+        type Out: ScheduleEvent<client::Resend>;
+    }
+
+    impl<C: ClientContext<A>, A: Addr> ClientScheduleOn<C> for ScheduleOf<ClientState<A>> {
+        type Out = ScheduleState<ClientState<A>, C>;
+    }
+
+    impl<N, U, A: Addr> ClientContext<A> for Client<N, U, ScheduleOf<ClientState<A>>>
     where
         N: SendEvent<Send<(), Request<A>>>,
         U: SendEvent<InvokeOk<Bytes>>,
-        // T::Out: ScheduleEvent<client::Resend>,
     {
         type Net = N;
         type Upcall = U;
-        type Schedule = T::Out;
+        type Schedule = <ScheduleOf<ClientState<A>> as ClientScheduleOn<Self>>::Out;
         fn net(&mut self) -> &mut Self::Net {
             &mut self.net
         }

@@ -8,7 +8,7 @@ use tokio::{
     time::interval,
 };
 
-use super::{Erase, ErasedEvent, OnEvent, RecursionOn, ScheduleEvent, SendEvent, TimerId};
+use super::{OnEvent, ScheduleEvent, SendEvent, TimerId};
 
 impl<M: Into<N>, N> SendEvent<M> for UnboundedSender<N> {
     fn send(&mut self, event: M) -> anyhow::Result<()> {
@@ -119,8 +119,10 @@ pub async fn run_with_schedule<M, C>(
     }
 }
 
-pub struct ScheduleOf<S>(std::marker::PhantomData<S>);
+pub mod erase {
+    use crate::event::{Erase, ErasedEvent};
 
-impl<S, C> RecursionOn<C> for ScheduleOf<S> {
-    type Out = Erase<S, C, ScheduleState<ErasedEvent<S, C>>>;
+    pub struct ScheduleOf<S>(std::marker::PhantomData<S>);
+
+    pub type ScheduleState<S, C> = Erase<S, C, super::ScheduleState<ErasedEvent<S, C>>>;
 }

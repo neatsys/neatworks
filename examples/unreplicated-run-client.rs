@@ -3,7 +3,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use neatworks::{
     event::{
-        task::{run_with_schedule, ScheduleOf, ScheduleState},
+        task::{erase::ScheduleOf, run_with_schedule, ScheduleState},
         Erase, SendEvent, Untyped,
     },
     net::{combinators::Forward, task::udp},
