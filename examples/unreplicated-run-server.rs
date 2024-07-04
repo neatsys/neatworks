@@ -1,7 +1,7 @@
 use std::{future::Future, sync::Arc};
 
 use neatworks::{
-    event::{task::run, Erase, Erased},
+    event::{task::run, Erase, Untyped},
     net::task::udp,
     unreplicated,
 };
@@ -21,7 +21,7 @@ async fn main() -> anyhow::Result<()> {
         unreplicated::codec::server_decode(Erase::new(sender)),
     );
     let server_task = run(
-        Erased::new(unreplicated::ServerState::new()),
+        Untyped::new(unreplicated::ServerState::new()),
         &mut context,
         &mut receiver,
     );

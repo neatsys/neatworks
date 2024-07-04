@@ -47,14 +47,14 @@ pub trait ScheduleEvent<M> {
 
 #[derive_where(Debug; S)]
 #[derive(Deref, DerefMut)]
-pub struct Erased<C, S>(
+pub struct Untyped<C, S>(
     #[deref]
     #[deref_mut]
     S,
     PhantomData<C>,
 );
 
-impl<C, S> Erased<C, S> {
+impl<C, S> Untyped<C, S> {
     pub fn new(state: S) -> Self {
         Self(state, Default::default())
     }
@@ -62,7 +62,7 @@ impl<C, S> Erased<C, S> {
 
 pub type ErasedEvent<S, C> = Box<dyn FnOnce(&mut S, &mut C) -> anyhow::Result<()> + Send>;
 
-impl<S, C> OnEvent<C> for Erased<C, S> {
+impl<S, C> OnEvent<C> for Untyped<C, S> {
     type Event = ErasedEvent<S, C>;
 
     fn on_event(&mut self, event: Self::Event, context: &mut C) -> anyhow::Result<()> {
@@ -116,4 +116,8 @@ impl<T: ScheduleEvent<ErasedEvent<S, C>>, S: OnErasedEvent<M, C>, C, M: Send + '
     fn unset(&mut self, id: TimerId) -> anyhow::Result<()> {
         self.0.unset(id)
     }
+}
+
+pub trait RecursionOn<C> {
+    type Out;
 }

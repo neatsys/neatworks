@@ -3,8 +3,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use neatworks::{
     event::{
-        task::{run_with_schedule, ScheduleState},
-        Erase, Erased, SendEvent,
+        task::{run_with_schedule, ScheduleOf, ScheduleState},
+        Erase, SendEvent, Untyped,
     },
     net::{combinators::Forward, task::udp},
     unreplicated,
@@ -21,7 +21,14 @@ async fn main() -> anyhow::Result<()> {
     let addr = socket.local_addr()?;
     let (upcall_sender, mut upcall_receiver) = unbounded_channel::<InvokeOk<Bytes>>();
     let (schedule_sender, mut schedule_receiver) = unbounded_channel();
-    let mut context = unreplicated::context::Client {
+    let (sender, mut receiver) = unbounded_channel();
+
+    let net_task = udp::run(
+        &socket,
+        unreplicated::codec::client_decode(Erase::new(sender.clone())),
+    );
+
+    let mut context = unreplicated::context::Client::<_, _, ScheduleOf<_>> {
         net: unreplicated::codec::client_encode(Forward(
             ([127, 0, 0, 1], 3000).into(),
             socket.clone(),
@@ -29,18 +36,14 @@ async fn main() -> anyhow::Result<()> {
         upcall: upcall_sender,
         schedule: Erase::new(ScheduleState::new(schedule_sender)),
     };
-    let (sender, mut receiver) = unbounded_channel();
-    let net_task = udp::run(
-        &socket,
-        unreplicated::codec::client_decode(Erase::new(sender.clone())),
-    );
     let client_task = run_with_schedule(
-        Erased::new(unreplicated::ClientState::new(random(), addr)),
+        Untyped::new(unreplicated::ClientState::new(random(), addr)),
         &mut context,
         &mut receiver,
         &mut schedule_receiver,
         |context| &mut *context.schedule,
     );
+
     let invoke_task = async {
         let mut sender = Erase::new(sender);
         for _ in 0..10 {
