@@ -151,8 +151,6 @@ impl<A, C: ServerContext<A>> OnErasedEvent<Recv<Request<A>>, C> for ServerState 
 }
 
 pub mod context {
-    use crate::event::task::erase::{ScheduleOf, ScheduleState};
-
     use super::*;
 
     pub struct Client<N, U, T: ClientScheduleOn<Self>> {
@@ -165,18 +163,14 @@ pub mod context {
         type Out: ScheduleEvent<client::Resend>;
     }
 
-    impl<C: ClientContext<A>, A: Addr> ClientScheduleOn<C> for ScheduleOf<ClientState<A>> {
-        type Out = ScheduleState<ClientState<A>, C>;
-    }
-
-    impl<N, U, A: Addr> ClientContext<A> for Client<N, U, ScheduleOf<ClientState<A>>>
+    impl<N, U, T: ClientScheduleOn<Self>, A> ClientContext<A> for Client<N, U, T>
     where
         N: SendEvent<Send<(), Request<A>>>,
         U: SendEvent<InvokeOk<Bytes>>,
     {
         type Net = N;
         type Upcall = U;
-        type Schedule = <ScheduleOf<ClientState<A>> as ClientScheduleOn<Self>>::Out;
+        type Schedule = <T as ClientScheduleOn<Self>>::Out;
         fn net(&mut self) -> &mut Self::Net {
             &mut self.net
         }
@@ -199,6 +193,20 @@ pub mod context {
         type Net = N;
         fn net(&mut self) -> &mut Self::Net {
             &mut self.net
+        }
+    }
+
+    mod task {
+        use crate::event::task::erase::{ScheduleOf, ScheduleState};
+
+        use super::*;
+
+        impl<N, U, A: Addr> ClientScheduleOn<Client<N, U, Self>> for ScheduleOf<ClientState<A>>
+        where
+            N: SendEvent<Send<(), Request<A>>>,
+            U: SendEvent<InvokeOk<Bytes>>,
+        {
+            type Out = ScheduleState<ClientState<A>, Client<N, U, Self>>;
         }
     }
 }
