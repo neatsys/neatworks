@@ -117,3 +117,34 @@ impl<T: ScheduleEvent<ErasedEvent<S, C>>, S: OnErasedEvent<M, C>, C, M: Send + '
         self.0.unset(id)
     }
 }
+
+pub mod work {
+    use super::{Erase, ErasedEvent, OnErasedEvent, SendEvent};
+
+    pub type Event<S, C> = ErasedEvent<S, C>;
+
+    pub trait Submit<S, C> {
+        fn submit(&mut self, work: Event<S, C>) -> anyhow::Result<()>;
+    }
+
+    impl<E: SendEvent<Event<S, C>>, S, C> Submit<S, C> for E {
+        fn submit(&mut self, work: Event<S, C>) -> anyhow::Result<()> {
+            self.send(work)
+        }
+    }
+
+    pub trait Upcall<S, C> {
+        fn send<M: Send + 'static>(&mut self, event: M) -> anyhow::Result<()>
+        where
+            S: OnErasedEvent<M, C>;
+    }
+
+    impl<E: SendEvent<ErasedEvent<S, C>>, S, C> Upcall<S, C> for Erase<S, C, E> {
+        fn send<M: Send + 'static>(&mut self, event: M) -> anyhow::Result<()>
+        where
+            S: OnErasedEvent<M, C>,
+        {
+            SendEvent::send(self, event)
+        }
+    }
+}

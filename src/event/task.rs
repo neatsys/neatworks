@@ -8,7 +8,7 @@ use tokio::{
     time::interval,
 };
 
-use super::{ErasedEvent, OnEvent, ScheduleEvent, SendEvent, TimerId};
+use super::{work, OnEvent, ScheduleEvent, SendEvent, TimerId};
 
 pub mod erase {
     use crate::event::{Erase, ErasedEvent};
@@ -132,7 +132,7 @@ pub async fn run<M, C>(
 pub async fn run_worker<S: Clone + Send + 'static, C: Clone + Send + 'static>(
     state: S,
     context: C,
-    receiver: &mut UnboundedReceiver<ErasedEvent<S, C>>,
+    receiver: &mut UnboundedReceiver<work::Event<S, C>>,
 ) -> anyhow::Result<()> {
     let mut tasks = JoinSet::new();
     loop {
