@@ -4,7 +4,7 @@ use crate::{
     codec::Payload,
     crypto::{
         events::{Signed, Verified},
-        Crypto, DigestHash as _, Verifiable, H256,
+        Crypto, DigestHash, Verifiable, H256,
     },
     event::{
         work::{self, Submit, Upcall as _},
@@ -143,6 +143,19 @@ pub trait Context<S, A>: Sized {
     fn schedule(&mut self) -> &mut Self::Schedule;
 }
 
+trait ContextExt<S, A>: Context<S, A> {
+    fn submit_sign<M: DigestHash + Send + 'static>(&mut self, message: M) -> anyhow::Result<()>
+    where
+        S: OnErasedEvent<Signed<M>, Self>,
+    {
+        self.crypto_worker()
+            .submit(Box::new(move |crypto, context| {
+                context.send(Signed(crypto.sign(message)))
+            }))
+    }
+}
+impl<C: Context<S, A>, S, A> ContextExt<S, A> for C {}
+
 impl<S, A> ReplicaState<S, A> {
     fn is_primary(&self) -> bool {
         (self.view_num as usize % self.config.num_replica) == self.id as usize
@@ -214,15 +227,16 @@ impl<S, A: Addr> ReplicaState<S, A> {
         assert!(!self.requests.is_empty());
         let requests = self
             .requests
-            .drain(..self.requests.len().min(100))
+            .drain(..self.requests.len().min(self.config.max_batch_size))
             .collect::<Vec<_>>();
-        let view_num = self.view_num;
         let op_num = self.op_num();
         if self.log.get(op_num as usize).is_none() {
             self.log.resize(op_num as usize + 1, self.default_entry())
         }
+        let view_num = self.view_num;
         context
             .crypto_worker()
+            // not `submit_sign` here because I want to postpone digesting to worker
             .submit(Box::new(move |crypto, context| {
                 let pre_prepare = PrePrepare {
                     view_num,
@@ -386,11 +400,7 @@ impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<(Verified<PrePrepare>, Vec<R
             digest: pre_prepare.digest,
             replica_id: self.id,
         };
-        context
-            .crypto_worker()
-            .submit(Box::new(move |crypto, context| {
-                context.send(Signed(crypto.sign(prepare)))
-            }))?;
+        context.submit_sign(prepare)?;
 
         if let Some(prepare_quorum) = self.prepare_quorums.get_mut(&pre_prepare.op_num) {
             prepare_quorum.retain(|_, prepare| {
@@ -560,11 +570,7 @@ impl<S, A: Addr> ReplicaState<S, A> {
             digest: prepare.digest,
             replica_id: self.id,
         };
-        context
-            .crypto_worker()
-            .submit(Box::new(move |crypto, context| {
-                context.send(Signed(crypto.sign(commit)))
-            }))
+        context.submit_sign(commit)
     }
 }
 
@@ -841,9 +847,7 @@ impl<S, A: Addr> ReplicaState<S, A> {
             log,
             replica_id: self.id,
         };
-        context.crypto_worker().submit(Box::new(|crypto, context| {
-            context.send(Signed(crypto.sign(view_change)))
-        }))
+        context.submit_sign(view_change)
     }
 }
 
@@ -993,6 +997,7 @@ impl<S, A: Addr> ReplicaState<S, A> {
                 let view_num = self.view_num;
                 context
                     .crypto_worker()
+                    // not `submit_sign` here for postponing generating PrePrepare to worker
                     .submit(Box::new(move |crypto, context| {
                         let new_view = NewView {
                             view_num,
@@ -1158,5 +1163,61 @@ impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Verified<NewView>, C> for Re
             self.enter_view(new_view, context)?
         }
         Ok(())
+    }
+}
+
+pub mod context {
+    use super::*;
+
+    pub struct Context<PN, DN, CW: CryptoWorkerOn<Self>, T: ScheduleOn<Self>> {
+        pub peer_net: PN,
+        pub downlink_net: DN,
+        pub crypto_worker: CW::Out,
+        pub schedule: T::Out,
+    }
+
+    pub trait CryptoWorkerOn<C> {
+        type Out: Submit<Crypto, Self::Context>;
+        type Context;
+    }
+
+    pub trait ScheduleOn<C> {
+        type Out: ScheduleEvent<events::DoViewChange>
+            + ScheduleEvent<events::ProgressPrepare>
+            + ScheduleEvent<events::ProgressViewChange>
+            + ScheduleEvent<events::StateTransfer>;
+    }
+
+    impl<PN, DN, CW: CryptoWorkerOn<Self>, T: ScheduleOn<Self>, S, A> super::Context<S, A>
+        for Context<PN, DN, CW, T>
+    where
+        PN: SendMessage<u8, Request<A>>
+            + SendMessage<All, (Verifiable<PrePrepare>, Vec<Request<A>>)>
+            + SendMessage<All, Verifiable<Prepare>>
+            + SendMessage<All, Verifiable<Commit>>
+            + SendMessage<All, Verifiable<ViewChange>>
+            + SendMessage<All, Verifiable<NewView>>
+            + SendMessage<u8, QueryNewView>
+            + SendMessage<u8, Verifiable<NewView>>,
+        DN: SendMessage<A, Reply>,
+        CW::Context: work::Upcall<S, Self>,
+    {
+        type PeerNet = PN;
+        type DownlinkNet = DN;
+        type CryptoWorker = CW::Out;
+        type CryptoContext = CW::Context;
+        type Schedule = T::Out;
+        fn peer_net(&mut self) -> &mut Self::PeerNet {
+            &mut self.peer_net
+        }
+        fn downlink_net(&mut self) -> &mut Self::DownlinkNet {
+            &mut self.downlink_net
+        }
+        fn crypto_worker(&mut self) -> &mut Self::CryptoWorker {
+            &mut self.crypto_worker
+        }
+        fn schedule(&mut self) -> &mut Self::Schedule {
+            &mut self.schedule
+        }
     }
 }

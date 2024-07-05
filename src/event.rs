@@ -124,6 +124,8 @@ pub mod work {
     pub type Event<S, C> = ErasedEvent<S, C>;
 
     pub trait Submit<S, C> {
+        // the ergonomics here breaks some, so hold on it
+        // fn submit(&mut self, work: impl Into<Event<S, C>>) -> anyhow::Result<()>;
         fn submit(&mut self, work: Event<S, C>) -> anyhow::Result<()>;
     }
 
