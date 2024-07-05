@@ -4,11 +4,19 @@ use derive_where::derive_where;
 use tokio::{
     select, spawn,
     sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-    task::AbortHandle,
+    task::{AbortHandle, JoinSet},
     time::interval,
 };
 
-use super::{OnEvent, ScheduleEvent, SendEvent, TimerId};
+use super::{ErasedEvent, OnEvent, ScheduleEvent, SendEvent, TimerId};
+
+pub mod erase {
+    use crate::event::{Erase, ErasedEvent};
+
+    pub struct ScheduleOf<S>(std::marker::PhantomData<S>);
+
+    pub type ScheduleState<S, C> = Erase<S, C, super::ScheduleState<ErasedEvent<S, C>>>;
+}
 
 impl<M: Into<N>, N> SendEvent<M> for UnboundedSender<N> {
     fn send(&mut self, event: M) -> anyhow::Result<()> {
@@ -22,22 +30,6 @@ async fn must_recv<M>(receiver: &mut UnboundedReceiver<M>) -> anyhow::Result<M> 
         .recv()
         .await
         .ok_or(anyhow::format_err!("unexpected receive channel closed"))
-}
-
-pub async fn run<M, C>(
-    state: impl OnEvent<C, Event = M>,
-    context: &mut C,
-    receiver: &mut UnboundedReceiver<M>,
-) -> anyhow::Result<()> {
-    let (_sender, mut schedule_receiver) = unbounded_channel();
-    run_with_schedule(
-        state,
-        context,
-        receiver,
-        &mut schedule_receiver,
-        |_| unreachable!(),
-    )
-    .await
 }
 
 #[derive_where(Debug)]
@@ -121,10 +113,43 @@ pub async fn run_with_schedule<M, C>(
     }
 }
 
-pub mod erase {
-    use crate::event::{Erase, ErasedEvent};
+pub async fn run<M, C>(
+    state: impl OnEvent<C, Event = M>,
+    context: &mut C,
+    receiver: &mut UnboundedReceiver<M>,
+) -> anyhow::Result<()> {
+    let (_sender, mut schedule_receiver) = unbounded_channel();
+    run_with_schedule(
+        state,
+        context,
+        receiver,
+        &mut schedule_receiver,
+        |_| unreachable!(),
+    )
+    .await
+}
 
-    pub struct ScheduleOf<S>(std::marker::PhantomData<S>);
-
-    pub type ScheduleState<S, C> = Erase<S, C, super::ScheduleState<ErasedEvent<S, C>>>;
+pub async fn run_worker<S: Clone + Send + 'static, C: Clone + Send + 'static>(
+    state: S,
+    context: C,
+    receiver: &mut UnboundedReceiver<ErasedEvent<S, C>>,
+) -> anyhow::Result<()> {
+    let mut tasks = JoinSet::new();
+    loop {
+        enum Select<M> {
+            Recv(M),
+            JoinNext(()),
+        }
+        match select! {
+            recv = must_recv(receiver) => Select::Recv(recv?),
+            Some(result) = tasks.join_next() => Select::JoinNext(result??)
+        } {
+            Select::Recv(event) => {
+                let mut state = state.clone();
+                let mut context = context.clone();
+                tasks.spawn(async move { event(&mut state, &mut context) });
+            }
+            Select::JoinNext(()) => {}
+        }
+    }
 }
