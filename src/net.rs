@@ -10,6 +10,12 @@ pub mod task {
     pub mod udp;
 }
 
+pub mod events {
+    pub struct Send<A, M>(pub A, pub M);
+
+    pub struct Recv<M>(pub M);
+}
+
 pub trait Addr:
     Debug + Clone + Eq + Ord + Hash + Serialize + DeserializeOwned + Send + Sync + 'static
 {
@@ -18,15 +24,8 @@ pub trait Addr:
 impl Addr for u8 {}
 impl Addr for SocketAddr {}
 
-pub mod events {
-    pub struct Send<A, M>(pub A, pub M);
-
-    pub struct Recv<M>(pub M);
-}
-
 pub fn send_bytes(
-    buf: &[u8],
     mut sender: impl SendEvent<events::Recv<Bytes>>,
-) -> anyhow::Result<()> {
-    sender.send(events::Recv(Bytes::copy_from_slice(buf)))
+) -> impl FnMut(&[u8]) -> anyhow::Result<()> {
+    move |buf| sender.send(events::Recv(Bytes::copy_from_slice(buf)))
 }

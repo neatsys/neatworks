@@ -1,6 +1,7 @@
 use bincode::Options;
 use bytes::Bytes;
-use serde::{de::DeserializeOwned, Serialize};
+use derive_more::Deref;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::{event::SendEvent, net::events::Send};
 
@@ -32,3 +33,6 @@ pub fn bincode_decode<M: DeserializeOwned>(buf: &[u8]) -> anyhow::Result<M> {
         .deserialize(buf)
         .map_err(Into::into)
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deref, Serialize, Deserialize)]
+pub struct Payload(pub Bytes);
