@@ -3,6 +3,7 @@ use std::{marker::PhantomData, time::Duration};
 use derive_more::{Deref, DerefMut, Display, Error};
 use derive_where::derive_where;
 
+pub mod combinators;
 pub mod task;
 
 pub trait SendEvent<M> {

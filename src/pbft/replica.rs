@@ -123,7 +123,7 @@ pub mod events {
 }
 
 pub trait Context<S, A>: Sized {
-    type PeerNet: SendMessage<u8, Request<A>>
+    type PeerNet: SendMessage<u8, Request<A>> // for relaying to (seemingly unresponsive) primary
         + SendMessage<All, (Verifiable<PrePrepare>, Vec<Request<A>>)>
         + SendMessage<All, Verifiable<Prepare>>
         + SendMessage<All, Verifiable<Commit>>
