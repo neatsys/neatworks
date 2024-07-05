@@ -13,7 +13,7 @@ use super::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ClientState<A> {
+pub struct State<A> {
     id: u32,
     addr: A,
     config: PublicParameters,
@@ -30,7 +30,7 @@ struct Outstanding {
     timer: TimerId,
 }
 
-impl<A> ClientState<A> {
+impl<A> State<A> {
     pub fn new(id: u32, addr: A, config: PublicParameters) -> Self {
         Self {
             id,
@@ -58,7 +58,7 @@ pub trait Context<A> {
     fn schedule(&mut self) -> &mut Self::Schedule;
 }
 
-impl<A: Addr, C: Context<A>> OnErasedEvent<Invoke<Payload>, C> for ClientState<A> {
+impl<A: Addr, C: Context<A>> OnErasedEvent<Invoke<Payload>, C> for State<A> {
     fn on_event(&mut self, Invoke(op): Invoke<Payload>, context: &mut C) -> anyhow::Result<()> {
         self.seq += 1;
         let timer = context
@@ -77,14 +77,14 @@ impl<A: Addr, C: Context<A>> OnErasedEvent<Invoke<Payload>, C> for ClientState<A
     }
 }
 
-impl<A: Addr, C: Context<A>> OnErasedEvent<events::Resend, C> for ClientState<A> {
+impl<A: Addr, C: Context<A>> OnErasedEvent<events::Resend, C> for State<A> {
     fn on_event(&mut self, events::Resend: events::Resend, context: &mut C) -> anyhow::Result<()> {
         // warn!("Resend timeout on seq {}", self.seq);
         self.send_request(All, context)
     }
 }
 
-impl<A, C: Context<A>> OnErasedEvent<Recv<Reply>, C> for ClientState<A> {
+impl<A, C: Context<A>> OnErasedEvent<Recv<Reply>, C> for State<A> {
     fn on_event(&mut self, Recv(reply): Recv<Reply>, context: &mut C) -> anyhow::Result<()> {
         if reply.seq != self.seq {
             return Ok(());
@@ -113,7 +113,7 @@ impl<A, C: Context<A>> OnErasedEvent<Recv<Reply>, C> for ClientState<A> {
     }
 }
 
-impl<A: Addr> ClientState<A> {
+impl<A: Addr> State<A> {
     fn send_request<B, C: Context<A>>(&mut self, dest: B, context: &mut C) -> anyhow::Result<()>
     where
         C::Net: SendMessage<B, Request<A>>,

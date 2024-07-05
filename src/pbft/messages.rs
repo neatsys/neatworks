@@ -7,7 +7,7 @@ use crate::{
     crypto::{Verifiable, H256},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Request<A> {
     pub seq: u32,
     pub op: Payload,
@@ -74,4 +74,65 @@ pub struct QueryNewView {
 }
 
 pub type Quorum<M> = BTreeMap<u8, Verifiable<M>>;
-pub type Quorums<K, M> = BTreeMap<K, Quorum<M>>;
+
+pub mod codec {
+    use derive_more::From;
+    use serde::{Deserialize, Serialize};
+
+    use crate::{
+        codec::{bincode_decode, Encode},
+        event::SendEvent,
+        net::{events::Recv, Addr},
+    };
+
+    use super::*;
+
+    pub type ToClient = Reply;
+
+    pub fn to_client_encode<N>(net: N) -> Encode<ToClient, N> {
+        Encode::bincode(net)
+    }
+
+    pub fn to_client_decode<'a>(
+        mut sender: impl SendEvent<Recv<Reply>> + 'a,
+    ) -> impl FnMut(&[u8]) -> anyhow::Result<()> + 'a {
+        move |buf| sender.send(Recv(bincode_decode(buf)?))
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, From)]
+    pub enum ToReplica<A> {
+        Request(Request<A>),
+        PrePrepare(Verifiable<PrePrepare>, Vec<Request<A>>),
+        Prepare(Verifiable<Prepare>),
+        Commit(Verifiable<Commit>),
+        ViewChange(Verifiable<ViewChange>),
+        NewView(Verifiable<NewView>),
+        QueryNewView(QueryNewView),
+    }
+
+    pub fn to_replica_encode<A: Addr, N>(net: N) -> Encode<ToReplica<A>, N> {
+        Encode::bincode(net)
+    }
+
+    pub fn to_server_decode<'a, A: Addr>(
+        mut sender: impl SendEvent<Recv<Request<A>>>
+            + SendEvent<Recv<(Verifiable<PrePrepare>, Vec<Request<A>>)>>
+            + SendEvent<Recv<Verifiable<Prepare>>>
+            + SendEvent<Recv<Verifiable<Commit>>>
+            + SendEvent<Recv<Verifiable<ViewChange>>>
+            + SendEvent<Recv<Verifiable<NewView>>>
+            + SendEvent<Recv<QueryNewView>>
+            + 'a,
+    ) -> impl FnMut(&[u8]) -> anyhow::Result<()> + 'a {
+        use ToReplica::*;
+        move |buf| match bincode_decode(buf)? {
+            Request(message) => sender.send(Recv(message)),
+            PrePrepare(message, requests) => sender.send(Recv((message, requests))),
+            Prepare(message) => sender.send(Recv(message)),
+            Commit(message) => sender.send(Recv(message)),
+            ViewChange(message) => sender.send(Recv(message)),
+            NewView(message) => sender.send(Recv(message)),
+            QueryNewView(message) => sender.send(Recv(message)),
+        }
+    }
+}
