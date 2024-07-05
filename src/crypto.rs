@@ -341,6 +341,10 @@ impl Crypto {
 }
 
 pub mod peer {
+    use rand::{CryptoRng, RngCore};
+
+    use super::DigestHash;
+
     pub type Verifiable<M> = super::Verifiable<M, super::SchnorrkelSignature>;
 
     pub type PublicKey = schnorrkel::PublicKey;
@@ -352,27 +356,64 @@ pub mod peer {
         #[derive(Debug, Clone)]
         pub struct Verified<M>(pub super::Verifiable<M>);
     }
+
+    #[derive(Debug)]
+    pub struct Crypto(super::SchnorrkelCrypto);
+
+    impl Crypto {
+        pub fn new_random(rng: &mut (impl RngCore + CryptoRng)) -> Self {
+            Self(super::SchnorrkelCrypto::new_random(rng))
+        }
+
+        pub fn public_key(&self) -> PublicKey {
+            self.0.public_key()
+        }
+
+        pub fn sign<M: DigestHash>(&self, message: M) -> Verifiable<M> {
+            let signature = self.0.sign(&message);
+            Verifiable {
+                inner: message,
+                signature,
+            }
+        }
+
+        pub fn verify<M: DigestHash>(
+            &self,
+            public_key: &PublicKey,
+            signed: &Verifiable<M>,
+        ) -> anyhow::Result<()> {
+            self.0.verify(public_key, signed, |s: &_| Ok(s))
+        }
+
+        pub fn verify_batch<M: DigestHash>(
+            &self,
+            public_keys: &[PublicKey],
+            signed: &[Verifiable<M>],
+        ) -> anyhow::Result<()> {
+            self.0.verify_batch(public_keys, signed, |s: &_| Ok(s))
+        }
+    }
 }
 
 impl SchnorrkelCrypto {
-    pub fn new_random(rng: &mut (impl RngCore + CryptoRng)) -> Self {
+    fn new_random(rng: &mut (impl RngCore + CryptoRng)) -> Self {
         Self {
             keypair: schnorrkel::Keypair::generate_with(rng),
             context: schnorrkel::context::SigningContext::new(b"default"),
         }
     }
 
-    pub fn public_key(&self) -> schnorrkel::PublicKey {
+    fn public_key(&self) -> schnorrkel::PublicKey {
         self.keypair.public
     }
 
-    pub fn sign<M: DigestHash>(&self, message: &M) -> SchnorrkelSignature {
+    fn sign<M: DigestHash>(&self, message: &M) -> SchnorrkelSignature {
         let mut state = Sha256::new();
         DigestHash::hash(message, &mut state);
         SchnorrkelSignature(self.keypair.sign(self.context.hash256(state)))
     }
 
-    pub fn verify<M: DigestHash, S>(
+    fn verify<M: DigestHash, S>(
         &self,
         public_key: &schnorrkel::PublicKey,
         signed: &Verifiable<M, S>,
@@ -386,7 +427,7 @@ impl SchnorrkelCrypto {
             .map_err(anyhow::Error::msg)
     }
 
-    pub fn verify_batch<M: DigestHash, S>(
+    fn verify_batch<M: DigestHash, S>(
         &self,
         public_keys: &[schnorrkel::PublicKey],
         signed: &[Verifiable<M, S>],
