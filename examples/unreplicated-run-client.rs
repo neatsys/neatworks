@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use bytes::Bytes;
 use neatworks::{
+    codec::Payload,
     event::{
         task::{erase::ScheduleOf, run_with_schedule, ScheduleState},
         Erase, SendEvent, Untyped,
@@ -19,7 +19,7 @@ mod utils;
 async fn main() -> anyhow::Result<()> {
     let socket = Arc::new(UdpSocket::bind("localhost:0").await?);
     let addr = socket.local_addr()?;
-    let (upcall_sender, mut upcall_receiver) = unbounded_channel::<InvokeOk<Bytes>>();
+    let (upcall_sender, mut upcall_receiver) = unbounded_channel::<InvokeOk<Payload>>();
     let (schedule_sender, mut schedule_receiver) = unbounded_channel();
     let (sender, mut receiver) = unbounded_channel();
 
@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
         let mut sender = Erase::new(sender);
         for _ in 0..10 {
             let start = Instant::now();
-            sender.send(Invoke(Default::default()))?;
+            sender.send(Invoke(Payload(Default::default())))?;
             let recv = upcall_receiver.recv().await;
             anyhow::ensure!(recv.is_some());
             println!("{:?}", start.elapsed())

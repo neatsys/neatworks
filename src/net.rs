@@ -16,6 +16,16 @@ pub mod events {
     pub struct Recv<M>(pub M);
 }
 
+pub trait SendMessage<A, M> {
+    fn send(&mut self, remote: A, message: M) -> anyhow::Result<()>;
+}
+
+impl<E: SendEvent<events::Send<A, M>>, A, M> SendMessage<A, M> for E {
+    fn send(&mut self, remote: A, message: M) -> anyhow::Result<()> {
+        SendEvent::send(self, events::Send(remote, message))
+    }
+}
+
 pub trait Addr:
     Debug + Clone + Eq + Ord + Hash + Serialize + DeserializeOwned + Send + Sync + 'static
 {

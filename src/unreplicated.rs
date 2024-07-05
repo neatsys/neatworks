@@ -1,9 +1,9 @@
 use std::{collections::BTreeMap, time::Duration};
 
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    codec::Payload,
     event::{OnErasedEvent, ScheduleEvent, SendEvent, TimerId},
     net::{
         events::{Recv, Send},
@@ -15,7 +15,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Request<A> {
     seq: u32,
-    op: Bytes,
+    op: Payload,
     client_id: u32,
     client_addr: A,
 }
@@ -23,7 +23,7 @@ pub struct Request<A> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Reply {
     seq: u32,
-    result: Bytes,
+    result: Payload,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -36,7 +36,7 @@ pub struct ClientState<A> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Outstanding {
-    op: Bytes,
+    op: Payload,
     timer: TimerId,
 }
 
@@ -58,15 +58,15 @@ pub mod client {
 
 pub trait ClientContext<A> {
     type Net: SendEvent<Send<(), Request<A>>>;
-    type Upcall: SendEvent<InvokeOk<Bytes>>;
+    type Upcall: SendEvent<InvokeOk<Payload>>;
     type Schedule: ScheduleEvent<client::Resend>;
     fn net(&mut self) -> &mut Self::Net;
     fn upcall(&mut self) -> &mut Self::Upcall;
     fn schedule(&mut self) -> &mut Self::Schedule;
 }
 
-impl<A: Addr, C: ClientContext<A>> OnErasedEvent<Invoke<Bytes>, C> for ClientState<A> {
-    fn on_event(&mut self, Invoke(op): Invoke<Bytes>, context: &mut C) -> anyhow::Result<()> {
+impl<A: Addr, C: ClientContext<A>> OnErasedEvent<Invoke<Payload>, C> for ClientState<A> {
+    fn on_event(&mut self, Invoke(op): Invoke<Payload>, context: &mut C) -> anyhow::Result<()> {
         self.seq += 1;
         let replaced = self.outstanding.replace(Outstanding {
             op,
@@ -143,7 +143,7 @@ impl<A, C: ServerContext<A>> OnErasedEvent<Recv<Request<A>>, C> for ServerState 
         }
         let reply = Reply {
             seq: request.seq,
-            result: Default::default(), // TODO
+            result: Payload(Default::default()), // TODO
         };
         self.replies.insert(request.client_id, reply.clone());
         context.net().send(Send(request.client_addr, reply))
@@ -166,7 +166,7 @@ pub mod context {
     impl<N, U, T: ClientScheduleOn<Self>, A> ClientContext<A> for Client<N, U, T>
     where
         N: SendEvent<Send<(), Request<A>>>,
-        U: SendEvent<InvokeOk<Bytes>>,
+        U: SendEvent<InvokeOk<Payload>>,
     {
         type Net = N;
         type Upcall = U;
@@ -204,7 +204,7 @@ pub mod context {
         impl<N, U, A: Addr> ClientScheduleOn<Client<N, U, Self>> for ScheduleOf<ClientState<A>>
         where
             N: SendEvent<Send<(), Request<A>>>,
-            U: SendEvent<InvokeOk<Bytes>>,
+            U: SendEvent<InvokeOk<Payload>>,
         {
             type Out = ScheduleState<ClientState<A>, Client<N, U, Self>>;
         }

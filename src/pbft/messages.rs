@@ -7,6 +7,14 @@ use crate::{
     crypto::{Verifiable, H256},
 };
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Request<A> {
+    pub seq: u32,
+    pub op: Payload,
+    pub client_id: u32,
+    pub client_addr: A,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PrePrepare {
     pub view_num: u32,

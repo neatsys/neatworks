@@ -10,3 +10,6 @@ impl<A: Addr, N: SendEvent<Send<A, M>>, M> SendEvent<Send<(), M>> for Forward<A,
         self.1.send(Send(self.0.clone(), message))
     }
 }
+
+#[derive(Debug)]
+pub struct All;
