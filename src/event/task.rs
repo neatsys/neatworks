@@ -44,9 +44,11 @@ pub async fn run<M, C>(
 pub struct ScheduleState<M> {
     count: u32,
     #[derive_where(skip)]
-    events: HashMap<u32, (AbortHandle, Box<dyn FnMut() -> M + Send>)>,
+    events: HashMap<u32, ScheduleEventState<M>>,
     sender: UnboundedSender<u32>,
 }
+
+type ScheduleEventState<M> = (AbortHandle, Box<dyn FnMut() -> M + Send>);
 
 impl<M> ScheduleState<M> {
     pub fn new(sender: UnboundedSender<u32>) -> Self {
