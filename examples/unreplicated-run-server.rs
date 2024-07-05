@@ -4,6 +4,7 @@ use neatworks::{
     event::{task::run, Erase, Untyped},
     net::task::udp,
     unreplicated,
+    workload::Null,
 };
 use tokio::{net::UdpSocket, select, signal::ctrl_c, sync::mpsc::unbounded_channel};
 
@@ -21,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
         unreplicated::codec::server_decode(Erase::new(sender)),
     );
     let server_task = run(
-        Untyped::new(unreplicated::ServerState::new()),
+        Untyped::new(unreplicated::ServerState::new(Null)),
         &mut context,
         &mut receiver,
     );

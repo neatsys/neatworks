@@ -1,4 +1,4 @@
-use crate::codec::Payload;
+use bytes::Bytes;
 
 pub mod events {
     #[derive(Debug)]
@@ -8,15 +8,14 @@ pub mod events {
     pub struct InvokeOk<M>(pub M);
 }
 pub trait App {
-    fn execute(&mut self, op: events::Invoke<Payload>)
-        -> anyhow::Result<events::InvokeOk<Payload>>;
+    fn execute(&mut self, op: &[u8]) -> anyhow::Result<Bytes>;
 }
 
 #[derive(Debug)]
 pub struct Null;
 
 impl App for Null {
-    fn execute(&mut self, _: events::Invoke<Payload>) -> anyhow::Result<events::InvokeOk<Payload>> {
-        Ok(events::InvokeOk(Payload(Default::default())))
+    fn execute(&mut self, _: &[u8]) -> anyhow::Result<Bytes> {
+        Ok(Default::default())
     }
 }

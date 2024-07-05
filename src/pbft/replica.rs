@@ -12,6 +12,7 @@ use crate::{
     },
     net::{combinators::All, events::Recv, Addr, SendMessage},
     timer::Timer,
+    workload::App,
 };
 
 use super::{
@@ -182,7 +183,7 @@ impl<S, A> State<S, A> {
     }
 }
 
-impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Recv<Request<A>>, C> for State<S, A> {
+impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<Recv<Request<A>>, C> for State<S, A> {
     fn on_event(&mut self, Recv(request): Recv<Request<A>>, context: &mut C) -> anyhow::Result<()> {
         if self.view_change() {
             return Ok(());
@@ -221,7 +222,7 @@ impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Recv<Request<A>>, C> for Sta
     }
 }
 
-impl<S, A: Addr> State<S, A> {
+impl<S: App, A: Addr> State<S, A> {
     fn close_batch(&mut self, context: &mut impl Context<Self, A>) -> anyhow::Result<()> {
         assert!(self.is_primary());
         assert!(!self.view_change());
@@ -249,7 +250,7 @@ impl<S, A: Addr> State<S, A> {
     }
 }
 
-impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<(Signed<PrePrepare>, Vec<Request<A>>), C>
+impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<(Signed<PrePrepare>, Vec<Request<A>>), C>
     for State<S, A>
 {
     fn on_event(
@@ -317,7 +318,7 @@ impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<events::ProgressPrepare, C> 
     }
 }
 
-impl<S, A: Addr, C: Context<Self, A>>
+impl<S: App, A: Addr, C: Context<Self, A>>
     OnErasedEvent<Recv<(Verifiable<PrePrepare>, Vec<Request<A>>)>, C> for State<S, A>
 {
     fn on_event(
@@ -369,7 +370,7 @@ impl<S, A: Addr, C: Context<Self, A>>
     }
 }
 
-impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<(Verified<PrePrepare>, Vec<Request<A>>), C>
+impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<(Verified<PrePrepare>, Vec<Request<A>>), C>
     for State<S, A>
 {
     fn on_event(
@@ -415,7 +416,7 @@ impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<(Verified<PrePrepare>, Vec<R
     }
 }
 
-impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Signed<Prepare>, C> for State<S, A> {
+impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<Signed<Prepare>, C> for State<S, A> {
     fn on_event(
         &mut self,
         Signed(prepare): Signed<Prepare>,
@@ -432,7 +433,9 @@ impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Signed<Prepare>, C> for Stat
     }
 }
 
-impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Recv<Verifiable<Prepare>>, C> for State<S, A> {
+impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<Recv<Verifiable<Prepare>>, C>
+    for State<S, A>
+{
     fn on_event(
         &mut self,
         Recv(prepare): Recv<Verifiable<Prepare>>,
@@ -456,7 +459,7 @@ impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Recv<Verifiable<Prepare>>, C
     }
 }
 
-impl<S, A: Addr> State<S, A> {
+impl<S: App, A: Addr> State<S, A> {
     fn submit_prepare(
         &mut self,
         prepare: Verifiable<Prepare>,
@@ -505,7 +508,7 @@ impl<S, A: Addr> State<S, A> {
     }
 }
 
-impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Verified<Prepare>, C> for State<S, A> {
+impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<Verified<Prepare>, C> for State<S, A> {
     fn on_event(
         &mut self,
         Verified(prepare): Verified<Prepare>,
@@ -533,7 +536,7 @@ impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Verified<Prepare>, C> for St
     }
 }
 
-impl<S, A: Addr> State<S, A> {
+impl<S: App, A: Addr> State<S, A> {
     fn insert_prepare(
         &mut self,
         prepare: Verifiable<Prepare>,
@@ -571,7 +574,7 @@ impl<S, A: Addr> State<S, A> {
     }
 }
 
-impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Signed<Commit>, C> for State<S, A> {
+impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<Signed<Commit>, C> for State<S, A> {
     fn on_event(&mut self, Signed(commit): Signed<Commit>, context: &mut C) -> anyhow::Result<()> {
         if commit.view_num != self.view_num {
             return Ok(());
@@ -584,7 +587,9 @@ impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Signed<Commit>, C> for State
     }
 }
 
-impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Recv<Verifiable<Commit>>, C> for State<S, A> {
+impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<Recv<Verifiable<Commit>>, C>
+    for State<S, A>
+{
     fn on_event(
         &mut self,
         Recv(commit): Recv<Verifiable<Commit>>,
@@ -603,7 +608,7 @@ impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Recv<Verifiable<Commit>>, C>
     }
 }
 
-impl<S, A: Addr> State<S, A> {
+impl<S: App, A: Addr> State<S, A> {
     fn submit_commit(
         &mut self,
         commit: Verifiable<Commit>,
@@ -642,7 +647,7 @@ impl<S, A: Addr> State<S, A> {
     }
 }
 
-impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Verified<Commit>, C> for State<S, A> {
+impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<Verified<Commit>, C> for State<S, A> {
     fn on_event(
         &mut self,
         Verified(commit): Verified<Commit>,
@@ -670,7 +675,7 @@ impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Verified<Commit>, C> for Sta
     }
 }
 
-impl<S, A: Addr> State<S, A> {
+impl<S: App, A: Addr> State<S, A> {
     fn insert_commit(
         &mut self,
         commit: Verifiable<Commit>,
@@ -725,8 +730,7 @@ impl<S, A: Addr> State<S, A> {
                 // println!("Execute {request:?}");
                 let reply = Reply {
                     seq: request.seq,
-                    // result: Payload(self.app.execute(&request.op)?),
-                    result: Payload(Default::default()),
+                    result: Payload(self.app.execute(&request.op)?),
                     view_num: pre_prepare.view_num,
                     replica_id: self.id,
                 };
@@ -791,7 +795,7 @@ impl<S, A, C: Context<Self, A>> OnErasedEvent<Recv<QueryNewView>, C> for State<S
     }
 }
 
-impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<events::DoViewChange, C> for State<S, A> {
+impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<events::DoViewChange, C> for State<S, A> {
     fn on_event(
         &mut self,
         events::DoViewChange(view_num): events::DoViewChange,
@@ -810,7 +814,9 @@ impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<events::DoViewChange, C> for
     }
 }
 
-impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<events::ProgressViewChange, C> for State<S, A> {
+impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<events::ProgressViewChange, C>
+    for State<S, A>
+{
     fn on_event(
         &mut self,
         events::ProgressViewChange: events::ProgressViewChange,
@@ -820,7 +826,7 @@ impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<events::ProgressViewChange, 
     }
 }
 
-impl<S, A: Addr> State<S, A> {
+impl<S: App, A: Addr> State<S, A> {
     fn do_view_change(&mut self, context: &mut impl Context<Self, A>) -> Result<(), anyhow::Error> {
         let log = self
             .log
@@ -842,7 +848,7 @@ impl<S, A: Addr> State<S, A> {
     }
 }
 
-impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Signed<ViewChange>, C> for State<S, A> {
+impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<Signed<ViewChange>, C> for State<S, A> {
     fn on_event(
         &mut self,
         Signed(view_change): Signed<ViewChange>,
@@ -874,7 +880,7 @@ fn verify_view_change(
     Ok(())
 }
 
-impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Recv<Verifiable<ViewChange>>, C>
+impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<Recv<Verifiable<ViewChange>>, C>
     for State<S, A>
 {
     fn on_event(
@@ -899,7 +905,7 @@ impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Recv<Verifiable<ViewChange>>
     }
 }
 
-impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Verified<ViewChange>, C> for State<S, A> {
+impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<Verified<ViewChange>, C> for State<S, A> {
     fn on_event(
         &mut self,
         Verified(view_change): Verified<ViewChange>,
@@ -952,7 +958,7 @@ fn pre_prepares_for_view_changes(
     Ok(pre_prepares)
 }
 
-impl<S, A: Addr> State<S, A> {
+impl<S: App, A: Addr> State<S, A> {
     fn have_entered(&self, view_num: u32) -> bool {
         self.view_num > view_num || self.view_num == view_num && !self.view_change()
     }
@@ -1012,7 +1018,7 @@ impl<S, A: Addr> State<S, A> {
     }
 }
 
-impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Signed<NewView>, C> for State<S, A> {
+impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<Signed<NewView>, C> for State<S, A> {
     fn on_event(
         &mut self,
         Signed(new_view): Signed<NewView>,
@@ -1026,7 +1032,7 @@ impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Signed<NewView>, C> for Stat
     }
 }
 
-impl<S, A: Addr> State<S, A> {
+impl<S: App, A: Addr> State<S, A> {
     fn enter_view(
         &mut self,
         new_view: Verifiable<NewView>,
@@ -1097,7 +1103,9 @@ impl<S, A: Addr> State<S, A> {
     }
 }
 
-impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Recv<Verifiable<NewView>>, C> for State<S, A> {
+impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<Recv<Verifiable<NewView>>, C>
+    for State<S, A>
+{
     fn on_event(
         &mut self,
         Recv(new_view): Recv<Verifiable<NewView>>,
@@ -1140,7 +1148,7 @@ impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Recv<Verifiable<NewView>>, C
     }
 }
 
-impl<S, A: Addr, C: Context<Self, A>> OnErasedEvent<Verified<NewView>, C> for State<S, A> {
+impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<Verified<NewView>, C> for State<S, A> {
     fn on_event(
         &mut self,
         Verified(new_view): Verified<NewView>,

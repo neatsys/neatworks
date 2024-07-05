@@ -9,7 +9,10 @@ use crate::{
         events::{Recv, Send},
         Addr,
     },
-    workload::events::{Invoke, InvokeOk},
+    workload::{
+        events::{Invoke, InvokeOk},
+        App,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -116,14 +119,18 @@ impl<A: Addr, C: ClientContext<A>> OnErasedEvent<client::Resend, C> for ClientSt
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-pub struct ServerState {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ServerState<S> {
     replies: BTreeMap<u32, Reply>,
+    app: S,
 }
 
-impl ServerState {
-    pub fn new() -> Self {
-        Self::default()
+impl<S> ServerState<S> {
+    pub fn new(app: S) -> Self {
+        Self {
+            app,
+            replies: Default::default(),
+        }
     }
 }
 
@@ -132,7 +139,7 @@ pub trait ServerContext<A> {
     fn net(&mut self) -> &mut Self::Net;
 }
 
-impl<A, C: ServerContext<A>> OnErasedEvent<Recv<Request<A>>, C> for ServerState {
+impl<S: App, A, C: ServerContext<A>> OnErasedEvent<Recv<Request<A>>, C> for ServerState<S> {
     fn on_event(&mut self, Recv(request): Recv<Request<A>>, context: &mut C) -> anyhow::Result<()> {
         match self.replies.get(&request.client_id) {
             Some(reply) if reply.seq > request.seq => return Ok(()),
@@ -143,7 +150,7 @@ impl<A, C: ServerContext<A>> OnErasedEvent<Recv<Request<A>>, C> for ServerState 
         }
         let reply = Reply {
             seq: request.seq,
-            result: Payload(Default::default()), // TODO
+            result: Payload(self.app.execute(&request.op)?),
         };
         self.replies.insert(request.client_id, reply.clone());
         context.net().send(Send(request.client_addr, reply))
