@@ -119,35 +119,63 @@ impl<T: ScheduleEvent<ErasedEvent<S, C>>, S: OnErasedEvent<M, C>, C, M: Send + '
     }
 }
 
-pub mod work {
-    use super::{Erase, ErasedEvent, OnErasedEvent, SendEvent};
+pub type Work<S, C> = ErasedEvent<S, C>;
 
-    pub type Event<S, C> = ErasedEvent<S, C>;
+pub trait Submit<S, C> {
+    // the ergonomics here breaks some, so hold on it
+    // fn submit(&mut self, work: impl Into<Event<S, C>>) -> anyhow::Result<()>;
+    fn submit(&mut self, work: Work<S, C>) -> anyhow::Result<()>;
+}
 
-    pub trait Submit<S, C> {
-        // the ergonomics here breaks some, so hold on it
-        // fn submit(&mut self, work: impl Into<Event<S, C>>) -> anyhow::Result<()>;
-        fn submit(&mut self, work: Event<S, C>) -> anyhow::Result<()>;
+impl<E: SendEvent<Work<S, C>>, S, C> Submit<S, C> for E {
+    fn submit(&mut self, work: Work<S, C>) -> anyhow::Result<()> {
+        self.send(work)
+    }
+}
+
+pub trait SendEventFor<S, C> {
+    fn send<M: Send + 'static>(&mut self, event: M) -> anyhow::Result<()>
+    where
+        S: OnErasedEvent<M, C>;
+}
+
+impl<E: SendEvent<ErasedEvent<S, C>>, S, C> SendEventFor<S, C> for Erase<S, C, E> {
+    fn send<M: Send + 'static>(&mut self, event: M) -> anyhow::Result<()>
+    where
+        S: OnErasedEvent<M, C>,
+    {
+        SendEvent::send(self, event)
+    }
+}
+
+pub trait ScheduleEventFor<S, C> {
+    fn set<M: Send + 'static>(
+        &mut self,
+        period: Duration,
+        event: impl FnMut() -> M + Send + 'static,
+    ) -> anyhow::Result<TimerId>
+    where
+        S: OnErasedEvent<M, C>;
+
+    fn unset(&mut self, id: TimerId) -> anyhow::Result<()>;
+}
+
+impl<T: ScheduleEvent<ErasedEvent<S, C>>, S, C> ScheduleEventFor<S, C> for Erase<S, C, T> {
+    fn set<M: Send + 'static>(
+        &mut self,
+        period: Duration,
+        event: impl FnMut() -> M + Send + 'static,
+    ) -> anyhow::Result<TimerId>
+    where
+        S: OnErasedEvent<M, C>,
+    {
+        ScheduleEvent::set(self, period, event)
     }
 
-    impl<E: SendEvent<Event<S, C>>, S, C> Submit<S, C> for E {
-        fn submit(&mut self, work: Event<S, C>) -> anyhow::Result<()> {
-            self.send(work)
-        }
-    }
-
-    pub trait Upcall<S, C> {
-        fn send<M: Send + 'static>(&mut self, event: M) -> anyhow::Result<()>
-        where
-            S: OnErasedEvent<M, C>;
-    }
-
-    impl<E: SendEvent<ErasedEvent<S, C>>, S, C> Upcall<S, C> for Erase<S, C, E> {
-        fn send<M: Send + 'static>(&mut self, event: M) -> anyhow::Result<()>
-        where
-            S: OnErasedEvent<M, C>,
-        {
-            SendEvent::send(self, event)
-        }
+    fn unset(&mut self, id: TimerId) -> anyhow::Result<()> {
+        // cannot just forward from `self`, because that `ScheduleEvent` is bounded on
+        // `S: OnErasedEvent<..>` as a whole, though that is unnecessary for `unset`
+        // consider switch to opposite, implement `set` and `unset` here and forward to there
+        ScheduleEvent::unset(&mut self.0, id)
     }
 }

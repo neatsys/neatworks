@@ -68,8 +68,11 @@ pub async fn pbft(
         &socket,
         pbft::messages::codec::to_replica_decode(Erase::new(sender.clone())),
     );
-    let crypto = Crypto::new_hardcoded(config.num_replica, index, CryptoFlavor::Schnorrkel)?;
-    let crypto_task = run_worker(crypto, Erase::new(sender), &mut crypto_receiver);
+    let crypto_task = run_worker(
+        Crypto::new_hardcoded(config.num_replica, index, CryptoFlavor::Schnorrkel)?,
+        Erase::new(sender),
+        &mut crypto_receiver,
+    );
 
     select! {
         result = server_task => result?,

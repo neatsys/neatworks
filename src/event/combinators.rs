@@ -22,14 +22,35 @@ impl<M: Into<N>, N> SendEvent<M> for Transient<N> {
 }
 
 pub mod work {
-    use crate::event::work::{Event, Submit};
+    use crate::event::Untyped;
 
-    #[derive(Debug)]
-    pub struct Inline<S, C>(pub S, pub C);
+    pub type Inline<S, C> = super::Inline<Untyped<C, S>, C>;
 
-    impl<S, C> Submit<S, C> for Inline<S, C> {
-        fn submit(&mut self, work: Event<S, C>) -> anyhow::Result<()> {
-            work(&mut self.0, &mut self.1)
+    impl<S, C> Inline<S, C> {
+        pub fn new_worker(state: S, context: C) -> Self {
+            Self(Untyped::new(state), context)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::event::Submit as _;
+
+    use super::*;
+
+    #[test]
+    fn inline_worker() -> anyhow::Result<()> {
+        let mut inline = Inline::new_worker(1, 0);
+        for _ in 0..10 {
+            inline.submit(Box::new(move |state, context| {
+                let old_state = *state;
+                *state += *context;
+                *context = old_state;
+                anyhow::Ok(())
+            }))?
+        }
+        anyhow::ensure!(inline.1 == 55);
+        Ok(())
     }
 }
