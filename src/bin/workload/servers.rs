@@ -12,6 +12,8 @@ use neatworks::{
 };
 use tokio::{net::UdpSocket, select, signal::ctrl_c, sync::mpsc::unbounded_channel};
 
+use super::util::run_until;
+
 pub async fn unreplicated() -> anyhow::Result<()> {
     let socket = Arc::new(UdpSocket::bind("localhost:3000").await?);
     let (sender, mut receiver) = unbounded_channel();
@@ -78,17 +80,6 @@ pub async fn pbft(config: pbft::PublicParameters, index: usize) -> anyhow::Resul
         }
     })
     .await
-}
-
-async fn run_until(
-    task: impl Future<Output = anyhow::Result<()>>,
-    background_task: impl Future<Output = anyhow::Result<()>>,
-) -> anyhow::Result<()> {
-    select! {
-        result = background_task => result?,
-        result = task => return result,
-    }
-    anyhow::bail!("unexpected termination of forever task")
 }
 
 async fn run_until_interrupted(

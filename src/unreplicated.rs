@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, time::Duration};
 
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -61,18 +62,18 @@ pub mod client {
 
 pub trait ClientContext<A> {
     type Net: SendEvent<Send<(), Request<A>>>;
-    type Upcall: SendEvent<InvokeOk<Payload>>;
+    type Upcall: SendEvent<InvokeOk<Bytes>>;
     type Schedule: ScheduleEvent<client::Resend>;
     fn net(&mut self) -> &mut Self::Net;
     fn upcall(&mut self) -> &mut Self::Upcall;
     fn schedule(&mut self) -> &mut Self::Schedule;
 }
 
-impl<A: Addr, C: ClientContext<A>> OnErasedEvent<Invoke<Payload>, C> for ClientState<A> {
-    fn on_event(&mut self, Invoke(op): Invoke<Payload>, context: &mut C) -> anyhow::Result<()> {
+impl<A: Addr, C: ClientContext<A>> OnErasedEvent<Invoke<Bytes>, C> for ClientState<A> {
+    fn on_event(&mut self, Invoke(op): Invoke<Bytes>, context: &mut C) -> anyhow::Result<()> {
         self.seq += 1;
         let replaced = self.outstanding.replace(Outstanding {
-            op,
+            op: Payload(op),
             timer: context
                 .schedule()
                 .set(Duration::from_millis(100), || client::Resend)?,
@@ -108,7 +109,8 @@ impl<A, C: ClientContext<A>> OnErasedEvent<Recv<Reply>, C> for ClientState<A> {
             return Ok(());
         };
         context.schedule().unset(outstanding.timer)?;
-        context.upcall().send(InvokeOk(reply.result))
+        let Payload(result) = reply.result;
+        context.upcall().send(InvokeOk(result))
     }
 }
 
@@ -173,7 +175,7 @@ pub mod context {
     impl<N, U, O: On<Self>, A> ClientContext<A> for Client<N, U, O>
     where
         N: SendEvent<Send<(), Request<A>>>,
-        U: SendEvent<InvokeOk<Payload>>,
+        U: SendEvent<InvokeOk<Bytes>>,
     {
         type Net = N;
         type Upcall = U;
@@ -211,7 +213,7 @@ pub mod context {
         impl<N, U, A: Addr> On<Client<N, U, Self>> for Of<ClientState<A>>
         where
             N: SendEvent<Send<(), Request<A>>>,
-            U: SendEvent<InvokeOk<Payload>>,
+            U: SendEvent<InvokeOk<Bytes>>,
         {
             type Schedule = ScheduleState<ClientState<A>, Client<N, U, Self>>;
         }

@@ -12,10 +12,9 @@ use neatworks::{
 use rand::random;
 use tokio::{net::UdpSocket, select, sync::mpsc::unbounded_channel, time::Instant};
 
-mod utils;
+use super::util::run_until;
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> anyhow::Result<()> {
+async fn unreplicated() -> anyhow::Result<()> {
     let socket = Arc::new(UdpSocket::bind("localhost:0").await?);
     let addr = socket.local_addr()?;
     let (upcall_sender, mut upcall_receiver) = unbounded_channel::<InvokeOk<_>>();
@@ -54,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
         }
         anyhow::Ok(())
     };
-    utils::run_until(invoke_task, async {
+    run_until(invoke_task, async {
         select! {
             result = net_task => result,
             result = client_task => result,
