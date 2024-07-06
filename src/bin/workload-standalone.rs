@@ -5,11 +5,12 @@ use std::{
 
 use neatworks::{pbft::PublicParameters, workload::events::Invoke};
 use tokio::{select, time::sleep};
+use workload::util::run_until;
 
 pub mod workload {
     pub mod clients;
     pub mod servers;
-    mod util;
+    pub mod util;
 }
 
 struct InvokeTask;
@@ -37,47 +38,42 @@ impl workload::clients::InvokeTask for InvokeTask {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let mode = args().nth(1);
-    'client: {
-        match mode.as_deref().unwrap_or("unreplicated") {
-            "unreplicated" => {
-                let server_task = workload::servers::unreplicated();
-                let client_task = workload::clients::unreplicated(InvokeTask);
-                select! {
-                    result = client_task => break 'client result?,
-                    result = server_task => result?,
-                }
-            }
-            "pbft" => {
-                let config = PublicParameters {
-                    num_replica: 4,
-                    num_faulty: 1,
-                    num_concurrent: 1,
-                    max_batch_size: 1,
-                    ..PublicParameters::durations(if cfg!(debug_assertions) {
-                        Duration::from_millis(300)
-                    } else {
-                        Duration::from_millis(100)
-                    })
-                };
-                let addrs = (0..4)
-                    .map(|index| ([127, 0, 0, 1 + index], 3000).into())
-                    .collect::<Vec<_>>();
-                let server_task0 = workload::servers::pbft(config.clone(), 0, addrs.clone());
-                let server_task1 = workload::servers::pbft(config.clone(), 1, addrs.clone());
-                let server_task2 = workload::servers::pbft(config.clone(), 2, addrs.clone());
-                let server_task3 = workload::servers::pbft(config.clone(), 3, addrs.clone());
-                let client_task = workload::clients::pbft(InvokeTask, config, addrs);
-                select! {
-                    result = client_task => break 'client result?,
-                    result = server_task0 => result?,
-                    result = server_task1 => result?,
-                    result = server_task2 => result?,
-                    result = server_task3 => result?,
-                }
-            }
-            _ => anyhow::bail!("unimplemented"),
+    match mode.as_deref().unwrap_or("unreplicated") {
+        "unreplicated" => {
+            let server_task = workload::servers::unreplicated();
+            let client_task = workload::clients::unreplicated(InvokeTask);
+            run_until(client_task, server_task).await
         }
-        anyhow::bail!("unexpected termination of server task")
+        "pbft" => {
+            let config = PublicParameters {
+                num_replica: 4,
+                num_faulty: 1,
+                num_concurrent: 1,
+                max_batch_size: 1,
+                ..PublicParameters::durations(if cfg!(debug_assertions) {
+                    Duration::from_millis(300)
+                } else {
+                    Duration::from_millis(100)
+                })
+            };
+            let addrs = (0..4)
+                .map(|index| ([127, 0, 0, 1 + index], 3000).into())
+                .collect::<Vec<_>>();
+            let server_task0 = workload::servers::pbft(config.clone(), 0, addrs.clone());
+            let server_task1 = workload::servers::pbft(config.clone(), 1, addrs.clone());
+            let server_task2 = workload::servers::pbft(config.clone(), 2, addrs.clone());
+            let server_task3 = workload::servers::pbft(config.clone(), 3, addrs.clone());
+            let client_task = workload::clients::pbft(InvokeTask, config, addrs);
+            run_until(client_task, async {
+                select! {
+                    result = server_task0 => result,
+                    result = server_task1 => result,
+                    result = server_task2 => result,
+                    result = server_task3 => result,
+                }
+            })
+            .await
+        }
+        _ => anyhow::bail!("unimplemented"),
     }
-    Ok(())
 }

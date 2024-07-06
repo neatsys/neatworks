@@ -9,6 +9,7 @@ jobs:
   build_and_test:
     name: Build and test
     runs-on: ubuntu-latest
+    timeout-minutes: 3
     strategy:
       fail-fast: false
       matrix:
@@ -21,4 +22,3 @@ jobs:
       - run: cargo test --verbose --lib
       # loopback network seems not work
       # - run: cargo run --verbose --release --bin workload-standalone -- unreplicated
-      # - run: cargo run --verbose --release --bin workload-standalone -- pbft
