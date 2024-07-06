@@ -14,7 +14,7 @@ use tokio::{net::UdpSocket, select, sync::mpsc::unbounded_channel, time::Instant
 
 use super::util::run_until;
 
-async fn unreplicated() -> anyhow::Result<()> {
+pub async fn unreplicated() -> anyhow::Result<()> {
     let socket = Arc::new(UdpSocket::bind("localhost:0").await?);
     let addr = socket.local_addr()?;
     let (upcall_sender, mut upcall_receiver) = unbounded_channel::<InvokeOk<_>>();

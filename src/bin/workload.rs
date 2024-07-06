@@ -1,7 +1,7 @@
-mod workload {
-    mod clients;
-    mod servers;
-    mod util;
+pub mod workload {
+    pub mod clients;
+    pub mod servers;
+    pub mod util;
 }
 
 #[tokio::main(flavor = "current_thread")]

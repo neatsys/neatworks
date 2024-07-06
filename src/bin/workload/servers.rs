@@ -1,4 +1,4 @@
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 
 use neatworks::{
     crypto::{Crypto, CryptoFlavor},
@@ -10,9 +10,7 @@ use neatworks::{
     pbft, unreplicated,
     workload::Null,
 };
-use tokio::{net::UdpSocket, select, signal::ctrl_c, sync::mpsc::unbounded_channel};
-
-use super::util::run_until;
+use tokio::{net::UdpSocket, select, sync::mpsc::unbounded_channel};
 
 pub async fn unreplicated() -> anyhow::Result<()> {
     let socket = Arc::new(UdpSocket::bind("localhost:3000").await?);
@@ -30,13 +28,11 @@ pub async fn unreplicated() -> anyhow::Result<()> {
         &mut context,
         &mut receiver,
     );
-    run_until_interrupted(async {
-        select! {
-            result = net_task => result,
-            result = server_task => result,
-        }
-    })
-    .await
+    select! {
+        result = net_task => result?,
+        result = server_task => result?,
+    }
+    anyhow::bail!("unexpected termination of infinite task")
 }
 
 pub async fn pbft(config: pbft::PublicParameters, index: usize) -> anyhow::Result<()> {
@@ -72,26 +68,10 @@ pub async fn pbft(config: pbft::PublicParameters, index: usize) -> anyhow::Resul
     let crypto = Crypto::new_hardcoded(config.num_replica, index, CryptoFlavor::Schnorrkel)?;
     let crypto_task = run_worker(crypto, Erase::new(sender), &mut crypto_receiver);
 
-    run_until_interrupted(async {
-        select! {
-            result = server_task => result,
-            result = net_task => result,
-            result = crypto_task => result,
-        }
-    })
-    .await
-}
-
-async fn run_until_interrupted(
-    task: impl Future<Output = anyhow::Result<()>>,
-) -> anyhow::Result<()> {
-    run_until(
-        async {
-            ctrl_c().await?;
-            println!();
-            anyhow::Ok(())
-        },
-        task,
-    )
-    .await
+    select! {
+        result = server_task => result?,
+        result = net_task => result?,
+        result = crypto_task => result?,
+    }
+    anyhow::bail!("unexpected termination of infinite task")
 }
