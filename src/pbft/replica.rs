@@ -6,7 +6,7 @@ use crate::{
         events::{Signed, Verified},
         Crypto, DigestHash, Verifiable, H256,
     },
-    event::{OnErasedEvent, ScheduleEventFor, SendEventFor, Submit},
+    event::{OnErasedEvent, ScheduleEvent, SendEventFor, Submit},
     net::{combinators::All, events::Recv, Addr, SendMessage},
     timer::Timer,
     workload::App,
@@ -132,7 +132,10 @@ pub trait Context<S, A>: Sized {
     type DownlinkNet: SendMessage<A, Reply>;
     type CryptoWorker: Submit<Crypto, Self::CryptoContext>;
     type CryptoContext: SendEventFor<S, Self>;
-    type Schedule: ScheduleEventFor<S, Self>;
+    type Schedule: ScheduleEvent<events::ProgressPrepare>
+        + ScheduleEvent<events::DoViewChange>
+        + ScheduleEvent<events::ProgressViewChange>
+        + ScheduleEvent<events::StateTransfer>;
     fn peer_net(&mut self) -> &mut Self::PeerNet;
     fn downlink_net(&mut self) -> &mut Self::DownlinkNet;
     fn crypto_worker(&mut self) -> &mut Self::CryptoWorker;
@@ -1171,7 +1174,10 @@ pub mod context {
     pub trait On<C, S> {
         type CryptoWorker: Submit<Crypto, Self::CryptoContext>;
         type CryptoContext: SendEventFor<S, C>;
-        type Schedule: ScheduleEventFor<S, C>;
+        type Schedule: ScheduleEvent<events::ProgressPrepare>
+            + ScheduleEvent<events::DoViewChange>
+            + ScheduleEvent<events::ProgressViewChange>
+            + ScheduleEvent<events::StateTransfer>;
     }
 
     impl<PN, DN, O: On<Self, S>, S, A> super::Context<S, A> for Context<PN, DN, O, S>
