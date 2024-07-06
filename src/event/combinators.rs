@@ -1,4 +1,5 @@
 use derive_more::{Deref, DerefMut};
+use derive_where::derive_where;
 
 use super::{OnEvent, SendEvent};
 
@@ -12,7 +13,14 @@ impl<S: OnEvent<C>, C> SendEvent<S::Event> for Inline<S, C> {
 }
 
 #[derive(Debug, Deref, DerefMut)]
+#[derive_where(Default)]
 pub struct Transient<M>(pub Vec<M>);
+
+impl<M> Transient<M> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
 
 impl<M: Into<N>, N> SendEvent<M> for Transient<N> {
     fn send(&mut self, event: M) -> anyhow::Result<()> {

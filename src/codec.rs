@@ -6,7 +6,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use crate::{
     event::SendEvent,
     net::events::Send,
-    workload::events::{Invoke, InvokeOk},
+    workload::{events::InvokeOk, Typed},
 };
 
 pub struct Encode<M, T>(fn(&M) -> anyhow::Result<Bytes>, pub T);
@@ -46,12 +46,16 @@ pub fn bincode_decode<M: DeserializeOwned>(buf: &[u8]) -> anyhow::Result<M> {
         .map_err(Into::into)
 }
 
-pub fn send_invoke<M>(
-    decode: fn(&[u8]) -> anyhow::Result<M>,
-    mut sender: impl SendEvent<Invoke<M>>,
-) -> impl FnMut(&[u8]) -> anyhow::Result<()> {
-    move |buf| sender.send(Invoke(decode(buf)?))
+impl<O: DeserializeOwned, R: Serialize, A> Typed<O, R, A> {
+    pub fn bincode(app: A) -> Self {
+        Self {
+            encode: bincode_encode,
+            decode: bincode_decode,
+            inner: app,
+        }
+    }
 }
 
+// TODO proper Debug impl
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deref, Serialize, Deserialize)]
 pub struct Payload(pub Bytes);

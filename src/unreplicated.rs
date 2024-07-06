@@ -245,3 +245,22 @@ pub mod codec {
         move |buf| sender.send(Recv(bincode_decode(buf)?))
     }
 }
+
+pub mod model {
+    use crate::workload::app::kvstore::KVStore;
+
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+    pub enum Addr {
+        Client(u8),
+        Server,
+    }
+
+    impl crate::net::Addr for Addr {}
+
+    pub struct State {
+        clients: Vec<ClientState<Addr>>,
+        server: ServerState<KVStore>,
+    }
+}
