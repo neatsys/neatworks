@@ -34,7 +34,7 @@ impl<S: OnEvent<C>, C> OnEvent<C> for &mut S {
 pub struct Exit;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TimerId(u32);
+pub struct TimerId(pub u32);
 
 pub trait ScheduleEvent<M> {
     fn set(

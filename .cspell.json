@@ -14,6 +14,7 @@
         "endianness",
         "Hasher",
         "keypair",
+        "kvstore",
         "neatworks",
         "pbft",
         "prehashed",
@@ -25,7 +26,8 @@
         "seedable",
         "serde",
         "unreplicated",
-        "upcall"
+        "upcall",
+        "upcalls"
     ],
     // flagWords - list of words to be always considered incorrect
     // This is useful for offensive words and common spelling errors.

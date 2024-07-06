@@ -247,11 +247,17 @@ pub mod codec {
 }
 
 pub mod model {
-    use crate::workload::app::kvstore::KVStore;
+    use derive_more::From;
+
+    use crate::{
+        event::combinators::Transient,
+        model::{Network, NetworkContext},
+        workload::app::kvstore::KVStore,
+    };
 
     use super::*;
 
-    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
     pub enum Addr {
         Client(u8),
         Server,
@@ -259,8 +265,73 @@ pub mod model {
 
     impl crate::net::Addr for Addr {}
 
+    #[derive(Debug, From)]
+    pub enum Message {
+        Request(super::Request<Addr>),
+        Reply(super::Reply),
+    }
+
+    #[derive(Debug)]
+    pub enum Timer {
+        ClientResend,
+    }
+
     pub struct State {
         clients: Vec<ClientState<Addr>>,
+        client_upcalls: Vec<Transient<InvokeOk<Bytes>>>,
         server: ServerState<KVStore>,
+        network: Network<Addr, Message, Timer>,
+    }
+
+    impl super::ClientContext<Addr> for NetworkContext<'_, Addr, Message, Timer> {
+        type Net = Self;
+        type Schedule = Self;
+        type Upcall = Self;
+        fn net(&mut self) -> &mut Self::Net {
+            self
+        }
+        fn schedule(&mut self) -> &mut Self::Schedule {
+            self
+        }
+        fn upcall(&mut self) -> &mut Self::Upcall {
+            self
+        }
+    }
+
+    impl SendEvent<Send<(), Request<Addr>>> for NetworkContext<'_, Addr, Message, Timer> {
+        fn send(&mut self, Send((), message): Send<(), Request<Addr>>) -> anyhow::Result<()> {
+            self.send(Send(Addr::Server, message))
+        }
+    }
+
+    impl ScheduleEvent<super::client::Resend> for NetworkContext<'_, Addr, Message, Timer> {
+        fn set(
+            &mut self,
+            period: Duration,
+            _: impl FnMut() -> super::client::Resend + std::marker::Send + 'static,
+        ) -> anyhow::Result<TimerId> {
+            self.set(period, Timer::ClientResend)
+        }
+
+        fn unset(&mut self, id: TimerId) -> anyhow::Result<()> {
+            NetworkContext::unset(self, id)
+        }
+    }
+
+    #[allow(unused)]
+    impl SendEvent<InvokeOk<Bytes>> for NetworkContext<'_, Addr, Message, Timer> {
+        fn send(&mut self, event: InvokeOk<Bytes>) -> anyhow::Result<()> {
+            let Addr::Client(index) = self.addr else {
+                anyhow::bail!("unimplemented")
+            };
+            Ok(())
+        }
+    }
+
+    impl super::ServerContext<Addr> for NetworkContext<'_, Addr, Message, Timer> {
+        type Net = Self;
+        fn net(&mut self) -> &mut Self::Net {
+            self
+        }
     }
 }
