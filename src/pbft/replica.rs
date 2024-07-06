@@ -1162,29 +1162,28 @@ impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<Verified<NewView>, C> f
 }
 
 pub mod context {
+    use std::marker::PhantomData;
+
     use super::*;
 
-    pub struct Context<PN, DN, CW: CryptoWorkerOn<Self>, T: ScheduleOn<Self>> {
+    pub struct Context<PN, DN, O: On<Self, S>, S> {
         pub peer_net: PN,
         pub downlink_net: DN,
-        pub crypto_worker: CW::Out,
-        pub schedule: T::Out,
+        pub crypto_worker: O::CryptoWorker,
+        pub schedule: O::Schedule,
+        pub _m: PhantomData<S>,
     }
 
-    pub trait CryptoWorkerOn<C> {
-        type Out: Submit<Crypto, Self::Context>;
-        type Context;
-    }
-
-    pub trait ScheduleOn<C> {
-        type Out: ScheduleEvent<events::DoViewChange>
+    pub trait On<C, S> {
+        type CryptoWorker: Submit<Crypto, Self::CryptoContext>;
+        type CryptoContext: work::Upcall<S, C>;
+        type Schedule: ScheduleEvent<events::DoViewChange>
             + ScheduleEvent<events::ProgressPrepare>
             + ScheduleEvent<events::ProgressViewChange>
             + ScheduleEvent<events::StateTransfer>;
     }
 
-    impl<PN, DN, CW: CryptoWorkerOn<Self>, T: ScheduleOn<Self>, S, A> super::Context<S, A>
-        for Context<PN, DN, CW, T>
+    impl<PN, DN, O: On<Self, S>, S, A> super::Context<S, A> for Context<PN, DN, O, S>
     where
         PN: SendMessage<u8, Request<A>>
             + SendMessage<All, (Verifiable<PrePrepare>, Vec<Request<A>>)>
@@ -1195,13 +1194,12 @@ pub mod context {
             + SendMessage<u8, QueryNewView>
             + SendMessage<u8, Verifiable<NewView>>,
         DN: SendMessage<A, Reply>,
-        CW::Context: work::Upcall<S, Self>,
     {
         type PeerNet = PN;
         type DownlinkNet = DN;
-        type CryptoWorker = CW::Out;
-        type CryptoContext = CW::Context;
-        type Schedule = T::Out;
+        type CryptoWorker = O::CryptoWorker;
+        type CryptoContext = O::CryptoContext;
+        type Schedule = O::Schedule;
         fn peer_net(&mut self) -> &mut Self::PeerNet {
             &mut self.peer_net
         }
@@ -1213,6 +1211,36 @@ pub mod context {
         }
         fn schedule(&mut self) -> &mut Self::Schedule {
             &mut self.schedule
+        }
+    }
+
+    mod task {
+        use tokio::sync::mpsc::UnboundedSender;
+
+        use crate::event::{
+            task::erase::{Of, ScheduleState, Sender},
+            ErasedEvent,
+        };
+
+        use super::*;
+
+        impl<PN, DN, S, A> On<Context<PN, DN, Self, State<S, A>>, State<S, A>> for Of<State<S, A>>
+        where
+            PN: SendMessage<u8, Request<A>>
+                + SendMessage<All, (Verifiable<PrePrepare>, Vec<Request<A>>)>
+                + SendMessage<All, Verifiable<Prepare>>
+                + SendMessage<All, Verifiable<Commit>>
+                + SendMessage<All, Verifiable<ViewChange>>
+                + SendMessage<All, Verifiable<NewView>>
+                + SendMessage<u8, QueryNewView>
+                + SendMessage<u8, Verifiable<NewView>>,
+            DN: SendMessage<A, Reply>,
+            S: App,
+            A: Addr,
+        {
+            type CryptoWorker = UnboundedSender<ErasedEvent<Crypto, Self::CryptoContext>>;
+            type CryptoContext = Sender<State<S, A>, Context<PN, DN, Self, State<S, A>>>;
+            type Schedule = ScheduleState<State<S, A>, Context<PN, DN, Self, State<S, A>>>;
         }
     }
 }

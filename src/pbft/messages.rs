@@ -114,7 +114,7 @@ pub mod codec {
         Encode::bincode(net)
     }
 
-    pub fn to_server_decode<'a, A: Addr>(
+    pub fn to_replica_decode<'a, A: Addr>(
         mut sender: impl SendEvent<Recv<Request<A>>>
             + SendEvent<Recv<(Verifiable<PrePrepare>, Vec<Request<A>>)>>
             + SendEvent<Recv<Verifiable<Prepare>>>

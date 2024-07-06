@@ -160,24 +160,24 @@ impl<S: App, A, C: ServerContext<A>> OnErasedEvent<Recv<Request<A>>, C> for Serv
 pub mod context {
     use super::*;
 
-    pub struct Client<N, U, T: ClientScheduleOn<Self>> {
+    pub struct Client<N, U, O: On<Self>> {
         pub net: N,
         pub upcall: U,
-        pub schedule: T::Out,
+        pub schedule: O::Schedule,
     }
 
-    pub trait ClientScheduleOn<C> {
-        type Out: ScheduleEvent<client::Resend>;
+    pub trait On<C> {
+        type Schedule: ScheduleEvent<client::Resend>;
     }
 
-    impl<N, U, T: ClientScheduleOn<Self>, A> ClientContext<A> for Client<N, U, T>
+    impl<N, U, O: On<Self>, A> ClientContext<A> for Client<N, U, O>
     where
         N: SendEvent<Send<(), Request<A>>>,
         U: SendEvent<InvokeOk<Payload>>,
     {
         type Net = N;
         type Upcall = U;
-        type Schedule = <T as ClientScheduleOn<Self>>::Out;
+        type Schedule = O::Schedule;
         fn net(&mut self) -> &mut Self::Net {
             &mut self.net
         }
@@ -204,16 +204,16 @@ pub mod context {
     }
 
     mod task {
-        use crate::event::task::erase::{ScheduleOf, ScheduleState};
+        use crate::event::task::erase::{Of, ScheduleState};
 
         use super::*;
 
-        impl<N, U, A: Addr> ClientScheduleOn<Client<N, U, Self>> for ScheduleOf<ClientState<A>>
+        impl<N, U, A: Addr> On<Client<N, U, Self>> for Of<ClientState<A>>
         where
             N: SendEvent<Send<(), Request<A>>>,
             U: SendEvent<InvokeOk<Payload>>,
         {
-            type Out = ScheduleState<ClientState<A>, Client<N, U, Self>>;
+            type Schedule = ScheduleState<ClientState<A>, Client<N, U, Self>>;
         }
     }
 }

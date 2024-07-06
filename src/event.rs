@@ -75,7 +75,7 @@ pub trait OnErasedEvent<M, C> {
     fn on_event(&mut self, event: M, context: &mut C) -> anyhow::Result<()>;
 }
 
-#[derive_where(Debug; E)]
+#[derive_where(Debug, Clone; E)]
 #[derive(Deref, DerefMut)]
 pub struct Erase<S, C, E>(
     #[deref]

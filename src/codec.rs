@@ -11,9 +11,9 @@ use crate::{
 
 pub struct Encode<M, T>(fn(&M) -> anyhow::Result<Bytes>, pub T);
 
-impl<M, N: SendEvent<Send<A, Bytes>>, A> SendEvent<Send<A, M>> for Encode<M, N> {
+impl<M: Into<L>, L, N: SendEvent<Send<A, Bytes>>, A> SendEvent<Send<A, M>> for Encode<L, N> {
     fn send(&mut self, Send(remote, message): Send<A, M>) -> anyhow::Result<()> {
-        let encoded = (self.0)(&message)?;
+        let encoded = (self.0)(&message.into())?;
         self.1.send(Send(remote, encoded))
     }
 }

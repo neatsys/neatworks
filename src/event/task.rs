@@ -13,7 +13,9 @@ use super::{work, OnEvent, ScheduleEvent, SendEvent, TimerId};
 pub mod erase {
     use crate::event::{Erase, ErasedEvent};
 
-    pub struct ScheduleOf<S>(std::marker::PhantomData<S>);
+    pub struct Of<S>(std::marker::PhantomData<S>);
+
+    pub type Sender<S, C> = Erase<S, C, super::UnboundedSender<ErasedEvent<S, C>>>;
 
     pub type ScheduleState<S, C> = Erase<S, C, super::ScheduleState<ErasedEvent<S, C>>>;
 }

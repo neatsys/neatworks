@@ -3,7 +3,7 @@ use std::sync::Arc;
 use neatworks::{
     codec::Payload,
     event::{
-        task::{erase::ScheduleOf, run_with_schedule, ScheduleState},
+        task::{erase::Of, run_with_schedule, ScheduleState},
         Erase, SendEvent, Untyped,
     },
     net::{combinators::Forward, task::udp},
@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
         unreplicated::codec::client_decode(Erase::new(sender.clone())),
     );
 
-    let mut context = unreplicated::context::Client::<_, _, ScheduleOf<_>> {
+    let mut context = unreplicated::context::Client::<_, _, Of<_>> {
         net: unreplicated::codec::client_encode(Forward(
             ([127, 0, 0, 1], 3000).into(),
             socket.clone(),
