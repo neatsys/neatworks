@@ -1,23 +1,40 @@
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
+use bytes::Bytes;
 use neatworks::{
     event::{
         task::{erase::Of, run_with_schedule, ScheduleState},
         Erase, SendEvent, Untyped,
     },
-    net::{combinators::Forward, task::udp},
+    net::{
+        combinators::{Forward, IndexNet},
+        task::udp,
+    },
+    pbft::{self, PublicParameters},
     unreplicated,
     workload::events::{Invoke, InvokeOk},
 };
 use rand::random;
-use tokio::{net::UdpSocket, select, sync::mpsc::unbounded_channel, time::Instant};
+use tokio::{
+    net::UdpSocket,
+    select,
+    sync::mpsc::{unbounded_channel, UnboundedReceiver},
+};
 
 use super::util::run_until;
 
-pub async fn unreplicated() -> anyhow::Result<()> {
+pub trait InvokeTask {
+    fn run(
+        self,
+        sender: impl SendEvent<Invoke<Bytes>>,
+        receiver: UnboundedReceiver<InvokeOk<Bytes>>,
+    ) -> impl Future<Output = anyhow::Result<()>>;
+}
+
+pub async fn unreplicated(invoke_task: impl InvokeTask) -> anyhow::Result<()> {
     let socket = Arc::new(UdpSocket::bind("localhost:0").await?);
     let addr = socket.local_addr()?;
-    let (upcall_sender, mut upcall_receiver) = unbounded_channel::<InvokeOk<_>>();
+    let (upcall_sender, upcall_receiver) = unbounded_channel::<InvokeOk<_>>();
     let (schedule_sender, mut schedule_receiver) = unbounded_channel();
     let (sender, mut receiver) = unbounded_channel();
 
@@ -42,22 +59,52 @@ pub async fn unreplicated() -> anyhow::Result<()> {
         |context| &mut *context.schedule,
     );
 
-    let invoke_task = async {
-        let mut sender = Erase::new(sender);
-        for _ in 0..10 {
-            let start = Instant::now();
-            sender.send(Invoke(Default::default()))?;
-            let recv = upcall_receiver.recv().await;
-            anyhow::ensure!(recv.is_some());
-            println!("{:?}", start.elapsed())
-        }
-        anyhow::Ok(())
+    run_until(
+        invoke_task.run(Erase::new(sender), upcall_receiver),
+        async {
+            select! {
+                result = net_task => result,
+                result = client_task => result,
+            }
+        },
+    )
+    .await
+}
+
+pub async fn pbft(invoke_task: impl InvokeTask, config: PublicParameters) -> anyhow::Result<()> {
+    let socket = Arc::new(UdpSocket::bind("localhost:0").await?);
+    let addr = socket.local_addr()?;
+    let (upcall_sender, upcall_receiver) = unbounded_channel::<InvokeOk<_>>();
+    let (schedule_sender, mut schedule_receiver) = unbounded_channel();
+    let (sender, mut receiver) = unbounded_channel();
+
+    let net_task = udp::run(
+        &socket,
+        pbft::messages::codec::to_client_decode(Erase::new(sender.clone())),
+    );
+
+    let mut context = pbft::client::context::Context::<_, _, Of<_>> {
+        // TODO
+        net: pbft::messages::codec::to_replica_encode(IndexNet::new(vec![], None, socket.clone())),
+        upcall: upcall_sender,
+        schedule: Erase::new(ScheduleState::new(schedule_sender)),
     };
-    run_until(invoke_task, async {
-        select! {
-            result = net_task => result,
-            result = client_task => result,
-        }
-    })
+    let client_task = run_with_schedule(
+        Untyped::new(pbft::client::State::new(random(), addr, config)),
+        &mut context,
+        &mut receiver,
+        &mut schedule_receiver,
+        |context| &mut *context.schedule,
+    );
+
+    run_until(
+        invoke_task.run(Erase::new(sender), upcall_receiver),
+        async {
+            select! {
+                result = net_task => result,
+                result = client_task => result,
+            }
+        },
+    )
     .await
 }

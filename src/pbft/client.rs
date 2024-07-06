@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use bytes::Bytes;
+
 use crate::{
     codec::Payload,
     event::{OnErasedEvent, ScheduleEvent, SendEvent, TimerId},
@@ -51,22 +53,21 @@ pub mod events {
 
 pub trait Context<A> {
     type Net: SendMessage<u8, Request<A>> + SendMessage<All, Request<A>>;
-    type Upcall: SendEvent<InvokeOk<Payload>>;
+    type Upcall: SendEvent<InvokeOk<Bytes>>;
     type Schedule: ScheduleEvent<events::Resend>;
     fn net(&mut self) -> &mut Self::Net;
     fn upcall(&mut self) -> &mut Self::Upcall;
     fn schedule(&mut self) -> &mut Self::Schedule;
 }
 
-impl<A: Addr, C: Context<A>> OnErasedEvent<Invoke<Payload>, C> for State<A> {
-    fn on_event(&mut self, Invoke(op): Invoke<Payload>, context: &mut C) -> anyhow::Result<()> {
+impl<A: Addr, C: Context<A>> OnErasedEvent<Invoke<Bytes>, C> for State<A> {
+    fn on_event(&mut self, Invoke(op): Invoke<Bytes>, context: &mut C) -> anyhow::Result<()> {
         self.seq += 1;
-        let timer = context
-            .schedule()
-            .set(self.config.client_resend_interval, || events::Resend)?;
         let replaced = self.outstanding.replace(Outstanding {
-            op,
-            timer,
+            op: Payload(op),
+            timer: context
+                .schedule()
+                .set(self.config.client_resend_interval, || events::Resend)?,
             replies: Default::default(),
         });
         anyhow::ensure!(replaced.is_none());
@@ -109,7 +110,8 @@ impl<A, C: Context<A>> OnErasedEvent<Recv<Reply>, C> for State<A> {
         context
             .schedule()
             .unset(self.outstanding.take().unwrap().timer)?;
-        context.upcall().send(InvokeOk(reply.result))
+        let Payload(result) = reply.result;
+        context.upcall().send(InvokeOk(result))
     }
 }
 
@@ -125,5 +127,52 @@ impl<A: Addr> State<A> {
             op: self.outstanding.as_ref().unwrap().op.clone(),
         };
         context.net().send(dest, request)
+    }
+}
+
+pub mod context {
+    use super::*;
+
+    pub struct Context<N, U, O: On<Self>> {
+        pub net: N,
+        pub upcall: U,
+        pub schedule: O::Schedule,
+    }
+
+    pub trait On<C> {
+        type Schedule: ScheduleEvent<events::Resend>;
+    }
+
+    impl<N, U, O: On<Self>, A> super::Context<A> for Context<N, U, O>
+    where
+        N: SendMessage<u8, Request<A>> + SendMessage<All, Request<A>>,
+        U: SendEvent<InvokeOk<Bytes>>,
+    {
+        type Net = N;
+        type Upcall = U;
+        type Schedule = O::Schedule;
+        fn net(&mut self) -> &mut Self::Net {
+            &mut self.net
+        }
+        fn upcall(&mut self) -> &mut Self::Upcall {
+            &mut self.upcall
+        }
+        fn schedule(&mut self) -> &mut Self::Schedule {
+            &mut self.schedule
+        }
+    }
+
+    mod task {
+        use crate::event::task::erase::{Of, ScheduleState};
+
+        use super::*;
+
+        impl<N, U, A: Addr> On<Context<N, U, Self>> for Of<State<A>>
+        where
+            N: SendMessage<u8, Request<A>> + SendMessage<All, Request<A>>,
+            U: SendEvent<InvokeOk<Bytes>>,
+        {
+            type Schedule = ScheduleState<State<A>, Context<N, U, Self>>;
+        }
     }
 }
