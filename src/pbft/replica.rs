@@ -206,7 +206,7 @@ impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<Recv<Request<A>>, C> fo
                 request,
             )?;
             let view_num = self.view_num;
-            self.do_view_change_timer.set(
+            self.do_view_change_timer.ensure_set(
                 move || events::DoViewChange(view_num + 1),
                 context.schedule(),
             )?;

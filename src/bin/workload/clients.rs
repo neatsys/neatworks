@@ -1,4 +1,4 @@
-use std::{future::Future, sync::Arc};
+use std::{future::Future, net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
 use neatworks::{
@@ -71,7 +71,11 @@ pub async fn unreplicated(invoke_task: impl InvokeTask) -> anyhow::Result<()> {
     .await
 }
 
-pub async fn pbft(invoke_task: impl InvokeTask, config: PublicParameters) -> anyhow::Result<()> {
+pub async fn pbft(
+    invoke_task: impl InvokeTask,
+    config: PublicParameters,
+    replica_addrs: Vec<SocketAddr>,
+) -> anyhow::Result<()> {
     let socket = Arc::new(UdpSocket::bind("localhost:0").await?);
     let addr = socket.local_addr()?;
     let (upcall_sender, upcall_receiver) = unbounded_channel::<InvokeOk<_>>();
@@ -84,8 +88,11 @@ pub async fn pbft(invoke_task: impl InvokeTask, config: PublicParameters) -> any
     );
 
     let mut context = pbft::client::context::Context::<_, _, Of<_>> {
-        // TODO
-        net: pbft::messages::codec::to_replica_encode(IndexNet::new(vec![], None, socket.clone())),
+        net: pbft::messages::codec::to_replica_encode(IndexNet::new(
+            replica_addrs,
+            None,
+            socket.clone(),
+        )),
         upcall: upcall_sender,
         schedule: Erase::new(ScheduleState::new(schedule_sender)),
     };

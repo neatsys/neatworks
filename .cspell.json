@@ -17,6 +17,7 @@
         "neatworks",
         "pbft",
         "prehashed",
+        "rustup",
         "Schnorrkel",
         "secp",
         "secp256k1",

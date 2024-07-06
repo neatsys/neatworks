@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use neatworks::workload::events::Invoke;
+use neatworks::{pbft::PublicParameters, workload::events::Invoke};
 use tokio::{select, time::sleep};
 
 pub mod workload {
@@ -22,6 +22,7 @@ impl workload::clients::InvokeTask for InvokeTask {
             neatworks::workload::events::InvokeOk<bytes::Bytes>,
         >,
     ) -> anyhow::Result<()> {
+        sleep(Duration::from_millis(100)).await;
         for _ in 0..10 {
             let start = Instant::now();
             sender.send(Invoke(Default::default()))?;
@@ -40,13 +41,38 @@ async fn main() -> anyhow::Result<()> {
         match mode.as_deref().unwrap_or("unreplicated") {
             "unreplicated" => {
                 let server_task = workload::servers::unreplicated();
-                let client_task = async {
-                    sleep(Duration::from_millis(100)).await;
-                    workload::clients::unreplicated(InvokeTask).await
-                };
+                let client_task = workload::clients::unreplicated(InvokeTask);
                 select! {
                     result = client_task => break 'client result?,
                     result = server_task => result?,
+                }
+            }
+            "pbft" => {
+                let config = PublicParameters {
+                    num_replica: 4,
+                    num_faulty: 1,
+                    num_concurrent: 1,
+                    max_batch_size: 1,
+                    ..PublicParameters::durations(if cfg!(debug_assertions) {
+                        Duration::from_millis(300)
+                    } else {
+                        Duration::from_millis(100)
+                    })
+                };
+                let addrs = (0..4)
+                    .map(|index| ([127, 0, 0, 1 + index], 3000).into())
+                    .collect::<Vec<_>>();
+                let server_task0 = workload::servers::pbft(config.clone(), 0, addrs.clone());
+                let server_task1 = workload::servers::pbft(config.clone(), 1, addrs.clone());
+                let server_task2 = workload::servers::pbft(config.clone(), 2, addrs.clone());
+                let server_task3 = workload::servers::pbft(config.clone(), 3, addrs.clone());
+                let client_task = workload::clients::pbft(InvokeTask, config, addrs);
+                select! {
+                    result = client_task => break 'client result?,
+                    result = server_task0 => result?,
+                    result = server_task1 => result?,
+                    result = server_task2 => result?,
+                    result = server_task3 => result?,
                 }
             }
             _ => anyhow::bail!("unimplemented"),

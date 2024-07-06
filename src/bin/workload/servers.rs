@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use neatworks::{
     crypto::{Crypto, CryptoFlavor},
@@ -35,17 +35,20 @@ pub async fn unreplicated() -> anyhow::Result<()> {
     anyhow::bail!("unexpected termination of infinite task")
 }
 
-pub async fn pbft(config: pbft::PublicParameters, index: usize) -> anyhow::Result<()> {
-    let socket = Arc::new(UdpSocket::bind("localhost:3000").await?);
+pub async fn pbft(
+    config: pbft::PublicParameters,
+    index: usize,
+    addrs: Vec<SocketAddr>,
+) -> anyhow::Result<()> {
+    let socket = Arc::new(UdpSocket::bind(addrs[index]).await?);
 
     let (crypto_sender, mut crypto_receiver) = unbounded_channel();
     let (schedule_sender, mut schedule_receiver) = unbounded_channel();
     let (sender, mut receiver) = unbounded_channel();
 
     let mut context = pbft::replica::context::Context::<_, _, Of<_>, _> {
-        // TODO
         peer_net: pbft::messages::codec::to_replica_encode(IndexNet::new(
-            vec![],
+            addrs,
             index,
             socket.clone(),
         )),

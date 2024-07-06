@@ -19,3 +19,6 @@ jobs:
       - run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
       - run: cargo build --verbose --all-targets
       - run: cargo test --verbose --lib
+      # loopback network seems not work
+      # - run: cargo run --verbose --release --bin workload-standalone -- unreplicated
+      # - run: cargo run --verbose --release --bin workload-standalone -- pbft
