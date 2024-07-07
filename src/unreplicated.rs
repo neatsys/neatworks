@@ -253,9 +253,8 @@ pub mod model {
     use derive_more::From;
 
     use crate::{
-        event::combinators::Transient,
         model::{NetworkState, TimerState},
-        workload::app::kvstore::KVStore,
+        workload::{app::kvstore, CloseLoop, Workload},
     };
 
     use super::*;
@@ -268,13 +267,13 @@ pub mod model {
 
     impl crate::net::Addr for Addr {}
 
-    #[derive(Debug, From)]
+    #[derive(Debug, Clone, From)]
     pub enum Message {
         Request(super::Request<Addr>),
         Reply(super::Reply),
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub enum Timer {
         ClientResend,
     }
@@ -285,28 +284,27 @@ pub mod model {
         }
     }
 
-    pub struct State {
-        clients: Vec<ClientState<Addr>>,
-        server: ServerState<KVStore>,
-        client_contexts: Vec<ClientLocalContext>,
+    pub struct State<W> {
+        clients: Vec<(ClientState<Addr>, ClientLocalContext<W>)>,
+        server: ServerState<kvstore::App>,
         network: NetworkState<Addr, Message>,
     }
 
-    struct ClientLocalContext {
-        upcall: Transient<InvokeOk<Bytes>>,
+    struct ClientLocalContext<W> {
+        upcall: CloseLoop<W, Option<Invoke<Bytes>>>,
         schedule: TimerState<Timer>,
     }
 
     struct ClientContextCarrier;
 
-    impl<'a> super::context::On<ClientContext<'a>> for ClientContextCarrier {
+    impl<'a, W> super::context::On<ClientContext<'a, W>> for ClientContextCarrier {
         type Schedule = &'a mut TimerState<Timer>;
     }
 
-    type ClientContext<'a> = super::context::Client<
+    type ClientContext<'a, W> = super::context::Client<
         ClientContextCarrier,
         &'a mut NetworkState<Addr, Message>,
-        &'a mut Transient<InvokeOk<Bytes>>,
+        &'a mut CloseLoop<W, Option<Invoke<Bytes>>>,
         Addr,
     >;
 
@@ -320,6 +318,77 @@ pub mod model {
         type Net = Self;
         fn net(&mut self) -> &mut Self::Net {
             self
+        }
+    }
+
+    #[derive(Debug)]
+    pub enum Event {
+        Message(Addr, Message),
+        Timer(u8, Timer),
+    }
+
+    impl<W: Workload<Op = Bytes, Result = Bytes>> crate::model::State for State<W> {
+        type Event = Event;
+
+        fn events(&self) -> Vec<Self::Event> {
+            let mut events = Vec::new();
+            for (index, (_, context)) in self.clients.iter().enumerate() {
+                assert!(context.upcall.sender.is_none());
+                context
+                    .schedule
+                    .generate_events(|event| events.push(Event::Timer(index as _, event)))
+            }
+            self.network
+                .generate_events(|addr, message| events.push(Event::Message(addr, message)));
+            events
+        }
+
+        fn step(&mut self, event: Self::Event) -> anyhow::Result<()> {
+            match event {
+                Event::Message(Addr::Client(index), Message::Reply(message)) => {
+                    self.on_client_event(index, Recv(message))
+                }
+                Event::Message(Addr::Server, Message::Request(message)) => {
+                    self.server.on_event(Recv(message), &mut self.network)
+                }
+                Event::Timer(index, Timer::ClientResend) => {
+                    self.on_client_event(index, client::Resend)
+                }
+                _ => anyhow::bail!("unexpected event {event:?}"),
+            }
+        }
+
+        fn fix(&mut self) -> anyhow::Result<()> {
+            for (client, context) in &mut self.clients {
+                if let Some(invoke) = context.upcall.sender.take() {
+                    let mut context = ClientContext {
+                        net: &mut self.network,
+                        upcall: &mut context.upcall,
+                        schedule: &mut context.schedule,
+                        _m: Default::default(),
+                    };
+                    client.on_event(invoke, &mut context)?
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl<W> State<W> {
+        fn on_client_event<M>(&mut self, index: u8, event: M) -> anyhow::Result<()>
+        where
+            ClientState<Addr>: for<'a> OnErasedEvent<M, ClientContext<'a, W>>,
+        {
+            let Some((client, context)) = self.clients.get_mut(index as usize) else {
+                anyhow::bail!("unexpected client index {index}")
+            };
+            let mut context = ClientContext {
+                net: &mut self.network,
+                upcall: &mut context.upcall,
+                schedule: &mut context.schedule,
+                _m: Default::default(),
+            };
+            client.on_event(event, &mut context)
         }
     }
 }

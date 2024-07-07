@@ -68,9 +68,22 @@ impl<M: Into<N>, N> ScheduleEvent<M> for TimerState<N> {
     }
 }
 
+impl<M: Clone> TimerState<M> {
+    pub fn generate_events(&self, mut on_event: impl FnMut(M)) {
+        let mut limit = Duration::MAX;
+        for envelop in &self.envelops {
+            if envelop.period >= limit {
+                break;
+            }
+            on_event(envelop.event.clone());
+            limit = envelop.period;
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Hash, Default)]
 pub struct NetworkState<A, M> {
-    pub messages: BTreeMap<A, Vec<M>>,
+    messages: BTreeMap<A, Vec<M>>,
 }
 
 impl<A: Ord + Debug, M: Into<N>, N> SendEvent<Cast<A, M>> for NetworkState<A, N> {
@@ -80,5 +93,15 @@ impl<A: Ord + Debug, M: Into<N>, N> SendEvent<Cast<A, M>> for NetworkState<A, N>
         };
         inbox.push(message.into());
         Ok(())
+    }
+}
+
+impl<A: Clone, M: Clone> NetworkState<A, M> {
+    pub fn generate_events(&self, mut on_event: impl FnMut(A, M)) {
+        for (addr, inbox) in &self.messages {
+            for message in inbox {
+                on_event(addr.clone(), message.clone())
+            }
+        }
     }
 }

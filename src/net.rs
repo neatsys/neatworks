@@ -16,6 +16,15 @@ pub mod events {
     pub struct Cast<A, M>(pub A, pub M);
 
     pub struct Recv<M>(pub M);
+
+    impl<A, M> Cast<A, M> {
+        pub fn into<N>(self) -> Cast<A, N>
+        where
+            M: Into<N>,
+        {
+            Cast(self.0, self.1.into())
+        }
+    }
 }
 
 pub trait SendMessage<A, M> {

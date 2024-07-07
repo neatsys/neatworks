@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use events::{Invoke, InvokeOk};
 
-use crate::event::{combinators::Transient, SendEvent};
+use crate::event::{combinators::Map, SendEvent};
 
 pub mod events {
     #[derive(Debug)]
@@ -12,8 +12,11 @@ pub mod events {
 }
 
 pub mod app {
+    pub mod combinators;
     pub mod kvstore;
 }
+
+pub mod combinators;
 
 pub trait App {
     fn execute(&mut self, op: &[u8]) -> anyhow::Result<Bytes>;
@@ -36,16 +39,52 @@ pub struct Typed<O, R, A> {
 
 impl<O, R, A> App for Typed<O, R, A>
 where
-    for<'a, 'b> (&'a mut A, &'b mut Transient<InvokeOk<R>>): SendEvent<Invoke<O>>,
+    for<'a, 'b> (&'a mut A, &'b mut Option<InvokeOk<R>>): SendEvent<Invoke<O>>,
 {
     fn execute(&mut self, op: &[u8]) -> anyhow::Result<Bytes> {
         let op = (self.decode)(op)?;
-        let mut response = Transient::new();
+        let mut response = None;
         (&mut self.inner, &mut response).send(Invoke(op))?;
-        let Some(InvokeOk(result)) = response.pop() else {
+        let Some(InvokeOk(result)) = response.take() else {
             anyhow::bail!("missing execution result")
         };
-        anyhow::ensure!(response.is_empty());
         (self.encode)(&result)
+    }
+}
+
+pub trait Workload {
+    type Op;
+    type Result;
+
+    fn init(&mut self, sender: impl SendEvent<Self::Op>) -> anyhow::Result<()>;
+
+    fn on_result(
+        &mut self,
+        result: Self::Result,
+        sender: impl SendEvent<Self::Op>,
+    ) -> anyhow::Result<()>;
+}
+
+pub struct CloseLoop<W, E> {
+    pub workload: W,
+    pub sender: E,
+}
+
+impl<W, E> CloseLoop<W, E> {
+    pub fn new(workload: W, sender: E) -> Self {
+        Self { workload, sender }
+    }
+}
+
+impl<W: Workload, E: SendEvent<Invoke<W::Op>>> CloseLoop<W, E> {
+    pub fn init(&mut self) -> anyhow::Result<()> {
+        self.workload.init(Map(events::Invoke, &mut self.sender))
+    }
+}
+
+impl<W: Workload, E: SendEvent<Invoke<W::Op>>> SendEvent<InvokeOk<W::Result>> for CloseLoop<W, E> {
+    fn send(&mut self, InvokeOk(result): InvokeOk<W::Result>) -> anyhow::Result<()> {
+        self.workload
+            .on_result(result, Map(events::Invoke, &mut self.sender))
     }
 }

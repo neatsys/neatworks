@@ -12,6 +12,15 @@ impl<S: OnEvent<C>, C> SendEvent<S::Event> for Inline<S, C> {
     }
 }
 
+// a bit wild to directly impl on foreign type, hope no conflict to anything
+impl<M> SendEvent<M> for Option<M> {
+    fn send(&mut self, event: M) -> anyhow::Result<()> {
+        let replaced = self.replace(event);
+        anyhow::ensure!(replaced.is_none());
+        Ok(())
+    }
+}
+
 #[derive(Debug, Deref, DerefMut)]
 #[derive_where(Default)]
 pub struct Transient<M>(pub Vec<M>);
@@ -26,6 +35,15 @@ impl<M: Into<N>, N> SendEvent<M> for Transient<N> {
     fn send(&mut self, event: M) -> anyhow::Result<()> {
         self.push(event.into());
         Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct Map<F, E>(pub F, pub E);
+
+impl<F: FnMut(M) -> N, M, N, E: SendEvent<N>> SendEvent<M> for Map<F, E> {
+    fn send(&mut self, event: M) -> anyhow::Result<()> {
+        self.1.send((self.0)(event))
     }
 }
 
