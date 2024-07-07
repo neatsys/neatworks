@@ -1224,6 +1224,12 @@ pub mod context {
 
         use super::*;
 
+        // a more careful/versatile solution would first invent a holding struct with two "holes"
+        // for markers, one corresponds to the crypto worker runtime and one corresponds to the
+        // schedule runtime, and we would have orthogonal `impl`s to enable them to be supported by
+        // all (allowed) combinations of different runtimes
+        // i don't see any possibility for now to run the protocol with any setup other than fully
+        // supported by tasks, so this is good enough
         impl<PN, DN, S, A> On<Context<Self, PN, DN, State<S, A>>, State<S, A>> for ContextOf<State<S, A>>
         where
             PN: SendMessage<u8, Request<A>>
