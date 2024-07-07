@@ -31,7 +31,7 @@ pub enum Result {
     AppendResult(String),
 }
 
-pub type App = crate::workload::Typed<Op, Result, KVStore>;
+pub type App = crate::workload::app::combinators::Typed<Op, Result, KVStore>;
 
 impl<E: SendEvent<InvokeOk<Result>>> SendEvent<Invoke<Op>> for (&'_ mut KVStore, E) {
     fn send(&mut self, Invoke(op): Invoke<Op>) -> anyhow::Result<()> {

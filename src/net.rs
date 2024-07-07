@@ -13,18 +13,11 @@ pub mod task {
 pub mod events {
     // probably called `Send` in any sane codebase, but that terribly conflicts with
     // std::marker::Send
+    #[derive(Debug)]
     pub struct Cast<A, M>(pub A, pub M);
 
+    #[derive(Debug)]
     pub struct Recv<M>(pub M);
-
-    impl<A, M> Cast<A, M> {
-        pub fn into<N>(self) -> Cast<A, N>
-        where
-            M: Into<N>,
-        {
-            Cast(self.0, self.1.into())
-        }
-    }
 }
 
 pub trait SendMessage<A, M> {

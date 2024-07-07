@@ -253,8 +253,14 @@ pub mod model {
     use derive_more::From;
 
     use crate::{
-        model::{NetworkState, TimerState},
-        workload::{app::kvstore, CloseLoop, Workload},
+        model::{NetworkState, State as _, TimerState},
+        workload::{
+            app::{
+                combinators::Typed,
+                kvstore::{self, KVStore},
+            },
+            CloseLoop, Workload,
+        },
     };
 
     use super::*;
@@ -284,14 +290,16 @@ pub mod model {
         }
     }
 
+    #[derive(Debug)]
     pub struct State<W> {
-        clients: Vec<(ClientState<Addr>, ClientLocalContext<W>)>,
+        pub clients: Vec<(ClientState<Addr>, ClientLocalContext<W>)>,
         server: ServerState<kvstore::App>,
         network: NetworkState<Addr, Message>,
     }
 
-    struct ClientLocalContext<W> {
-        upcall: CloseLoop<W, Option<Invoke<Bytes>>>,
+    #[derive(Debug)]
+    pub struct ClientLocalContext<W> {
+        pub upcall: CloseLoop<W, Option<Invoke<Bytes>>>,
         schedule: TimerState<Timer>,
     }
 
@@ -389,6 +397,29 @@ pub mod model {
                 _m: Default::default(),
             };
             client.on_event(event, &mut context)
+        }
+
+        pub fn new() -> Self {
+            Self {
+                server: ServerState::new(Typed::json(KVStore::new())),
+                clients: Default::default(),
+                network: NetworkState::new(),
+            }
+        }
+    }
+
+    impl<W> Default for State<W> {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl<W: Workload<Op = Bytes, Result = Bytes>> State<W> {
+        pub fn init(&mut self) -> anyhow::Result<()> {
+            for (_, context) in &mut self.clients {
+                context.upcall.init()?
+            }
+            self.fix()
         }
     }
 }

@@ -6,7 +6,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use crate::{
     event::SendEvent,
     net::events::Cast,
-    workload::{events::InvokeOk, Typed},
+    workload::{app::combinators::Typed, events::InvokeOk},
 };
 
 pub struct Encode<M, T>(fn(&M) -> anyhow::Result<Bytes>, pub T);
@@ -51,6 +51,32 @@ impl<O: DeserializeOwned, R: Serialize, A> Typed<O, R, A> {
         Self {
             encode: bincode_encode,
             decode: bincode_decode,
+            inner: app,
+        }
+    }
+}
+
+fn json_encode<M: Serialize>(message: &M) -> anyhow::Result<Bytes> {
+    serde_json::to_vec(message)
+        .map(Into::into)
+        .map_err(Into::into)
+}
+
+impl<M: Serialize, N> Encode<M, N> {
+    pub fn json(inner: N) -> Self {
+        Self(json_encode, inner)
+    }
+}
+
+pub fn json_decode<M: DeserializeOwned>(buf: &[u8]) -> anyhow::Result<M> {
+    serde_json::from_slice(buf).map_err(Into::into)
+}
+
+impl<O: DeserializeOwned, R: Serialize, A> Typed<O, R, A> {
+    pub fn json(app: A) -> Self {
+        Self {
+            encode: json_encode,
+            decode: json_decode,
             inner: app,
         }
     }

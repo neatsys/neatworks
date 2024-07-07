@@ -7,6 +7,8 @@ use crate::{
     net::events::Cast,
 };
 
+pub mod search;
+
 pub trait State {
     type Event;
 
@@ -81,9 +83,16 @@ impl<M: Clone> TimerState<M> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive_where(Default)]
 pub struct NetworkState<A, M> {
     messages: BTreeMap<A, Vec<M>>,
+}
+
+impl<A, M> NetworkState<A, M> {
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 impl<A: Ord + Debug, M: Into<N>, N> SendEvent<Cast<A, M>> for NetworkState<A, N> {
