@@ -7,7 +7,7 @@ use crate::{
     codec::Payload,
     event::{OnErasedEvent, ScheduleEvent, SendEvent, TimerId},
     net::{
-        events::{Recv, Send},
+        events::{Cast, Recv},
         Addr,
     },
     workload::{
@@ -61,7 +61,7 @@ pub mod client {
 }
 
 pub trait ClientContext<A> {
-    type Net: SendEvent<Send<(), Request<A>>>;
+    type Net: SendEvent<Cast<(), Request<A>>>;
     type Upcall: SendEvent<InvokeOk<Bytes>>;
     type Schedule: ScheduleEvent<client::Resend>;
     fn net(&mut self) -> &mut Self::Net;
@@ -96,7 +96,7 @@ impl<A: Addr> ClientState<A> {
                 .op
                 .clone(),
         };
-        context.net().send(Send((), request))
+        context.net().send(Cast((), request))
     }
 }
 
@@ -137,7 +137,7 @@ impl<S> ServerState<S> {
 }
 
 pub trait ServerContext<A> {
-    type Net: SendEvent<Send<A, Reply>>;
+    type Net: SendEvent<Cast<A, Reply>>;
     fn net(&mut self) -> &mut Self::Net;
 }
 
@@ -146,7 +146,7 @@ impl<S: App, A, C: ServerContext<A>> OnErasedEvent<Recv<Request<A>>, C> for Serv
         match self.replies.get(&request.client_id) {
             Some(reply) if reply.seq > request.seq => return Ok(()),
             Some(reply) if reply.seq == request.seq => {
-                return context.net().send(Send(request.client_addr, reply.clone()))
+                return context.net().send(Cast(request.client_addr, reply.clone()))
             }
             _ => {}
         }
@@ -155,26 +155,29 @@ impl<S: App, A, C: ServerContext<A>> OnErasedEvent<Recv<Request<A>>, C> for Serv
             result: Payload(self.app.execute(&request.op)?),
         };
         self.replies.insert(request.client_id, reply.clone());
-        context.net().send(Send(request.client_addr, reply))
+        context.net().send(Cast(request.client_addr, reply))
     }
 }
 
 pub mod context {
+    use std::marker::PhantomData;
+
     use super::*;
 
-    pub struct Client<O: On<Self>, N, U> {
+    pub struct Client<O: On<Self>, N, U, A> {
         pub net: N,
         pub upcall: U,
         pub schedule: O::Schedule,
+        pub _m: PhantomData<A>,
     }
 
     pub trait On<C> {
         type Schedule: ScheduleEvent<client::Resend>;
     }
 
-    impl<O: On<Self>, N, U, A> super::ClientContext<A> for Client<O, N, U>
+    impl<O: On<Self>, N, U, A> super::ClientContext<A> for Client<O, N, U, A>
     where
-        N: SendEvent<Send<(), Request<A>>>,
+        N: SendEvent<Cast<(), Request<A>>>,
         U: SendEvent<InvokeOk<Bytes>>,
     {
         type Net = N;
@@ -197,7 +200,7 @@ pub mod context {
 
     impl<N, A> ServerContext<A> for Server<N>
     where
-        N: SendEvent<Send<A, Reply>>,
+        N: SendEvent<Cast<A, Reply>>,
     {
         type Net = N;
         fn net(&mut self) -> &mut Self::Net {
@@ -206,16 +209,16 @@ pub mod context {
     }
 
     mod task {
-        use crate::event::task::{erase::ScheduleState, ContextOf};
+        use crate::event::task::{erase::ScheduleState, Context};
 
         use super::*;
 
-        impl<N, U, A: Addr> On<Client<Self, N, U>> for ContextOf<ClientState<A>>
+        impl<N, U, A: Addr> On<Client<Self, N, U, A>> for Context
         where
-            N: SendEvent<Send<(), Request<A>>>,
+            N: SendEvent<Cast<(), Request<A>>>,
             U: SendEvent<InvokeOk<Bytes>>,
         {
-            type Schedule = ScheduleState<ClientState<A>, Client<Self, N, U>>;
+            type Schedule = ScheduleState<ClientState<A>, Client<Self, N, U, A>>;
         }
     }
 }
@@ -251,7 +254,7 @@ pub mod model {
 
     use crate::{
         event::combinators::Transient,
-        model::{Network, NetworkContext},
+        model::{NetworkState, TimerState},
         workload::app::kvstore::KVStore,
     };
 
@@ -276,59 +279,44 @@ pub mod model {
         ClientResend,
     }
 
+    impl From<client::Resend> for Timer {
+        fn from(client::Resend: client::Resend) -> Self {
+            Self::ClientResend
+        }
+    }
+
     pub struct State {
         clients: Vec<ClientState<Addr>>,
-        client_upcalls: Vec<Transient<InvokeOk<Bytes>>>,
         server: ServerState<KVStore>,
-        network: Network<Addr, Message, Timer>,
+        client_contexts: Vec<ClientLocalContext>,
+        network: NetworkState<Addr, Message>,
     }
 
-    impl super::ClientContext<Addr> for NetworkContext<'_, Addr, Message, Timer> {
-        type Net = Self;
-        type Schedule = Self;
-        type Upcall = Self;
-        fn net(&mut self) -> &mut Self::Net {
-            self
-        }
-        fn schedule(&mut self) -> &mut Self::Schedule {
-            self
-        }
-        fn upcall(&mut self) -> &mut Self::Upcall {
-            self
-        }
+    struct ClientLocalContext {
+        upcall: Transient<InvokeOk<Bytes>>,
+        schedule: TimerState<Timer>,
     }
 
-    impl SendEvent<Send<(), Request<Addr>>> for NetworkContext<'_, Addr, Message, Timer> {
-        fn send(&mut self, Send((), message): Send<(), Request<Addr>>) -> anyhow::Result<()> {
-            self.send(Send(Addr::Server, message))
-        }
+    struct ClientContextCarrier;
+
+    impl<'a> super::context::On<ClientContext<'a>> for ClientContextCarrier {
+        type Schedule = &'a mut TimerState<Timer>;
     }
 
-    impl ScheduleEvent<super::client::Resend> for NetworkContext<'_, Addr, Message, Timer> {
-        fn set(
-            &mut self,
-            period: Duration,
-            _: impl FnMut() -> super::client::Resend + std::marker::Send + 'static,
-        ) -> anyhow::Result<TimerId> {
-            self.set(period, Timer::ClientResend)
-        }
+    type ClientContext<'a> = super::context::Client<
+        ClientContextCarrier,
+        &'a mut NetworkState<Addr, Message>,
+        &'a mut Transient<InvokeOk<Bytes>>,
+        Addr,
+    >;
 
-        fn unset(&mut self, id: TimerId) -> anyhow::Result<()> {
-            NetworkContext::unset(self, id)
+    impl SendEvent<Cast<(), Request<Addr>>> for NetworkState<Addr, Message> {
+        fn send(&mut self, Cast((), message): Cast<(), Request<Addr>>) -> anyhow::Result<()> {
+            self.send(Cast(Addr::Server, message))
         }
     }
 
-    #[allow(unused)]
-    impl SendEvent<InvokeOk<Bytes>> for NetworkContext<'_, Addr, Message, Timer> {
-        fn send(&mut self, event: InvokeOk<Bytes>) -> anyhow::Result<()> {
-            let Addr::Client(index) = self.addr else {
-                anyhow::bail!("unimplemented")
-            };
-            Ok(())
-        }
-    }
-
-    impl super::ServerContext<Addr> for NetworkContext<'_, Addr, Message, Timer> {
+    impl ServerContext<Addr> for NetworkState<Addr, Message> {
         type Net = Self;
         fn net(&mut self) -> &mut Self::Net {
             self

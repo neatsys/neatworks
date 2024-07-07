@@ -1217,7 +1217,7 @@ pub mod context {
         use crate::event::{
             task::{
                 erase::{ScheduleState, Sender},
-                ContextOf,
+                Context as Task,
             },
             UntypedEvent,
         };
@@ -1230,7 +1230,7 @@ pub mod context {
         // all (allowed) combinations of different runtimes
         // i don't see any possibility for now to run the protocol with any setup other than fully
         // supported by tasks, so this is good enough
-        impl<PN, DN, S, A> On<Context<Self, PN, DN, State<S, A>>, State<S, A>> for ContextOf<State<S, A>>
+        impl<PN, DN, S, A> On<Context<Self, PN, DN, State<S, A>>, State<S, A>> for Task
         where
             PN: SendMessage<u8, Request<A>>
                 + SendMessage<All, (Verifiable<PrePrepare>, Vec<Request<A>>)>

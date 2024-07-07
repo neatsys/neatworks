@@ -1,8 +1,10 @@
 use std::{collections::BTreeMap, fmt::Debug, time::Duration};
 
+use derive_where::derive_where;
+
 use crate::{
-    event::{SendEvent, TimerId},
-    net::events::Send,
+    event::{ScheduleEvent, SendEvent, TimerId},
+    net::events::Cast,
 };
 
 pub trait State {
@@ -17,55 +19,66 @@ pub trait State {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, Default)]
-pub struct Network<A, M, T> {
-    pub messages: BTreeMap<A, Vec<M>>,
-    pub timers: BTreeMap<A, Vec<(u32, Duration, T)>>, // TODO
-    pub timer_count: u32,
-    pub now: Duration,
+#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive_where(Default)]
+pub struct TimerState<M> {
+    envelops: Vec<TimerEnvelop<M>>,
+    count: u32,
 }
 
-#[derive(Debug)]
-pub struct NetworkContext<'a, A, M, T> {
-    state: &'a mut Network<A, M, T>,
-    pub addr: A,
+#[derive_where(Debug, PartialEq, Eq, Hash; M)]
+struct TimerEnvelop<M> {
+    id: u32,
+    #[derive_where(skip)]
+    generate: Box<dyn FnMut() -> M + Send>,
+    period: Duration,
+    event: M,
 }
 
-impl<A, M, T> Network<A, M, T> {
-    pub fn context(&mut self, addr: A) -> NetworkContext<'_, A, M, T> {
-        NetworkContext { state: self, addr }
+impl<M> TimerState<M> {
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
-impl<A: Ord + Debug, M: Into<N>, N, T> SendEvent<Send<A, M>> for NetworkContext<'_, A, N, T> {
-    fn send(&mut self, Send(remote, message): Send<A, M>) -> anyhow::Result<()> {
-        let Some(inbox) = self.state.messages.get_mut(&remote) else {
-            anyhow::bail!("missing inbox for addr {remote:?}")
+impl<M: Into<N>, N> ScheduleEvent<M> for TimerState<N> {
+    fn set(
+        &mut self,
+        period: Duration,
+        mut event: impl FnMut() -> M + Send + 'static,
+    ) -> anyhow::Result<TimerId> {
+        self.count += 1;
+        let id = self.count;
+        let envelop = TimerEnvelop {
+            id,
+            event: event().into(),
+            generate: Box::new(move || event().into()),
+            period,
         };
-        inbox.push(message.into());
+        self.envelops.push(envelop);
+        Ok(TimerId(id))
+    }
+
+    fn unset(&mut self, TimerId(id): TimerId) -> anyhow::Result<()> {
+        let Some(pos) = self.envelops.iter().position(|envelop| envelop.id == id) else {
+            anyhow::bail!("missing timer of {:?}", TimerId(id))
+        };
+        self.envelops.remove(pos);
         Ok(())
     }
 }
 
-impl<A: Ord + Debug, M, T> NetworkContext<'_, A, M, T> {
-    pub fn set(&mut self, period: Duration, event: T) -> anyhow::Result<TimerId> {
-        let Some(inbox) = self.state.timers.get_mut(&self.addr) else {
-            anyhow::bail!("missing inbox for addr {:?}", self.addr)
-        };
-        self.state.timer_count += 1;
-        let id = self.state.timer_count;
-        inbox.push((id, self.state.now + period, event));
-        Ok(TimerId(id))
-    }
+#[derive(Debug, PartialEq, Eq, Hash, Default)]
+pub struct NetworkState<A, M> {
+    pub messages: BTreeMap<A, Vec<M>>,
+}
 
-    pub fn unset(&mut self, TimerId(id): TimerId) -> anyhow::Result<()> {
-        let Some(inbox) = self.state.timers.get_mut(&self.addr) else {
-            anyhow::bail!("missing inbox for addr {:?}", self.addr)
+impl<A: Ord + Debug, M: Into<N>, N> SendEvent<Cast<A, M>> for NetworkState<A, N> {
+    fn send(&mut self, Cast(remote, message): Cast<A, M>) -> anyhow::Result<()> {
+        let Some(inbox) = self.messages.get_mut(&remote) else {
+            anyhow::bail!("missing inbox for addr {remote:?}")
         };
-        let Some(pos) = inbox.iter().position(|(other_id, _, _)| *other_id == id) else {
-            anyhow::bail!("missing timer {:?}", TimerId(id))
-        };
-        inbox.remove(pos);
+        inbox.push(message.into());
         Ok(())
     }
 }

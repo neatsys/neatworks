@@ -5,16 +5,16 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::{
     event::SendEvent,
-    net::events::Send,
+    net::events::Cast,
     workload::{events::InvokeOk, Typed},
 };
 
 pub struct Encode<M, T>(fn(&M) -> anyhow::Result<Bytes>, pub T);
 
-impl<M: Into<L>, L, N: SendEvent<Send<A, Bytes>>, A> SendEvent<Send<A, M>> for Encode<L, N> {
-    fn send(&mut self, Send(remote, message): Send<A, M>) -> anyhow::Result<()> {
+impl<M: Into<L>, L, N: SendEvent<Cast<A, Bytes>>, A> SendEvent<Cast<A, M>> for Encode<L, N> {
+    fn send(&mut self, Cast(remote, message): Cast<A, M>) -> anyhow::Result<()> {
         let encoded = (self.0)(&message.into())?;
-        self.1.send(Send(remote, encoded))
+        self.1.send(Cast(remote, encoded))
     }
 }
 

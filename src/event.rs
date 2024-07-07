@@ -46,6 +46,20 @@ pub trait ScheduleEvent<M> {
     fn unset(&mut self, id: TimerId) -> anyhow::Result<()>;
 }
 
+impl<T: ScheduleEvent<M>, M> ScheduleEvent<M> for &mut T {
+    fn set(
+        &mut self,
+        period: Duration,
+        event: impl FnMut() -> M + Send + 'static,
+    ) -> anyhow::Result<TimerId> {
+        T::set(self, period, event)
+    }
+
+    fn unset(&mut self, id: TimerId) -> anyhow::Result<()> {
+        T::unset(self, id)
+    }
+}
+
 #[derive_where(Debug; S)]
 #[derive(Deref, DerefMut)]
 pub struct Untyped<C, S>(

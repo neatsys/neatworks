@@ -11,7 +11,9 @@ pub mod task {
 }
 
 pub mod events {
-    pub struct Send<A, M>(pub A, pub M);
+    // probably called `Send` in any sane codebase, but that terribly conflicts with
+    // std::marker::Send
+    pub struct Cast<A, M>(pub A, pub M);
 
     pub struct Recv<M>(pub M);
 }
@@ -20,9 +22,9 @@ pub trait SendMessage<A, M> {
     fn send(&mut self, remote: A, message: M) -> anyhow::Result<()>;
 }
 
-impl<E: SendEvent<events::Send<A, M>>, A, M> SendMessage<A, M> for E {
+impl<E: SendEvent<events::Cast<A, M>>, A, M> SendMessage<A, M> for E {
     fn send(&mut self, remote: A, message: M) -> anyhow::Result<()> {
-        SendEvent::send(self, events::Send(remote, message))
+        SendEvent::send(self, events::Cast(remote, message))
     }
 }
 

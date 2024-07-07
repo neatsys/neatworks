@@ -131,19 +131,22 @@ impl<A: Addr> State<A> {
 }
 
 pub mod context {
+    use std::marker::PhantomData;
+
     use super::*;
 
-    pub struct Context<O: On<Self>, N, U> {
+    pub struct Context<O: On<Self>, N, U, A> {
         pub net: N,
         pub upcall: U,
         pub schedule: O::Schedule,
+        pub _m: PhantomData<A>,
     }
 
     pub trait On<C> {
         type Schedule: ScheduleEvent<events::Resend>;
     }
 
-    impl<O: On<Self>, N, U, A> super::Context<A> for Context<O, N, U>
+    impl<O: On<Self>, N, U, A> super::Context<A> for Context<O, N, U, A>
     where
         N: SendMessage<u8, Request<A>> + SendMessage<All, Request<A>>,
         U: SendEvent<InvokeOk<Bytes>>,
@@ -163,16 +166,16 @@ pub mod context {
     }
 
     mod task {
-        use crate::event::task::{erase::ScheduleState, ContextOf};
+        use crate::event::task::{erase::ScheduleState, Context as Task};
 
         use super::*;
 
-        impl<N, U, A: Addr> On<Context<Self, N, U>> for ContextOf<State<A>>
+        impl<N, U, A: Addr> On<Context<Self, N, U, A>> for Task
         where
             N: SendMessage<u8, Request<A>> + SendMessage<All, Request<A>>,
             U: SendEvent<InvokeOk<Bytes>>,
         {
-            type Schedule = ScheduleState<State<A>, Context<Self, N, U>>;
+            type Schedule = ScheduleState<State<A>, Context<Self, N, U, A>>;
         }
     }
 }

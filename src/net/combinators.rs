@@ -2,14 +2,14 @@ use bytes::Bytes;
 
 use crate::event::SendEvent;
 
-use super::{events::Send, Addr};
+use super::{events::Cast, Addr};
 
 #[derive(Debug)]
 pub struct Forward<A, N>(pub A, pub N);
 
-impl<A: Addr, N: SendEvent<Send<A, M>>, M> SendEvent<Send<(), M>> for Forward<A, N> {
-    fn send(&mut self, Send((), message): Send<(), M>) -> anyhow::Result<()> {
-        self.1.send(Send(self.0.clone(), message))
+impl<A: Addr, N: SendEvent<Cast<A, M>>, M> SendEvent<Cast<(), M>> for Forward<A, N> {
+    fn send(&mut self, Cast((), message): Cast<(), M>) -> anyhow::Result<()> {
+        self.1.send(Cast(self.0.clone(), message))
     }
 }
 
@@ -33,26 +33,26 @@ impl<A, N> IndexNet<A, N> {
     }
 }
 
-impl<A: Addr, N: SendEvent<Send<A, M>>, M, I: Into<usize>> SendEvent<Send<I, M>>
+impl<A: Addr, N: SendEvent<Cast<A, M>>, M, I: Into<usize>> SendEvent<Cast<I, M>>
     for IndexNet<A, N>
 {
-    fn send(&mut self, Send(index, message): Send<I, M>) -> anyhow::Result<()> {
+    fn send(&mut self, Cast(index, message): Cast<I, M>) -> anyhow::Result<()> {
         let index = index.into();
         let addr = self
             .addrs
             .get(index)
             .ok_or(anyhow::format_err!("missing address of index {index}"))?;
-        self.inner.send(Send(addr.clone(), message))
+        self.inner.send(Cast(addr.clone(), message))
     }
 }
 
-impl<A: Addr, N: SendEvent<Send<A, Bytes>>> SendEvent<Send<All, Bytes>> for IndexNet<A, N> {
-    fn send(&mut self, Send(All, message): Send<All, Bytes>) -> anyhow::Result<()> {
+impl<A: Addr, N: SendEvent<Cast<A, Bytes>>> SendEvent<Cast<All, Bytes>> for IndexNet<A, N> {
+    fn send(&mut self, Cast(All, message): Cast<All, Bytes>) -> anyhow::Result<()> {
         for (index, addr) in self.addrs.iter().enumerate() {
             if Some(index) == self.all_except {
                 continue;
             }
-            self.inner.send(Send(addr.clone(), message.clone()))?
+            self.inner.send(Cast(addr.clone(), message.clone()))?
         }
         Ok(())
     }

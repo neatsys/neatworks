@@ -21,14 +21,21 @@ pub mod erase {
 // a "stub", or marker type that indicates the task based context is being used
 // in a context type that refers to itself (on type level, not memory reference)
 //
-// the private PhantomData<_> prevents it from being constructed anywhere
+// the private PhantomData<()> prevents it from being constructed anywhere
 // outside. and it indeed should not be ever constructed; it only shows up in
 // type annotations, as a "placeholder" to take place for the actual generics
 // that would refer the context's own type and cannot be written out directly
 // anywhere outside the context definition
 //
 // the marker type seems to have no implementation. ideally it should have
-// several implementation "blanket over" the generic state e.g. for schedule
+// several implementation "blanket over" a generic state e.g. for schedule
+//
+// struct ContextOf<S>(PhantomData<S>) // the desired form of `Context`
+//
+// trait On<Context> {
+//     type Out;
+// }
+//
 // impl<State, Context> On<Context> for ContextOf<State>
 // where
 //     /* whatever bounds the state and context */
@@ -55,7 +62,12 @@ pub mod erase {
 // as the result, the `impl`s of `ContextOf<_>` all lives in the use sites and
 // are for some specialization. but in sprite those `impl`s are together
 // recovering the necessary part of the blanket above
-pub struct ContextOf<S>(PhantomData<S>);
+//
+// since the `impl`s are becoming specialized, it is unnecessary for this marker
+// to be generic over state (or anything). the (becoming unnecessary)
+// PhantomData<_> is saved to continue preventing `Context` value being
+// constructed, which is still desired despiting the workaround
+pub struct Context(PhantomData<()>);
 
 impl<M: Into<N>, N> SendEvent<M> for UnboundedSender<N> {
     fn send(&mut self, event: M) -> anyhow::Result<()> {

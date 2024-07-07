@@ -3,10 +3,10 @@ use std::{net::SocketAddr, sync::Arc};
 use bytes::Bytes;
 use tokio::{net::UdpSocket, spawn};
 
-use crate::{event::SendEvent, net::events::Send};
+use crate::{event::SendEvent, net::events::Cast};
 
-impl SendEvent<Send<SocketAddr, Bytes>> for Arc<UdpSocket> {
-    fn send(&mut self, Send(remote, message): Send<SocketAddr, Bytes>) -> anyhow::Result<()> {
+impl SendEvent<Cast<SocketAddr, Bytes>> for Arc<UdpSocket> {
+    fn send(&mut self, Cast(remote, message): Cast<SocketAddr, Bytes>) -> anyhow::Result<()> {
         let socket = self.clone();
         spawn(async move {
             if socket.send_to(&message, remote).await.is_err() {
