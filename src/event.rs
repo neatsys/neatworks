@@ -61,10 +61,10 @@ impl<C, S> Untyped<C, S> {
     }
 }
 
-pub type ErasedEvent<S, C> = Box<dyn FnOnce(&mut S, &mut C) -> anyhow::Result<()> + Send>;
+pub type UntypedEvent<S, C> = Box<dyn FnOnce(&mut S, &mut C) -> anyhow::Result<()> + Send>;
 
 impl<S, C> OnEvent<C> for Untyped<C, S> {
-    type Event = ErasedEvent<S, C>;
+    type Event = UntypedEvent<S, C>;
 
     fn on_event(&mut self, event: Self::Event, context: &mut C) -> anyhow::Result<()> {
         event(&mut self.0, context)
@@ -90,7 +90,7 @@ impl<S, C, E> Erase<S, C, E> {
     }
 }
 
-impl<E: SendEvent<ErasedEvent<S, C>>, S: OnErasedEvent<M, C>, C, M: Send + 'static> SendEvent<M>
+impl<E: SendEvent<UntypedEvent<S, C>>, S: OnErasedEvent<M, C>, C, M: Send + 'static> SendEvent<M>
     for Erase<S, C, E>
 {
     fn send(&mut self, event: M) -> anyhow::Result<()> {
@@ -100,7 +100,7 @@ impl<E: SendEvent<ErasedEvent<S, C>>, S: OnErasedEvent<M, C>, C, M: Send + 'stat
     }
 }
 
-impl<T: ScheduleEvent<ErasedEvent<S, C>>, S: OnErasedEvent<M, C>, C, M: Send + 'static>
+impl<T: ScheduleEvent<UntypedEvent<S, C>>, S: OnErasedEvent<M, C>, C, M: Send + 'static>
     ScheduleEvent<M> for Erase<S, C, T>
 {
     fn set(
@@ -119,7 +119,7 @@ impl<T: ScheduleEvent<ErasedEvent<S, C>>, S: OnErasedEvent<M, C>, C, M: Send + '
     }
 }
 
-pub type Work<S, C> = ErasedEvent<S, C>;
+pub type Work<S, C> = UntypedEvent<S, C>;
 
 pub trait Submit<S, C> {
     // the ergonomics here breaks some, so hold on it
@@ -139,7 +139,7 @@ pub trait SendEventFor<S, C> {
         S: OnErasedEvent<M, C>;
 }
 
-impl<E: SendEvent<ErasedEvent<S, C>>, S, C> SendEventFor<S, C> for Erase<S, C, E> {
+impl<E: SendEvent<UntypedEvent<S, C>>, S, C> SendEventFor<S, C> for Erase<S, C, E> {
     fn send<M: Send + 'static>(&mut self, event: M) -> anyhow::Result<()>
     where
         S: OnErasedEvent<M, C>,
@@ -160,7 +160,7 @@ pub trait ScheduleEventFor<S, C> {
     fn unset(&mut self, id: TimerId) -> anyhow::Result<()>;
 }
 
-impl<T: ScheduleEvent<ErasedEvent<S, C>>, S, C> ScheduleEventFor<S, C> for Erase<S, C, T> {
+impl<T: ScheduleEvent<UntypedEvent<S, C>>, S, C> ScheduleEventFor<S, C> for Erase<S, C, T> {
     fn set<M: Send + 'static>(
         &mut self,
         period: Duration,

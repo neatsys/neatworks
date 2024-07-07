@@ -133,7 +133,7 @@ impl<A: Addr> State<A> {
 pub mod context {
     use super::*;
 
-    pub struct Context<N, U, O: On<Self>> {
+    pub struct Context<O: On<Self>, N, U> {
         pub net: N,
         pub upcall: U,
         pub schedule: O::Schedule,
@@ -143,7 +143,7 @@ pub mod context {
         type Schedule: ScheduleEvent<events::Resend>;
     }
 
-    impl<N, U, O: On<Self>, A> super::Context<A> for Context<N, U, O>
+    impl<O: On<Self>, N, U, A> super::Context<A> for Context<O, N, U>
     where
         N: SendMessage<u8, Request<A>> + SendMessage<All, Request<A>>,
         U: SendEvent<InvokeOk<Bytes>>,
@@ -163,16 +163,16 @@ pub mod context {
     }
 
     mod task {
-        use crate::event::task::erase::{Of, ScheduleState};
+        use crate::event::task::{erase::ScheduleState, ContextOf};
 
         use super::*;
 
-        impl<N, U, A: Addr> On<Context<N, U, Self>> for Of<State<A>>
+        impl<N, U, A: Addr> On<Context<Self, N, U>> for ContextOf<State<A>>
         where
             N: SendMessage<u8, Request<A>> + SendMessage<All, Request<A>>,
             U: SendEvent<InvokeOk<Bytes>>,
         {
-            type Schedule = ScheduleState<State<A>, Context<N, U, Self>>;
+            type Schedule = ScheduleState<State<A>, Context<Self, N, U>>;
         }
     }
 }

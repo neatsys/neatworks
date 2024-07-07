@@ -1163,7 +1163,7 @@ pub mod context {
 
     use super::*;
 
-    pub struct Context<PN, DN, O: On<Self, S>, S> {
+    pub struct Context<O: On<Self, S>, PN, DN, S> {
         pub peer_net: PN,
         pub downlink_net: DN,
         pub crypto_worker: O::CryptoWorker,
@@ -1180,7 +1180,7 @@ pub mod context {
             + ScheduleEvent<events::StateTransfer>;
     }
 
-    impl<PN, DN, O: On<Self, S>, S, A> super::Context<S, A> for Context<PN, DN, O, S>
+    impl<O: On<Self, S>, PN, DN, S, A> super::Context<S, A> for Context<O, PN, DN, S>
     where
         PN: SendMessage<u8, Request<A>>
             + SendMessage<All, (Verifiable<PrePrepare>, Vec<Request<A>>)>
@@ -1215,13 +1215,16 @@ pub mod context {
         use tokio::sync::mpsc::UnboundedSender;
 
         use crate::event::{
-            task::erase::{Of, ScheduleState, Sender},
-            ErasedEvent,
+            task::{
+                erase::{ScheduleState, Sender},
+                ContextOf,
+            },
+            UntypedEvent,
         };
 
         use super::*;
 
-        impl<PN, DN, S, A> On<Context<PN, DN, Self, State<S, A>>, State<S, A>> for Of<State<S, A>>
+        impl<PN, DN, S, A> On<Context<Self, PN, DN, State<S, A>>, State<S, A>> for ContextOf<State<S, A>>
         where
             PN: SendMessage<u8, Request<A>>
                 + SendMessage<All, (Verifiable<PrePrepare>, Vec<Request<A>>)>
@@ -1235,9 +1238,9 @@ pub mod context {
             S: App,
             A: Addr,
         {
-            type CryptoWorker = UnboundedSender<ErasedEvent<Crypto, Self::CryptoContext>>;
-            type CryptoContext = Sender<State<S, A>, Context<PN, DN, Self, State<S, A>>>;
-            type Schedule = ScheduleState<State<S, A>, Context<PN, DN, Self, State<S, A>>>;
+            type CryptoWorker = UnboundedSender<UntypedEvent<Crypto, Self::CryptoContext>>;
+            type CryptoContext = Sender<State<S, A>, Context<Self, PN, DN, State<S, A>>>;
+            type Schedule = ScheduleState<State<S, A>, Context<Self, PN, DN, State<S, A>>>;
         }
     }
 }

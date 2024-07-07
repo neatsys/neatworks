@@ -11,14 +11,14 @@ use tokio::{
 use super::{OnEvent, ScheduleEvent, SendEvent, TimerId, Work};
 
 pub mod erase {
-    use crate::event::{Erase, ErasedEvent};
+    use crate::event::{Erase, UntypedEvent};
 
-    pub struct Of<S>(std::marker::PhantomData<S>);
+    pub type Sender<S, C> = Erase<S, C, super::UnboundedSender<UntypedEvent<S, C>>>;
 
-    pub type Sender<S, C> = Erase<S, C, super::UnboundedSender<ErasedEvent<S, C>>>;
-
-    pub type ScheduleState<S, C> = Erase<S, C, super::ScheduleState<ErasedEvent<S, C>>>;
+    pub type ScheduleState<S, C> = Erase<S, C, super::ScheduleState<UntypedEvent<S, C>>>;
 }
+
+pub struct ContextOf<S>(std::marker::PhantomData<S>);
 
 impl<M: Into<N>, N> SendEvent<M> for UnboundedSender<N> {
     fn send(&mut self, event: M) -> anyhow::Result<()> {

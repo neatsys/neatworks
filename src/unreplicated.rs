@@ -162,7 +162,7 @@ impl<S: App, A, C: ServerContext<A>> OnErasedEvent<Recv<Request<A>>, C> for Serv
 pub mod context {
     use super::*;
 
-    pub struct Client<N, U, O: On<Self>> {
+    pub struct Client<O: On<Self>, N, U> {
         pub net: N,
         pub upcall: U,
         pub schedule: O::Schedule,
@@ -172,7 +172,7 @@ pub mod context {
         type Schedule: ScheduleEvent<client::Resend>;
     }
 
-    impl<N, U, O: On<Self>, A> ClientContext<A> for Client<N, U, O>
+    impl<O: On<Self>, N, U, A> super::ClientContext<A> for Client<O, N, U>
     where
         N: SendEvent<Send<(), Request<A>>>,
         U: SendEvent<InvokeOk<Bytes>>,
@@ -206,16 +206,16 @@ pub mod context {
     }
 
     mod task {
-        use crate::event::task::erase::{Of, ScheduleState};
+        use crate::event::task::{erase::ScheduleState, ContextOf};
 
         use super::*;
 
-        impl<N, U, A: Addr> On<Client<N, U, Self>> for Of<ClientState<A>>
+        impl<N, U, A: Addr> On<Client<Self, N, U>> for ContextOf<ClientState<A>>
         where
             N: SendEvent<Send<(), Request<A>>>,
             U: SendEvent<InvokeOk<Bytes>>,
         {
-            type Schedule = ScheduleState<ClientState<A>, Client<N, U, Self>>;
+            type Schedule = ScheduleState<ClientState<A>, Client<Self, N, U>>;
         }
     }
 }
