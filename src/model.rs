@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt::Debug, time::Duration};
+use std::{collections::BTreeMap, fmt::Debug, sync::Arc, time::Duration};
 
 use derive_where::derive_where;
 
@@ -21,18 +21,19 @@ pub trait State {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[derive_where(Default)]
 pub struct TimerState<M> {
     envelops: Vec<TimerEnvelop<M>>,
     count: u32,
 }
 
+#[derive(Clone)]
 #[derive_where(Debug, PartialEq, Eq, Hash; M)]
 struct TimerEnvelop<M> {
     id: u32,
     #[derive_where(skip)]
-    generate: Box<dyn FnMut() -> M + Send>,
+    generate: Arc<dyn Fn() -> M + Send>,
     period: Duration,
     event: M,
 }
@@ -47,14 +48,14 @@ impl<M: Into<N>, N> ScheduleEvent<M> for TimerState<N> {
     fn set(
         &mut self,
         period: Duration,
-        mut event: impl FnMut() -> M + Send + 'static,
+        event: impl Fn() -> M + Send + 'static,
     ) -> anyhow::Result<TimerId> {
         self.count += 1;
         let id = self.count;
         let envelop = TimerEnvelop {
             id,
             event: event().into(),
-            generate: Box::new(move || event().into()),
+            generate: Arc::new(move || event().into()),
             period,
         };
         self.envelops.push(envelop);
@@ -83,7 +84,7 @@ impl<M: Clone> TimerState<M> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[derive_where(Default)]
 pub struct NetworkState<A, M> {
     messages: BTreeMap<A, Vec<M>>,

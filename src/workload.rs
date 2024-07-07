@@ -4,7 +4,7 @@ use events::{Invoke, InvokeOk};
 use crate::event::{combinators::Map, SendEvent};
 
 pub mod events {
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct Invoke<M>(pub M);
 
     #[derive(Debug)]
@@ -44,7 +44,7 @@ pub trait Workload {
     ) -> anyhow::Result<()>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CloseLoop<W, E> {
     pub workload: W,
     pub sender: E,

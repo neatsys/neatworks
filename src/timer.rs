@@ -23,7 +23,7 @@ impl<T> Timer<T> {
     // TODO support ScheduleEventFor
     pub fn set(
         &mut self,
-        event: impl FnMut() -> T + Send + 'static,
+        event: impl Fn() -> T + Send + 'static,
         context: &mut impl ScheduleEvent<T>,
     ) -> anyhow::Result<()> {
         let replaced = self.id.replace(context.set(self.period, event)?);
@@ -41,7 +41,7 @@ impl<T> Timer<T> {
 
     pub fn ensure_set(
         &mut self,
-        event: impl FnMut() -> T + Send + 'static,
+        event: impl Fn() -> T + Send + 'static,
         context: &mut impl ScheduleEvent<T>,
     ) -> anyhow::Result<()> {
         if self.id.is_none() {

@@ -2,11 +2,21 @@ use crate::event::SendEvent;
 
 use super::Workload;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Iter<I, R> {
     generate: I,
     expected_result: Option<R>,
     pub done: bool,
+}
+
+impl<I, R> Iter<I, R> {
+    pub fn new(generate: I) -> Self {
+        Self {
+            generate,
+            expected_result: None,
+            done: false,
+        }
+    }
 }
 
 impl<I: Iterator> Workload for Iter<I, <I::Item as Pair>::Second>

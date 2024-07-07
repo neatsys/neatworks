@@ -15,6 +15,7 @@
         "Hasher",
         "keypair",
         "kvstore",
+        "linearizable",
         "neatworks",
         "pbft",
         "prehashed",

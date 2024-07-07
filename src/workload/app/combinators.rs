@@ -9,7 +9,7 @@ use crate::{
     },
 };
 
-#[derive_where(Debug; A)]
+#[derive_where(Debug, Clone; A)]
 pub struct Typed<O, R, A> {
     pub decode: fn(&[u8]) -> anyhow::Result<O>,
     pub encode: fn(&R) -> anyhow::Result<Bytes>,

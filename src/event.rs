@@ -40,7 +40,7 @@ pub trait ScheduleEvent<M> {
     fn set(
         &mut self,
         period: Duration,
-        event: impl FnMut() -> M + Send + 'static,
+        event: impl Fn() -> M + Send + 'static,
     ) -> anyhow::Result<TimerId>;
 
     fn unset(&mut self, id: TimerId) -> anyhow::Result<()>;
@@ -50,7 +50,7 @@ impl<T: ScheduleEvent<M>, M> ScheduleEvent<M> for &mut T {
     fn set(
         &mut self,
         period: Duration,
-        event: impl FnMut() -> M + Send + 'static,
+        event: impl Fn() -> M + Send + 'static,
     ) -> anyhow::Result<TimerId> {
         T::set(self, period, event)
     }
@@ -120,7 +120,7 @@ impl<T: ScheduleEvent<UntypedEvent<S, C>>, S: OnErasedEvent<M, C>, C, M: Send + 
     fn set(
         &mut self,
         period: Duration,
-        mut event: impl FnMut() -> M + Send + 'static,
+        event: impl Fn() -> M + Send + 'static,
     ) -> anyhow::Result<TimerId> {
         self.0.set(period, move || {
             let event = event();
@@ -166,7 +166,7 @@ pub trait ScheduleEventFor<S, C> {
     fn set<M: Send + 'static>(
         &mut self,
         period: Duration,
-        event: impl FnMut() -> M + Send + 'static,
+        event: impl Fn() -> M + Send + 'static,
     ) -> anyhow::Result<TimerId>
     where
         S: OnErasedEvent<M, C>;
@@ -178,7 +178,7 @@ impl<T: ScheduleEvent<UntypedEvent<S, C>>, S, C> ScheduleEventFor<S, C> for Eras
     fn set<M: Send + 'static>(
         &mut self,
         period: Duration,
-        event: impl FnMut() -> M + Send + 'static,
+        event: impl Fn() -> M + Send + 'static,
     ) -> anyhow::Result<TimerId>
     where
         S: OnErasedEvent<M, C>,

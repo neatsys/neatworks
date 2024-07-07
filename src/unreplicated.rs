@@ -290,14 +290,14 @@ pub mod model {
         }
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct State<W> {
         pub clients: Vec<(ClientState<Addr>, ClientLocalContext<W>)>,
         server: ServerState<kvstore::App>,
         network: NetworkState<Addr, Message>,
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct ClientLocalContext<W> {
         pub upcall: CloseLoop<W, Option<Invoke<Bytes>>>,
         schedule: TimerState<Timer>,
@@ -405,6 +405,16 @@ pub mod model {
                 clients: Default::default(),
                 network: NetworkState::new(),
             }
+        }
+
+        pub fn push_client(&mut self, workload: W) {
+            let index = self.clients.len();
+            let client = ClientState::new(index as _, Addr::Client(index as _));
+            let context = ClientLocalContext {
+                upcall: CloseLoop::new(workload, None),
+                schedule: TimerState::new(),
+            };
+            self.clients.push((client, context));
         }
     }
 
