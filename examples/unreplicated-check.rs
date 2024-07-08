@@ -48,12 +48,7 @@ fn main() -> anyhow::Result<()> {
         prune: |_: &_| false,
         max_depth: None,
     };
-    let result = breadth_first::<_, State<_>, _, _, _>(
-        state.clone(),
-        settings.clone(),
-        1.try_into().unwrap(),
-        None,
-    )?;
+    let result = breadth_first(state.clone(), settings.clone(), 1.try_into().unwrap(), None)?;
     println!("{result:?}");
 
     let settings = Settings {
@@ -62,8 +57,7 @@ fn main() -> anyhow::Result<()> {
         prune: settings.goal,
         max_depth: None,
     };
-    let result =
-        breadth_first::<_, State<_>, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
+    let result = breadth_first(state, settings, 1.try_into().unwrap(), None)?;
     println!("{result:?}");
 
     println!("* Multi-client different keys");
@@ -89,12 +83,7 @@ fn main() -> anyhow::Result<()> {
         prune: |_: &_| false,
         max_depth: None,
     };
-    let result = breadth_first::<_, State<_>, _, _, _>(
-        state.clone(),
-        settings.clone(),
-        1.try_into().unwrap(),
-        None,
-    )?;
+    let result = breadth_first(state.clone(), settings.clone(), 1.try_into().unwrap(), None)?;
     println!("{result:?}");
 
     let settings = Settings {
@@ -103,8 +92,7 @@ fn main() -> anyhow::Result<()> {
         prune: settings.goal,
         max_depth: None,
     };
-    let result =
-        breadth_first::<_, State<_>, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
+    let result = breadth_first(state, settings, 1.try_into().unwrap(), None)?;
     println!("{result:?}");
 
     println!("* Multi-client same key");
@@ -158,12 +146,7 @@ fn main() -> anyhow::Result<()> {
         prune: |_: &_| false,
         max_depth: None,
     };
-    let result = breadth_first::<_, State<_>, _, _, _>(
-        state.clone(),
-        settings.clone(),
-        1.try_into().unwrap(),
-        None,
-    )?;
+    let result = breadth_first(state.clone(), settings.clone(), 1.try_into().unwrap(), None)?;
     println!("{result:?}");
 
     let settings = Settings {
@@ -172,8 +155,7 @@ fn main() -> anyhow::Result<()> {
         prune: settings.goal,
         max_depth: None,
     };
-    let result =
-        breadth_first::<_, State<_>, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
+    let result = breadth_first(state, settings, 1.try_into().unwrap(), None)?;
     println!("{result:?}");
 
     println!("* Infinite workload searches (with 2 clients)");
@@ -187,7 +169,7 @@ fn main() -> anyhow::Result<()> {
         prune: |_: &_| false,
         max_depth: None,
     };
-    let result = breadth_first::<_, State<_>, _, _, _>(
+    let result = breadth_first(
         state.clone(),
         settings.clone(),
         available_parallelism()?,
@@ -196,7 +178,7 @@ fn main() -> anyhow::Result<()> {
     )?;
     println!("{result:?}");
     settings.max_depth = Some(1000.try_into().unwrap());
-    let result = random_depth_first::<_, State<_>, _, _, _>(
+    let result = random_depth_first(
         state,
         settings,
         available_parallelism()?,

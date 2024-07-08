@@ -5,7 +5,7 @@ use std::{
     hash::{BuildHasherDefault, Hash},
     iter::repeat,
     num::NonZeroUsize,
-    panic::{catch_unwind, AssertUnwindSafe, UnwindSafe},
+    panic::{catch_unwind, AssertUnwindSafe},
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::SeqCst},
         Arc, Barrier, Condvar, Mutex,
@@ -38,15 +38,15 @@ pub struct Settings<I, G, P> {
     pub max_depth: Option<NonZeroUsize>,
 }
 
-pub enum SearchResult<S, T, E> {
-    Err(Vec<(E, T)>, E, anyhow::Error),
-    InvariantViolation(Vec<(E, T)>, anyhow::Error),
+pub enum SearchResult<S, E> {
+    Err(Vec<(E, S)>, E, anyhow::Error),
+    InvariantViolation(Vec<(E, S)>, anyhow::Error),
     GoalFound(S),
     SpaceExhausted,
     Timeout,
 }
 
-impl<S, T, E> Debug for SearchResult<S, T, E> {
+impl<S, E> Debug for SearchResult<S, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Err(_, _, err) => write!(f, "Err({err})"),
@@ -58,7 +58,7 @@ impl<S, T, E> Debug for SearchResult<S, T, E> {
     }
 }
 
-impl<S, T: Debug, E: Debug> Display for SearchResult<S, T, E> {
+impl<S: Debug, E: Debug> Display for SearchResult<S, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Err(trace, event, err) => {
@@ -81,26 +81,15 @@ impl<S, T: Debug, E: Debug> Display for SearchResult<S, T, E> {
     }
 }
 
-// historically there are two state types: the original state `S` and the "dry" state `T`
-// the rationale is that it could be unreasonable to ask `S`, which may contain moving parts (i.e.
-// `impl SendEvent<_>`s) that prepared for interacting with the real world, to be as "pure" as
-// `impl Eq + Hash`
-// the solution has been improved into a `derive_where`-based opt-out approach, which means `S` may
-// be `impl Eq + Hash` on its own and probably `T = S`
-// the interface is left in the form of distinct `S` and `T` in case of design rollback, and also
-// the code is more readable in current form, where `S` represents the constantly involving states
-// and `T` represents explored achieved states (which is still called "dry state" below)
-// the `S: Into<T>` should become no-op and zero cost, hopefully
-pub fn breadth_first<S, T, I, G, P>(
+pub fn breadth_first<S, I, G, P>(
     initial_state: S,
     settings: Settings<I, G, P>,
     num_worker: NonZeroUsize,
     max_duration: impl Into<Option<Duration>>,
-) -> anyhow::Result<SearchResult<S, T, S::Event>>
+) -> anyhow::Result<SearchResult<S, S::Event>>
 where
-    S: State + Clone + Into<T> + Send + UnwindSafe + 'static,
-    S::Event: Clone + Send + Sync + UnwindSafe,
-    T: Clone + Eq + Hash + Send + Sync + 'static,
+    S: State + Clone + Eq + Hash + Send + Sync + 'static,
+    S::Event: Clone + Send + Sync,
     I: Fn(&S) -> anyhow::Result<()> + Clone + Send + 'static,
     G: Fn(&S) -> bool + Clone + Send + 'static,
     P: Fn(&S) -> bool + Clone + Send + 'static,
@@ -114,11 +103,11 @@ where
     let depth_barrier = Arc::new(Barrier::new(num_worker.get()));
     let search_finished = Arc::new((Mutex::new(None), Condvar::new(), AtomicBool::new(false)));
 
-    let initial_dry_state = Arc::new(initial_state.clone().into());
-    queue.push((initial_state, initial_dry_state.clone()));
+    let initial_state = Arc::new(initial_state);
+    queue.push(initial_state.clone());
     discovered
         .insert(
-            initial_dry_state,
+            initial_state,
             StateInfo {
                 prev: None,
                 depth: 0,
@@ -160,36 +149,35 @@ where
         },
         search_finished,
     )?;
-    println!("search internal done");
+    // println!("search internal done");
 
     let Some(result) = result else {
         return Ok(SearchResult::Timeout);
     };
     let result = match result {
         SearchWorkerResult::Error(state, event, err) => {
-            SearchResult::Err(trace(&discovered, state.into()), event, err)
+            SearchResult::Err(trace(&discovered, state), event, err)
         }
         SearchWorkerResult::InvariantViolation(state, err) => {
-            SearchResult::InvariantViolation(trace(&discovered, state.into()), err)
+            SearchResult::InvariantViolation(trace(&discovered, state), err)
         }
         SearchWorkerResult::GoalFound(state) => SearchResult::GoalFound(state),
         SearchWorkerResult::SpaceExhausted => SearchResult::SpaceExhausted,
     };
-    println!("search exit");
+    // println!("search exit");
     Ok(result)
 }
 
 // the discussion above on `S` and `T` also applies here
-pub fn random_depth_first<S, T, I, G, P>(
+pub fn random_depth_first<S, I, G, P>(
     initial_state: S,
     settings: Settings<I, G, P>,
     num_worker: NonZeroUsize,
     max_duration: impl Into<Option<Duration>>,
-) -> anyhow::Result<SearchResult<S, T, S::Event>>
+) -> anyhow::Result<SearchResult<S, S::Event>>
 where
-    S: State + Clone + Into<T> + Send + UnwindSafe + 'static,
-    S::Event: Clone + Send + Sync + UnwindSafe,
-    T: Eq + Hash + Send + Sync + 'static,
+    S: State + Clone + Eq + Hash + Send + Sync + 'static,
+    S::Event: Clone + Send + Sync,
     I: Fn(&S) -> anyhow::Result<()> + Clone + Send + 'static,
     G: Fn(&S) -> bool + Clone + Send + 'static,
     P: Fn(&S) -> bool + Clone + Send + 'static,
@@ -310,20 +298,20 @@ fn status_worker<R>(status: impl Fn(Duration) -> String, search_finished: Search
 }
 
 #[derive_where(Clone; E)]
-struct StateInfo<T, E> {
-    prev: Option<(E, Arc<T>)>,
+struct StateInfo<S, E> {
+    prev: Option<(E, Arc<S>)>,
     #[allow(unused)]
     depth: usize, // to assert trace correctness?
 }
 
-type Discovered<T, E> = HashMap<Arc<T>, StateInfo<T, E>, BuildHasherDefault<FxHasher>>;
+type Discovered<S, E> = HashMap<Arc<S>, StateInfo<S, E>, BuildHasherDefault<FxHasher>>;
 
-fn trace<T: Eq + Hash + Clone, E: Clone>(discovered: &Discovered<T, E>, target: T) -> Vec<(E, T)> {
+fn trace<S: Eq + Hash + Clone, E: Clone>(discovered: &Discovered<S, E>, target: S) -> Vec<(E, S)> {
     let info = discovered.get(&target).unwrap();
     let Some((prev_event, prev_state)) = &info.get().prev else {
         return Vec::new();
     };
-    let prev_state = T::clone(prev_state);
+    let prev_state = S::clone(prev_state);
     let prev_event = prev_event.clone();
     drop(info);
     let mut trace = trace(discovered, prev_state);
@@ -338,18 +326,17 @@ enum SearchWorkerResult<S, E> {
     SpaceExhausted,
 }
 
-fn breath_first_worker<S, T, I, G, P>(
+fn breath_first_worker<S, I, G, P>(
     settings: Settings<I, G, P>,
-    discovered: Arc<Discovered<T, S::Event>>,
-    mut queue: Arc<SegQueue<(S, Arc<T>)>>,
-    mut pushing_queue: Arc<SegQueue<(S, Arc<T>)>>,
+    discovered: Arc<Discovered<S, S::Event>>,
+    mut queue: Arc<SegQueue<Arc<S>>>,
+    mut pushing_queue: Arc<SegQueue<Arc<S>>>,
     depth: Arc<AtomicUsize>,
     depth_barrier: Arc<Barrier>,
     search_finished: SearchFinished<SearchWorkerResult<S, S::Event>>,
 ) where
-    S: State + Clone + Into<T> + UnwindSafe,
-    S::Event: Clone + UnwindSafe,
-    T: Eq + Hash,
+    S: State + Clone + Eq + Hash + Send + Sync + 'static,
+    S::Event: Clone + Send + Sync,
     I: Fn(&S) -> anyhow::Result<()>,
     G: Fn(&S) -> bool,
     P: Fn(&S) -> bool,
@@ -363,24 +350,24 @@ fn breath_first_worker<S, T, I, G, P>(
     };
     for local_depth in 0.. {
         // println!("start depth {local_depth}");
-        'depth: while let Some((state, dry_state)) = queue.pop() {
+        'depth: while let Some(state) = queue.pop() {
             // TODO check initial state
             // println!("check events");
             for event in state.events() {
                 // println!("step {event:?}");
-                let mut next_state = state.clone();
+                let mut next_state = S::clone(&state);
                 if let Err(err) = step(&mut next_state, event.clone()) {
-                    search_finish(SearchWorkerResult::Error(state, event, err));
+                    search_finish(SearchWorkerResult::Error(S::clone(&state), event, err));
                     break 'depth;
                 }
-                let next_dry_state = Arc::new(next_state.clone().into());
+                let next_state = Arc::new(next_state);
                 // do not replace a previously-found state, which may be reached with a shorter
                 // trace from initial state
                 let mut inserted = false;
-                discovered.entry(next_dry_state.clone()).or_insert_with(|| {
+                discovered.entry(next_state.clone()).or_insert_with(|| {
                     inserted = true;
                     StateInfo {
-                        prev: Some((event, dry_state.clone())),
+                        prev: Some((event, state.clone())),
                         depth: local_depth + 1,
                     }
                 });
@@ -390,18 +377,21 @@ fn breath_first_worker<S, T, I, G, P>(
                 }
                 // println!("check invariant");
                 if let Err(err) = (settings.invariant)(&next_state) {
-                    search_finish(SearchWorkerResult::InvariantViolation(next_state, err));
+                    search_finish(SearchWorkerResult::InvariantViolation(
+                        S::clone(&next_state),
+                        err,
+                    ));
                     break 'depth;
                 }
                 // println!("check goal");
                 if (settings.goal)(&next_state) {
-                    search_finish(SearchWorkerResult::GoalFound(next_state));
+                    search_finish(SearchWorkerResult::GoalFound(S::clone(&next_state)));
                     break 'depth;
                 }
                 if Some(local_depth + 1) != settings.max_depth.map(Into::into)
                     && !(settings.prune)(&next_state)
                 {
-                    pushing_queue.push((next_state, next_dry_state))
+                    pushing_queue.push(next_state)
                 }
             }
             if search_finished.2.load(SeqCst) {
@@ -438,16 +428,15 @@ fn breath_first_worker<S, T, I, G, P>(
     // println!("worker exit");
 }
 
-fn random_depth_first_worker<S, T, I, G, P>(
+fn random_depth_first_worker<S, I, G, P>(
     settings: Settings<I, G, P>,
     initial_state: S,
     num_probe: Arc<AtomicU32>,
     num_state: Arc<AtomicU32>,
-    search_finished: SearchFinished<SearchResult<S, T, S::Event>>,
+    search_finished: SearchFinished<SearchResult<S, S::Event>>,
 ) where
-    S: State + Clone + Into<T> + UnwindSafe,
-    S::Event: Clone + UnwindSafe,
-    T: Eq + Hash,
+    S: State + Clone,
+    S::Event: Clone,
     I: Fn(&S) -> anyhow::Result<()>,
     G: Fn(&S) -> bool,
     P: Fn(&S) -> bool,
@@ -472,7 +461,7 @@ fn random_depth_first_worker<S, T, I, G, P>(
                 break;
             }
             num_state.fetch_add(1, SeqCst);
-            trace.push((event, state.clone().into()));
+            trace.push((event, state.clone()));
             if let Err(err) = (settings.invariant)(&state) {
                 search_finish(SearchResult::InvariantViolation(trace, err));
                 break;
