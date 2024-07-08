@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use events::{Invoke, InvokeOk};
 
-use crate::event::{combinators::Map, SendEvent};
+use crate::event::SendEvent;
 
 pub mod events {
     #[derive(Debug, Clone)]
@@ -12,7 +12,6 @@ pub mod events {
 }
 
 pub mod app {
-    pub mod combinators;
     pub mod kvstore;
 }
 
@@ -35,12 +34,12 @@ pub trait Workload {
     type Op;
     type Result;
 
-    fn init(&mut self, sender: impl SendEvent<Self::Op>) -> anyhow::Result<()>;
+    fn init(&mut self, sender: impl SendEvent<Invoke<Self::Op>>) -> anyhow::Result<()>;
 
     fn on_result(
         &mut self,
-        result: Self::Result,
-        sender: impl SendEvent<Self::Op>,
+        result: InvokeOk<Self::Result>,
+        sender: impl SendEvent<Invoke<Self::Op>>,
     ) -> anyhow::Result<()>;
 }
 
@@ -58,13 +57,12 @@ impl<W, E> CloseLoop<W, E> {
 
 impl<W: Workload, E: SendEvent<Invoke<W::Op>>> CloseLoop<W, E> {
     pub fn init(&mut self) -> anyhow::Result<()> {
-        self.workload.init(Map(events::Invoke, &mut self.sender))
+        self.workload.init(&mut self.sender)
     }
 }
 
 impl<W: Workload, E: SendEvent<Invoke<W::Op>>> SendEvent<InvokeOk<W::Result>> for CloseLoop<W, E> {
-    fn send(&mut self, InvokeOk(result): InvokeOk<W::Result>) -> anyhow::Result<()> {
-        self.workload
-            .on_result(result, Map(events::Invoke, &mut self.sender))
+    fn send(&mut self, result: InvokeOk<W::Result>) -> anyhow::Result<()> {
+        self.workload.on_result(result, &mut self.sender)
     }
 }

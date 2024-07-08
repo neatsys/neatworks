@@ -224,7 +224,7 @@ pub mod context {
 }
 
 pub mod codec {
-    use crate::codec::{bincode_decode, Encode};
+    use crate::codec::{bincode, Encode};
 
     use super::*;
 
@@ -235,7 +235,7 @@ pub mod codec {
     pub fn client_decode<'a>(
         mut sender: impl SendEvent<Recv<Reply>> + 'a,
     ) -> impl FnMut(&[u8]) -> anyhow::Result<()> + 'a {
-        move |buf| sender.send(Recv(bincode_decode(buf)?))
+        move |buf| sender.send(Recv(bincode::decode(buf)?))
     }
 
     pub fn server_encode<N>(net: N) -> Encode<Reply, N> {
@@ -245,7 +245,7 @@ pub mod codec {
     pub fn server_decode<'a, A: Addr>(
         mut sender: impl SendEvent<Recv<Request<A>>> + 'a,
     ) -> impl FnMut(&[u8]) -> anyhow::Result<()> + 'a {
-        move |buf| sender.send(Recv(bincode_decode(buf)?))
+        move |buf| sender.send(Recv(bincode::decode(buf)?))
     }
 }
 
@@ -253,12 +253,10 @@ pub mod model {
     use derive_more::From;
 
     use crate::{
+        codec::{Decode, Encode},
         model::{NetworkState, ScheduleState, State as _},
         workload::{
-            app::{
-                combinators::Typed,
-                kvstore::{self, KVStore},
-            },
+            app::kvstore::{self, KVStore},
             CloseLoop, Workload,
         },
     };
@@ -402,20 +400,10 @@ pub mod model {
     impl<W> State<W> {
         pub fn new() -> Self {
             Self {
-                server: ServerState::new(Typed::json(KVStore::new())),
+                server: ServerState::new(Decode::json(Encode::json(KVStore::new()))),
                 clients: Default::default(),
                 network: NetworkState::new(),
             }
-        }
-
-        pub fn push_client(&mut self, workload: W) {
-            let index = self.clients.len();
-            let client = ClientState::new(index as _, Addr::Client(index as _));
-            let context = ClientLocalContext {
-                upcall: CloseLoop::new(workload, None),
-                schedule: ScheduleState::new(),
-            };
-            self.clients.push((client, context));
         }
     }
 
@@ -431,6 +419,20 @@ pub mod model {
                 context.upcall.init()?
             }
             self.fix()
+        }
+    }
+
+    impl<W: Workload<Op = kvstore::Op, Result = kvstore::Result>>
+        State<Decode<kvstore::Result, Encode<kvstore::Op, W>>>
+    {
+        pub fn push_client(&mut self, workload: W) {
+            let index = self.clients.len();
+            let client = ClientState::new(index as _, Addr::Client(index as _));
+            let context = ClientLocalContext {
+                upcall: CloseLoop::new(Decode::json(Encode::json(workload)), None),
+                schedule: ScheduleState::new(),
+            };
+            self.clients.push((client, context));
         }
     }
 }

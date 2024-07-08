@@ -19,6 +19,7 @@
         "neatworks",
         "pbft",
         "prehashed",
+        "rngs",
         "runtimes",
         "rustup",
         "Schnorrkel",

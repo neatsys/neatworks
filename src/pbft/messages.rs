@@ -80,7 +80,7 @@ pub mod codec {
     use serde::{Deserialize, Serialize};
 
     use crate::{
-        codec::{bincode_decode, Encode},
+        codec::{bincode, Encode},
         event::SendEvent,
         net::{events::Recv, Addr},
     };
@@ -96,7 +96,7 @@ pub mod codec {
     pub fn to_client_decode<'a>(
         mut sender: impl SendEvent<Recv<Reply>> + 'a,
     ) -> impl FnMut(&[u8]) -> anyhow::Result<()> + 'a {
-        move |buf| sender.send(Recv(bincode_decode(buf)?))
+        move |buf| sender.send(Recv(bincode::decode(buf)?))
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, From)]
@@ -125,7 +125,7 @@ pub mod codec {
             + 'a,
     ) -> impl FnMut(&[u8]) -> anyhow::Result<()> + 'a {
         use ToReplica::*;
-        move |buf| match bincode_decode(buf)? {
+        move |buf| match bincode::decode(buf)? {
             Request(message) => sender.send(Recv(message)),
             PrePrepare(message, requests) => sender.send(Recv((message, requests))),
             Prepare(message) => sender.send(Recv(message)),

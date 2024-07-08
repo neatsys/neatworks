@@ -1,6 +1,9 @@
 use crate::event::SendEvent;
 
-use super::Workload;
+use super::{
+    events::{Invoke, InvokeOk},
+    Workload,
+};
 
 #[derive(Debug, Clone)]
 pub struct Iter<I, R> {
@@ -27,20 +30,20 @@ where
     type Op = <I::Item as Pair>::First;
     type Result = <I::Item as Pair>::Second;
 
-    fn init(&mut self, mut sender: impl SendEvent<Self::Op>) -> anyhow::Result<()> {
+    fn init(&mut self, mut sender: impl SendEvent<Invoke<Self::Op>>) -> anyhow::Result<()> {
         let Some((op, result)) = self.generate.next().map(Pair::into) else {
             self.done = true;
             return Ok(());
         };
         let replaced = self.expected_result.replace(result);
         anyhow::ensure!(replaced.is_none());
-        sender.send(op)
+        sender.send(Invoke(op))
     }
 
     fn on_result(
         &mut self,
-        result: Self::Result,
-        mut sender: impl SendEvent<Self::Op>,
+        InvokeOk(result): InvokeOk<Self::Result>,
+        mut sender: impl SendEvent<Invoke<Self::Op>>,
     ) -> anyhow::Result<()> {
         let Some(expected_result) = self.expected_result.take() else {
             anyhow::bail!("missing expected result")
@@ -51,7 +54,7 @@ where
             return Ok(());
         };
         self.expected_result = Some(result);
-        sender.send(op)
+        sender.send(Invoke(op))
     }
 }
 
