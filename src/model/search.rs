@@ -160,6 +160,7 @@ where
         },
         search_finished,
     )?;
+    println!("search internal done");
 
     let Some(result) = result else {
         return Ok(SearchResult::Timeout);
@@ -174,6 +175,7 @@ where
         SearchWorkerResult::GoalFound(state) => SearchResult::GoalFound(state),
         SearchWorkerResult::SpaceExhausted => SearchResult::SpaceExhausted,
     };
+    println!("search exit");
     Ok(result)
 }
 
@@ -282,7 +284,8 @@ where
         worker.join().map_err(error_from_panic)?;
     }
     // println!("worker joined");
-    status_worker.join().map_err(error_from_panic)?; // println!("status worker joined");
+    status_worker.join().map_err(error_from_panic)?;
+    // println!("status worker joined");
     Ok(result)
 }
 
@@ -320,8 +323,11 @@ fn trace<T: Eq + Hash + Clone, E: Clone>(discovered: &Discovered<T, E>, target: 
     let Some((prev_event, prev_state)) = &info.get().prev else {
         return Vec::new();
     };
-    let mut trace = trace(discovered, T::clone(prev_state));
-    trace.push((prev_event.clone(), target));
+    let prev_state = T::clone(prev_state);
+    let prev_event = prev_event.clone();
+    drop(info);
+    let mut trace = trace(discovered, prev_state);
+    trace.push((prev_event, target));
     trace
 }
 
@@ -486,5 +492,3 @@ fn random_depth_first_worker<S, T, I, G, P>(
         }
     }
 }
-
-// cSpell:words hasher dashmap rustc condvar

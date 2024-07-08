@@ -16,7 +16,7 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Request<A> {
     seq: u32,
     op: Payload,
@@ -24,7 +24,7 @@ pub struct Request<A> {
     client_addr: A,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Reply {
     seq: u32,
     result: Payload,
@@ -272,7 +272,7 @@ pub mod model {
 
     impl crate::net::Addr for Addr {}
 
-    #[derive(Debug, Clone, PartialEq, Eq, Hash, From)]
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, From)]
     pub enum Message {
         Request(super::Request<Addr>),
         Reply(super::Reply),

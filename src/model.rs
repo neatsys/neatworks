@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, fmt::Debug, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Debug,
+    time::Duration,
+};
 
 use derive_where::derive_where;
 
@@ -97,7 +101,7 @@ impl<M: Clone> ScheduleState<M> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[derive_where(Default)]
 pub struct NetworkState<A, M> {
-    messages: BTreeMap<A, Vec<M>>,
+    messages: BTreeMap<A, BTreeSet<M>>,
 }
 
 impl<A, M> NetworkState<A, M> {
@@ -106,12 +110,12 @@ impl<A, M> NetworkState<A, M> {
     }
 }
 
-impl<A: Ord + Debug, M: Into<N>, N> SendEvent<Cast<A, M>> for NetworkState<A, N> {
+impl<A: Ord + Debug, M: Into<N>, N: Ord> SendEvent<Cast<A, M>> for NetworkState<A, N> {
     fn send(&mut self, Cast(remote, message): Cast<A, M>) -> anyhow::Result<()> {
         let Some(inbox) = self.messages.get_mut(&remote) else {
             anyhow::bail!("missing inbox for addr {remote:?}")
         };
-        inbox.push(message.into());
+        inbox.insert(message.into());
         Ok(())
     }
 }

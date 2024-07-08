@@ -156,12 +156,19 @@ where
     fn on_result(
         &mut self,
         InvokeOk(result): InvokeOk<Self::Result>,
-        sender: impl SendEvent<Invoke<Self::Op>>,
+        mut sender: impl SendEvent<Invoke<Self::Op>>,
     ) -> anyhow::Result<()> {
         let Some(op) = self.outstanding.take() else {
             anyhow::bail!("missing outstanding op");
         };
         self.invocations.push((op, result.clone()));
-        self.inner.on_result(InvokeOk(result), sender)
+
+        let mut intercept = None;
+        self.inner.on_result(InvokeOk(result), &mut intercept)?;
+        if let Some(Invoke(op)) = intercept.take() {
+            self.outstanding = Some(op.clone());
+            sender.send(Invoke(op))?
+        }
+        Ok(())
     }
 }
