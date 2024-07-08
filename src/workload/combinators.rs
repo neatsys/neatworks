@@ -10,13 +10,13 @@ use super::{
 };
 
 #[derive(Debug, Clone)]
-pub struct Iter<I, R> {
+pub struct Iter<R, I> {
     generate: I,
     expected_result: Option<R>,
     pub done: bool,
 }
 
-impl<I, R> Iter<I, R> {
+impl<R, I> Iter<R, I> {
     pub fn new(generate: impl IntoIterator<IntoIter = I>) -> Self {
         Self {
             generate: generate.into_iter(),
@@ -26,7 +26,7 @@ impl<I, R> Iter<I, R> {
     }
 }
 
-impl<I: Iterator> Workload for Iter<I, <I::Item as Pair>::Second>
+impl<I: Iterator> Workload for Iter<<I::Item as Pair>::Second, I>
 where
     I::Item: Pair,
     <I::Item as Pair>::Second: Eq,
@@ -79,13 +79,13 @@ impl<A, B> Pair for (A, B) {
 }
 
 #[derive(Debug, Clone)]
-pub struct UncheckedIter<I, R> {
+pub struct UncheckedIter<R, I> {
     generate: I,
     pub done: bool,
     _m: PhantomData<R>,
 }
 
-impl<I, R> UncheckedIter<I, R> {
+impl<R, I> UncheckedIter<R, I> {
     pub fn new(generate: impl IntoIterator<IntoIter = I>) -> Self {
         Self {
             generate: generate.into_iter(),
@@ -95,7 +95,7 @@ impl<I, R> UncheckedIter<I, R> {
     }
 }
 
-impl<I: Iterator, R> Workload for UncheckedIter<I, R> {
+impl<R, I: Iterator> Workload for UncheckedIter<R, I> {
     type Op = I::Item;
     type Result = R;
 
@@ -117,14 +117,14 @@ impl<I: Iterator, R> Workload for UncheckedIter<I, R> {
 }
 
 #[derive(Debug, Clone, Deref)]
-pub struct Record<W, O, R> {
+pub struct Record<O, R, W> {
     #[deref]
     inner: W,
     pub invocations: Vec<(O, R)>,
     outstanding: Option<O>,
 }
 
-impl<W, O, R> Record<W, O, R> {
+impl<O, R, W> Record<O, R, W> {
     pub fn new(workload: W) -> Self {
         Self {
             inner: workload,
@@ -134,7 +134,7 @@ impl<W, O, R> Record<W, O, R> {
     }
 }
 
-impl<W: Workload> Workload for Record<W, W::Op, W::Result>
+impl<W: Workload> Workload for Record<W::Op, W::Result, W>
 where
     W::Op: Clone,
     W::Result: Clone,

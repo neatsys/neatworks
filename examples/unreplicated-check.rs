@@ -34,8 +34,8 @@ fn main() -> anyhow::Result<()> {
 
     type O = kvstore::Op;
     type R = kvstore::Result;
-    type TypedW<W> = Decode<R, Encode<O, W>>;
-    type C<W> = ClientLocalContext<TypedW<W>>;
+    type CodecW<W> = Decode<R, Encode<O, W>>;
+    type C<W> = ClientLocalContext<CodecW<W>>;
 
     let settings = Settings {
         invariant: |_: &_| Ok(()),
@@ -105,7 +105,7 @@ fn main() -> anyhow::Result<()> {
     state.init()?;
 
     fn append_linearizable<W: Workload<Op = O, Result = R>>(
-        state: &State<TypedW<Record<W, O, R>>>,
+        state: &State<CodecW<Record<O, R, W>>>,
     ) -> anyhow::Result<()> {
         let mut all_results = Vec::new();
         for (_, context) in &state.clients {
@@ -139,7 +139,7 @@ fn main() -> anyhow::Result<()> {
             state
                 .clients
                 .iter()
-                .all(|(_, context): &(_, C<Record<UncheckedIter<_, _>, _, _>>)| {
+                .all(|(_, context): &(_, C<Record<_, _, UncheckedIter<_, _>>>)| {
                     context.upcall.workload.done
                 })
         },
