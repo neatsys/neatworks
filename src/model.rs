@@ -61,28 +61,36 @@ impl<M: Into<N>, N> ScheduleEvent<M> for ScheduleState<N> {
     }
 
     fn unset(&mut self, TimerId(id): TimerId) -> anyhow::Result<()> {
+        self.remove(id)?;
+        Ok(())
+    }
+}
+
+impl<M> ScheduleState<M> {
+    fn remove(&mut self, id: u32) -> anyhow::Result<TimerEnvelop<M>> {
         let Some(pos) = self.envelops.iter().position(|envelop| envelop.id == id) else {
             anyhow::bail!("missing timer of {:?}", TimerId(id))
         };
-        self.envelops.remove(pos);
+        Ok(self.envelops.remove(pos))
+    }
+
+    pub fn tick(&mut self, TimerId(id): TimerId) -> anyhow::Result<()> {
+        let ticked = self.remove(id)?;
+        self.envelops.push(ticked);
         Ok(())
     }
 }
 
 impl<M: Clone> ScheduleState<M> {
-    pub fn generate_events(&self, mut on_event: impl FnMut(M)) {
+    pub fn generate_events(&self, mut on_event: impl FnMut(TimerId, M)) {
         let mut limit = Duration::MAX;
         for envelop in &self.envelops {
             if envelop.period >= limit {
                 break;
             }
-            on_event(envelop.event.clone());
+            on_event(TimerId(envelop.id), envelop.event.clone());
             limit = envelop.period;
         }
-    }
-
-    pub fn tick(&mut self, event: M) -> anyhow::Result<()> {
-        Ok(())
     }
 }
 

@@ -332,20 +332,35 @@ pub mod model {
     #[derive(Debug)]
     pub enum Event {
         Message(Addr, Message),
-        Timer(u8, Timer),
+        Timer(u8, TimerId, Timer),
     }
 
     impl<W: Workload<Op = Bytes, Result = Bytes>> SendEvent<Event> for State<W> {
         fn send(&mut self, event: Event) -> anyhow::Result<()> {
             match event {
-                Event::Message(Addr::Client(index), Message::Reply(message)) => {
-                    self.on_client_event(index, Recv(message))
+                Event::Message(Addr::Client(index), _) | Event::Timer(index, ..) => {
+                    let Some((client, context)) = self.clients.get_mut(index as usize) else {
+                        anyhow::bail!("unexpected client index {index}")
+                    };
+                    let mut context = ClientContext {
+                        net: &mut self.network,
+                        upcall: &mut context.upcall,
+                        schedule: &mut context.schedule,
+                        _m: Default::default(),
+                    };
+                    match event {
+                        Event::Message(_, Message::Reply(message)) => {
+                            client.on_event(Recv(message), &mut context)
+                        }
+                        Event::Timer(_, id, Timer::ClientResend) => {
+                            context.schedule.tick(id)?;
+                            client.on_event(client::Resend, &mut context)
+                        }
+                        _ => anyhow::bail!("unexpected event {event:?}"),
+                    }
                 }
                 Event::Message(Addr::Server, Message::Request(message)) => {
                     self.server.on_event(Recv(message), &mut self.network)
-                }
-                Event::Timer(index, Timer::ClientResend) => {
-                    self.on_client_event(index, client::Resend)
                 }
                 _ => anyhow::bail!("unexpected event {event:?}"),
             }
@@ -361,7 +376,7 @@ pub mod model {
                 assert!(context.upcall.sender.is_none());
                 context
                     .schedule
-                    .generate_events(|event| events.push(Event::Timer(index as _, event)))
+                    .generate_events(|id, event| events.push(Event::Timer(index as _, id, event)))
             }
             self.network
                 .generate_events(|addr, message| events.push(Event::Message(addr, message)));
@@ -385,22 +400,6 @@ pub mod model {
     }
 
     impl<W> State<W> {
-        fn on_client_event<M>(&mut self, index: u8, event: M) -> anyhow::Result<()>
-        where
-            ClientState<Addr>: for<'a> OnErasedEvent<M, ClientContext<'a, W>>,
-        {
-            let Some((client, context)) = self.clients.get_mut(index as usize) else {
-                anyhow::bail!("unexpected client index {index}")
-            };
-            let mut context = ClientContext {
-                net: &mut self.network,
-                upcall: &mut context.upcall,
-                schedule: &mut context.schedule,
-                _m: Default::default(),
-            };
-            client.on_event(event, &mut context)
-        }
-
         pub fn new() -> Self {
             Self {
                 server: ServerState::new(Typed::json(KVStore::new())),
