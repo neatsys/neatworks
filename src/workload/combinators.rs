@@ -1,3 +1,7 @@
+use derive_more::Deref;
+
+use std::marker::PhantomData;
+
 use crate::event::SendEvent;
 
 use super::{
@@ -71,5 +75,93 @@ impl<A, B> Pair for (A, B) {
 
     fn into(self) -> (Self::First, Self::Second) {
         self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UncheckedIter<I, R> {
+    generate: I,
+    pub done: bool,
+    _m: PhantomData<R>,
+}
+
+impl<I, R> UncheckedIter<I, R> {
+    pub fn new(generate: I) -> Self {
+        Self {
+            generate,
+            done: false,
+            _m: Default::default(),
+        }
+    }
+}
+
+impl<I: Iterator, R> Workload for UncheckedIter<I, R> {
+    type Op = I::Item;
+    type Result = R;
+
+    fn init(&mut self, mut sender: impl SendEvent<Invoke<Self::Op>>) -> anyhow::Result<()> {
+        let Some(op) = self.generate.next() else {
+            self.done = true;
+            return Ok(());
+        };
+        sender.send(Invoke(op))
+    }
+
+    fn on_result(
+        &mut self,
+        _: InvokeOk<Self::Result>,
+        sender: impl SendEvent<Invoke<Self::Op>>,
+    ) -> anyhow::Result<()> {
+        self.init(sender)
+    }
+}
+
+#[derive(Debug, Clone, Deref)]
+pub struct Record<W, O, R> {
+    #[deref]
+    inner: W,
+    pub invocations: Vec<(O, R)>,
+    outstanding: Option<O>,
+}
+
+impl<W, O, R> Record<W, O, R> {
+    pub fn new(workload: W) -> Self {
+        Self {
+            inner: workload,
+            invocations: Default::default(),
+            outstanding: None,
+        }
+    }
+}
+
+impl<W: Workload> Workload for Record<W, W::Op, W::Result>
+where
+    W::Op: Clone,
+    W::Result: Clone,
+{
+    type Op = W::Op;
+    type Result = W::Result;
+
+    fn init(&mut self, mut sender: impl SendEvent<Invoke<Self::Op>>) -> anyhow::Result<()> {
+        let mut intercept = None;
+        self.inner.init(&mut intercept)?;
+        let Some(Invoke(op)) = intercept.take() else {
+            anyhow::bail!("missing init op")
+        };
+        let replaced = self.outstanding.replace(op.clone());
+        anyhow::ensure!(replaced.is_none());
+        sender.send(Invoke(op))
+    }
+
+    fn on_result(
+        &mut self,
+        InvokeOk(result): InvokeOk<Self::Result>,
+        sender: impl SendEvent<Invoke<Self::Op>>,
+    ) -> anyhow::Result<()> {
+        let Some(op) = self.outstanding.take() else {
+            anyhow::bail!("missing outstanding op");
+        };
+        self.invocations.push((op, result.clone()));
+        self.inner.on_result(InvokeOk(result), sender)
     }
 }

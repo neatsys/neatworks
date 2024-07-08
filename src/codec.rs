@@ -12,8 +12,9 @@ use crate::{
     },
 };
 
-#[derive_where(Debug, Clone; T)]
-pub struct Encode<M, T>(fn(&M) -> anyhow::Result<Bytes>, T);
+#[derive(Deref)]
+#[derive_where(Debug, Clone, PartialEq, Eq, Hash; T)]
+pub struct Encode<M, T>(fn(&M) -> anyhow::Result<Bytes>, #[deref] T);
 
 impl<M: Into<L>, L, N: SendEvent<Cast<A, Bytes>>, A> SendEvent<Cast<A, M>> for Encode<L, N> {
     fn send(&mut self, Cast(remote, message): Cast<A, M>) -> anyhow::Result<()> {
@@ -63,8 +64,9 @@ impl<W: Workload> Workload for Encode<W::Op, W> {
     }
 }
 
-#[derive_where(Debug, Clone; T)]
-pub struct Decode<O, T>(fn(&[u8]) -> anyhow::Result<O>, T);
+#[derive(Deref)]
+#[derive_where(Debug, Clone, PartialEq, Eq, Hash; T)]
+pub struct Decode<O, T>(fn(&[u8]) -> anyhow::Result<O>, #[deref] T);
 
 impl<O, A> App for Decode<O, A>
 where

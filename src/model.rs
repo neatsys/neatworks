@@ -116,6 +116,14 @@ impl<A: Ord + Debug, M: Into<N>, N> SendEvent<Cast<A, M>> for NetworkState<A, N>
     }
 }
 
+impl<A: Ord, M> NetworkState<A, M> {
+    pub fn register(&mut self, addr: A) -> anyhow::Result<()> {
+        let replaced = self.messages.insert(addr, Default::default());
+        anyhow::ensure!(replaced.is_none());
+        Ok(())
+    }
+}
+
 impl<A: Clone, M: Clone> NetworkState<A, M> {
     pub fn generate_events(&self, mut on_event: impl FnMut(A, M)) {
         for (addr, inbox) in &self.messages {

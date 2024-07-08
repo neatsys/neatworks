@@ -251,6 +251,7 @@ pub mod codec {
 
 pub mod model {
     use derive_more::From;
+    use derive_where::derive_where;
 
     use crate::{
         codec::{Decode, Encode},
@@ -271,13 +272,13 @@ pub mod model {
 
     impl crate::net::Addr for Addr {}
 
-    #[derive(Debug, Clone, From)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, From)]
     pub enum Message {
         Request(super::Request<Addr>),
         Reply(super::Reply),
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub enum Timer {
         ClientResend,
     }
@@ -289,6 +290,7 @@ pub mod model {
     }
 
     #[derive(Debug, Clone)]
+    #[derive_where(PartialEq, Eq, Hash)]
     pub struct State<W> {
         pub clients: Vec<(ClientState<Addr>, ClientLocalContext<W>)>,
         server: ServerState<kvstore::App>,
@@ -296,7 +298,9 @@ pub mod model {
     }
 
     #[derive(Debug, Clone)]
+    #[derive_where(PartialEq, Eq, Hash)]
     pub struct ClientLocalContext<W> {
+        #[derive_where(skip)]
         pub upcall: CloseLoop<W, Option<Invoke<Bytes>>>,
         schedule: ScheduleState<Timer>,
     }
@@ -327,7 +331,7 @@ pub mod model {
         }
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub enum Event {
         Message(Addr, Message),
         Timer(u8, TimerId, Timer),
@@ -398,18 +402,14 @@ pub mod model {
     }
 
     impl<W> State<W> {
-        pub fn new() -> Self {
-            Self {
+        pub fn new() -> anyhow::Result<Self> {
+            let mut network = NetworkState::new();
+            network.register(Addr::Server)?;
+            Ok(Self {
                 server: ServerState::new(Decode::json(Encode::json(KVStore::new()))),
                 clients: Default::default(),
-                network: NetworkState::new(),
-            }
-        }
-    }
-
-    impl<W> Default for State<W> {
-        fn default() -> Self {
-            Self::new()
+                network,
+            })
         }
     }
 
@@ -425,14 +425,16 @@ pub mod model {
     impl<W: Workload<Op = kvstore::Op, Result = kvstore::Result>>
         State<Decode<kvstore::Result, Encode<kvstore::Op, W>>>
     {
-        pub fn push_client(&mut self, workload: W) {
+        pub fn push_client(&mut self, workload: W) -> anyhow::Result<()> {
             let index = self.clients.len();
             let client = ClientState::new(index as _, Addr::Client(index as _));
+            self.network.register(Addr::Client(index as _))?;
             let context = ClientLocalContext {
                 upcall: CloseLoop::new(Decode::json(Encode::json(workload)), None),
                 schedule: ScheduleState::new(),
             };
             self.clients.push((client, context));
+            Ok(())
         }
     }
 }

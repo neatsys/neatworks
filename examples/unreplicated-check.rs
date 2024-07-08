@@ -1,15 +1,16 @@
 use std::{thread::available_parallelism, time::Duration};
 
 use neatworks::{
+    codec::{Decode, Encode},
     model::search::{breadth_first, random_depth_first, Settings},
-    unreplicated::model::State,
+    unreplicated::model::{ClientLocalContext, State},
     workload::{
         app::kvstore::{
             self, InfinitePutGet,
             Op::{Append, Get, Put},
             Result::{AppendResult, GetResult, PutOk},
         },
-        combinators::Iter,
+        combinators::{Iter, Record, UncheckedIter},
         Workload,
     },
 };
@@ -17,7 +18,7 @@ use rand::thread_rng;
 
 fn main() -> anyhow::Result<()> {
     println!("* Single client; Put, Append, Get");
-    let mut state = State::new();
+    let mut state = State::new()?;
     state.push_client(Iter::new(
         [
             (Put(String::from("foo"), String::from("bar")), PutOk),
@@ -28,8 +29,13 @@ fn main() -> anyhow::Result<()> {
             (Get(String::from("foo")), GetResult(String::from("barbaz"))),
         ]
         .into_iter(),
-    ));
+    ))?;
     state.init()?;
+
+    type O = kvstore::Op;
+    type R = kvstore::Result;
+    type TypedW<W> = Decode<R, Encode<O, W>>;
+    type C<W> = ClientLocalContext<TypedW<W>>;
 
     let settings = Settings {
         invariant: |_: &_| Ok(()),
@@ -37,7 +43,7 @@ fn main() -> anyhow::Result<()> {
             state
                 .clients
                 .iter()
-                .all(|(_, context)| context.upcall.workload.done)
+                .all(|(_, context): &(_, C<Iter<_, _>>)| context.upcall.workload.done)
         },
         prune: |_: &_| false,
         max_depth: None,
@@ -57,24 +63,29 @@ fn main() -> anyhow::Result<()> {
         max_depth: None,
     };
     let result =
-        breadth_first::<_, State<_, _>, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
+        breadth_first::<_, State<_>, _, _, _>(state, settings, 1.try_into().unwrap(), None)?;
     println!("{result:?}");
 
     println!("* Multi-client different keys");
-    let mut state = State::new();
+    let mut state = State::new()?;
     for i in 0..2 {
         state.push_client(Iter::new((0..3).map(move |x| {
             (
                 Append(format!("KEY-{i}"), x.to_string()),
                 AppendResult((0..=x).map(|x| x.to_string()).collect::<Vec<_>>().concat()),
             )
-        })))
+        })))?
     }
     state.init()?;
 
     let settings = Settings {
         invariant: |_: &_| Ok(()),
-        goal: |state: &State<_>| state.clients.iter().all(|client| client.close_loop.done),
+        goal: |state: &State<_>| {
+            state
+                .clients
+                .iter()
+                .all(|(_, context): &(_, C<Iter<_, _>>)| context.upcall.workload.done)
+        },
         prune: |_: &_| false,
         max_depth: None,
     };
@@ -97,20 +108,20 @@ fn main() -> anyhow::Result<()> {
     println!("{result:?}");
 
     println!("* Multi-client same key");
-    let mut state = State::new();
+    let mut state = State::new()?;
     for _ in 0..2 {
-        state.push_client(Iter::new(
+        state.push_client(Record::new(UncheckedIter::new(
             (0..3).map(move |x| (Append(String::from("foo"), x.to_string()))),
-        ))
+        )))?
     }
     state.init()?;
 
-    fn append_linearizable<W: Workload<Op = kvstore::Op, Result = kvstore::Result>>(
-        state: &State<Json<Recorded<W>>, <Json<Recorded<W>> as Workload>::OpContext>,
+    fn append_linearizable<W: Workload<Op = O, Result = R>>(
+        state: &State<TypedW<Record<W, O, R>>>,
     ) -> anyhow::Result<()> {
         let mut all_results = Vec::new();
-        for client in &state.clients {
-            for (op, result) in &client.close_loop.workload.invocations {
+        for (_, context) in &state.clients {
+            for (op, result) in &context.upcall.workload.invocations {
                 let Append(_, append_value) = op else {
                     anyhow::bail!("unexpected {op:?}")
                 };
@@ -136,11 +147,18 @@ fn main() -> anyhow::Result<()> {
 
     let settings = Settings {
         invariant: append_linearizable,
-        goal: |state: &State<_, _>| state.clients.iter().all(|client| client.close_loop.done),
+        goal: |state: &State<_>| {
+            state
+                .clients
+                .iter()
+                .all(|(_, context): &(_, C<Record<UncheckedIter<_, _>, _, _>>)| {
+                    context.upcall.workload.done
+                })
+        },
         prune: |_: &_| false,
         max_depth: None,
     };
-    let result = breadth_first::<_, State<_, _>, _, _, _>(
+    let result = breadth_first::<_, State<_>, _, _, _>(
         state.clone(),
         settings.clone(),
         1.try_into().unwrap(),
@@ -159,9 +177,9 @@ fn main() -> anyhow::Result<()> {
     println!("{result:?}");
 
     println!("* Infinite workload searches (with 2 clients)");
-    let mut state = State::new();
-    state.push_client(InfinitePutGet::new("KEY1", &mut thread_rng())?);
-    state.push_client(InfinitePutGet::new("KEY2", &mut thread_rng())?);
+    let mut state = State::new()?;
+    state.push_client(Iter::new(InfinitePutGet::new("KEY1", &mut thread_rng())?))?;
+    state.push_client(Iter::new(InfinitePutGet::new("KEY2", &mut thread_rng())?))?;
     state.init()?;
     let mut settings = Settings {
         invariant: |_: &_| Ok(()),
