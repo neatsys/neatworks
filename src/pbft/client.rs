@@ -47,7 +47,7 @@ impl<A> State<A> {
 }
 
 pub mod events {
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct Resend;
 }
 
@@ -67,7 +67,7 @@ impl<A: Addr, C: Context<A>> OnErasedEvent<Invoke<Bytes>, C> for State<A> {
             op: Payload(op),
             timer: context
                 .schedule()
-                .set(self.config.client_resend_interval, || events::Resend)?,
+                .set(self.config.client_resend_interval, events::Resend)?,
             replies: Default::default(),
         });
         anyhow::ensure!(replaced.is_none());
@@ -172,8 +172,8 @@ pub mod context {
 
         impl<N, U, A: Addr> On<Context<Self, N, U, A>> for Task
         where
-            N: SendMessage<u8, Request<A>> + SendMessage<All, Request<A>>,
-            U: SendEvent<InvokeOk<Bytes>>,
+            N: SendMessage<u8, Request<A>> + SendMessage<All, Request<A>> + 'static,
+            U: SendEvent<InvokeOk<Bytes>> + 'static,
         {
             type Schedule = ScheduleState<State<A>, Context<Self, N, U, A>>;
         }

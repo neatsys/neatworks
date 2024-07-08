@@ -103,12 +103,12 @@ impl<M> ScheduleState<M> {
     }
 }
 
-impl<M> ScheduleEvent<M> for ScheduleState<M> {
-    fn set(
+impl<M: Into<N> + Send + 'static, N> ScheduleEvent<M> for ScheduleState<N> {
+    fn set_internal(
         &mut self,
         period: std::time::Duration,
-        event: impl FnMut() -> M + Send + 'static,
-    ) -> anyhow::Result<super::TimerId> {
+        mut event: impl FnMut() -> M + Send + 'static,
+    ) -> anyhow::Result<TimerId> {
         self.count += 1;
         let id = self.count;
         let sender = self.sender.clone();
@@ -124,7 +124,8 @@ impl<M> ScheduleEvent<M> for ScheduleState<M> {
             }
         })
         .abort_handle();
-        self.events.insert(id, (handle, Box::new(event)));
+        self.events
+            .insert(id, (handle, Box::new(move || event().into())));
         Ok(TimerId(id))
     }
 

@@ -107,16 +107,16 @@ impl<S, A> State<S, A> {
 }
 
 pub mod events {
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct DoViewChange(pub u32);
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct ProgressPrepare(pub u32); // op number
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct ProgressViewChange;
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct StateTransfer(pub u32);
 }
 
@@ -202,11 +202,8 @@ impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<Recv<Request<A>>, C> fo
                 (self.view_num as usize % self.config.num_replica) as u8,
                 request,
             )?;
-            let view_num = self.view_num;
-            self.do_view_change_timer.ensure_set(
-                move || events::DoViewChange(view_num + 1),
-                context.schedule(),
-            )?;
+            self.do_view_change_timer
+                .ensure_set(events::DoViewChange(self.view_num + 1), context.schedule())?;
             return Ok(());
         }
         self.replies.insert(request.client_id, (request.seq, None));
@@ -269,7 +266,7 @@ impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<(Signed<PrePrepare>, Ve
         self.log[op_num as usize].requests.clone_from(&requests);
         self.log[op_num as usize]
             .progress_timer
-            .set(move || events::ProgressPrepare(op_num), context.schedule())?;
+            .set(events::ProgressPrepare(op_num), context.schedule())?;
 
         let digest = pre_prepare.digest;
         context.peer_net().send(All, (pre_prepare, requests))?;
@@ -759,7 +756,7 @@ impl<S: App, A: Addr> State<S, A> {
             for op_num in self.commit_num + 1..=commit.op_num {
                 self.log[op_num as usize]
                     .state_transfer_timer
-                    .ensure_set(move || events::StateTransfer(op_num), context.schedule())?
+                    .ensure_set(events::StateTransfer(op_num), context.schedule())?
             }
         }
         Ok(())
@@ -805,7 +802,7 @@ impl<S: App, A: Addr, C: Context<Self, A>> OnErasedEvent<events::DoViewChange, C
         self.do_view_change_timer.unset(context.schedule())?;
         // anyhow::ensure!(also_view_num == view_num);
         self.progress_view_change_timer
-            .ensure_set(|| events::ProgressViewChange, context.schedule())?;
+            .ensure_set(events::ProgressViewChange, context.schedule())?;
         // self.progress_view_change_timer.reset(timer)?; // not really necessary just feels more correct :)
         self.do_view_change(context)
     }
@@ -1002,11 +999,8 @@ impl<S: App, A: Addr> State<S, A> {
                         context.send(Signed(crypto.sign(new_view)))
                     }))?
             } else {
-                let view_num = self.view_num;
-                self.do_view_change_timer.ensure_set(
-                    move || events::DoViewChange(view_num + 1),
-                    context.schedule(),
-                )?
+                self.do_view_change_timer
+                    .ensure_set(events::DoViewChange(self.view_num + 1), context.schedule())?
             }
         }
         // TODO "shortcut" sending ViewChange of view v after collecting f + 1 ViewChange of view
@@ -1060,10 +1054,10 @@ impl<S: App, A: Addr> State<S, A> {
             // just get ready for anything weird that may (i.e. will) happen during model checking
             log_entry.progress_timer.ensure_unset(context.schedule())?;
             if is_primary {
-                let op_num = pre_prepare.op_num;
-                log_entry
-                    .progress_timer
-                    .set(move || events::ProgressPrepare(op_num), context.schedule())?
+                log_entry.progress_timer.set(
+                    events::ProgressPrepare(pre_prepare.op_num),
+                    context.schedule(),
+                )?
             } else {
                 // println!("[{}] Redo Prepare {}", self.id, pre_prepare.op_num);
                 let prepare = Prepare {
@@ -1239,9 +1233,10 @@ pub mod context {
                 + SendMessage<All, Verifiable<ViewChange>>
                 + SendMessage<All, Verifiable<NewView>>
                 + SendMessage<u8, QueryNewView>
-                + SendMessage<u8, Verifiable<NewView>>,
-            DN: SendMessage<A, Reply>,
-            S: App,
+                + SendMessage<u8, Verifiable<NewView>>
+                + 'static,
+            DN: SendMessage<A, Reply> + 'static,
+            S: App + 'static,
             A: Addr,
         {
             type CryptoWorker = UnboundedSender<UntypedEvent<Crypto, Self::CryptoContext>>;

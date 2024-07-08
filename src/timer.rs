@@ -5,13 +5,13 @@ use derive_where::derive_where;
 use crate::event::{ScheduleEvent, TimerId};
 
 #[derive_where(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Timer<T> {
+pub struct Timer<M> {
     id: Option<TimerId>,
     period: Duration,
-    _m: PhantomData<T>,
+    _m: PhantomData<M>,
 }
 
-impl<T> Timer<T> {
+impl<M> Timer<M> {
     pub fn new(period: Duration) -> Self {
         Self {
             period,
@@ -21,17 +21,16 @@ impl<T> Timer<T> {
     }
 
     // TODO support ScheduleEventFor
-    pub fn set(
-        &mut self,
-        event: impl Fn() -> T + Send + 'static,
-        context: &mut impl ScheduleEvent<T>,
-    ) -> anyhow::Result<()> {
+    pub fn set(&mut self, event: M, context: &mut impl ScheduleEvent<M>) -> anyhow::Result<()>
+    where
+        M: Clone + Send + 'static,
+    {
         let replaced = self.id.replace(context.set(self.period, event)?);
         anyhow::ensure!(replaced.is_none());
         Ok(())
     }
 
-    pub fn unset(&mut self, context: &mut impl ScheduleEvent<T>) -> anyhow::Result<()> {
+    pub fn unset(&mut self, context: &mut impl ScheduleEvent<M>) -> anyhow::Result<()> {
         context.unset(
             self.id
                 .take()
@@ -41,16 +40,19 @@ impl<T> Timer<T> {
 
     pub fn ensure_set(
         &mut self,
-        event: impl Fn() -> T + Send + 'static,
-        context: &mut impl ScheduleEvent<T>,
-    ) -> anyhow::Result<()> {
+        event: M,
+        context: &mut impl ScheduleEvent<M>,
+    ) -> anyhow::Result<()>
+    where
+        M: Clone + Send + 'static,
+    {
         if self.id.is_none() {
             self.set(event, context)?
         }
         Ok(())
     }
 
-    pub fn ensure_unset(&mut self, context: &mut impl ScheduleEvent<T>) -> anyhow::Result<()> {
+    pub fn ensure_unset(&mut self, context: &mut impl ScheduleEvent<M>) -> anyhow::Result<()> {
         if self.id.is_some() {
             self.unset(context)?
         }

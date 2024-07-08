@@ -56,7 +56,7 @@ impl<A> ClientState<A> {
 }
 
 pub mod client {
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct Resend;
 }
 
@@ -76,7 +76,7 @@ impl<A: Addr, C: ClientContext<A>> OnErasedEvent<Invoke<Bytes>, C> for ClientSta
             op: Payload(op),
             timer: context
                 .schedule()
-                .set(Duration::from_millis(100), || client::Resend)?,
+                .set(Duration::from_millis(100), client::Resend)?,
         });
         anyhow::ensure!(replaced.is_none());
         self.send_request(context)
@@ -215,8 +215,8 @@ pub mod context {
 
         impl<N, U, A: Addr> On<Client<Self, N, U, A>> for Context
         where
-            N: SendEvent<Cast<(), Request<A>>>,
-            U: SendEvent<InvokeOk<Bytes>>,
+            N: SendEvent<Cast<(), Request<A>>> + 'static,
+            U: SendEvent<InvokeOk<Bytes>> + 'static,
         {
             type Schedule = ScheduleState<ClientState<A>, Client<Self, N, U, A>>;
         }

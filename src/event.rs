@@ -37,22 +37,36 @@ pub struct Exit;
 pub struct TimerId(pub u32);
 
 pub trait ScheduleEvent<M> {
-    fn set(
+    fn set(&mut self, period: Duration, event: M) -> anyhow::Result<TimerId>
+    where
+        M: Send + Clone + 'static,
+    {
+        self.set_internal(period, move || event.clone())
+    }
+
+    fn set_internal(
         &mut self,
         period: Duration,
-        event: impl Fn() -> M + Send + 'static,
+        event: impl FnMut() -> M + Send + 'static,
     ) -> anyhow::Result<TimerId>;
 
     fn unset(&mut self, id: TimerId) -> anyhow::Result<()>;
 }
 
 impl<T: ScheduleEvent<M>, M> ScheduleEvent<M> for &mut T {
-    fn set(
+    fn set(&mut self, period: Duration, event: M) -> anyhow::Result<TimerId>
+    where
+        M: Clone + Send + 'static,
+    {
+        T::set(self, period, event)
+    }
+
+    fn set_internal(
         &mut self,
         period: Duration,
-        event: impl Fn() -> M + Send + 'static,
+        event: impl FnMut() -> M + Send + 'static,
     ) -> anyhow::Result<TimerId> {
-        T::set(self, period, event)
+        T::set_internal(self, period, event)
     }
 
     fn unset(&mut self, id: TimerId) -> anyhow::Result<()> {
@@ -114,15 +128,19 @@ impl<E: SendEvent<UntypedEvent<S, C>>, S: OnErasedEvent<M, C>, C, M: Send + 'sta
     }
 }
 
-impl<T: ScheduleEvent<UntypedEvent<S, C>>, S: OnErasedEvent<M, C>, C, M: Send + 'static>
-    ScheduleEvent<M> for Erase<S, C, T>
+impl<
+        T: ScheduleEvent<UntypedEvent<S, C>>,
+        S: OnErasedEvent<M, C>,
+        C,
+        M: Clone + Send + 'static,
+    > ScheduleEvent<M> for Erase<S, C, T>
 {
-    fn set(
+    fn set_internal(
         &mut self,
         period: Duration,
-        event: impl Fn() -> M + Send + 'static,
+        mut event: impl FnMut() -> M + Send + 'static,
     ) -> anyhow::Result<TimerId> {
-        self.0.set(period, move || {
+        self.0.set_internal(period, move || {
             let event = event();
             Box::new(move |state, context| state.on_event(event, context))
         })
@@ -163,10 +181,10 @@ impl<E: SendEvent<UntypedEvent<S, C>>, S, C> SendEventFor<S, C> for Erase<S, C, 
 }
 
 pub trait ScheduleEventFor<S, C> {
-    fn set<M: Send + 'static>(
+    fn set<M: Clone + Send + 'static>(
         &mut self,
         period: Duration,
-        event: impl Fn() -> M + Send + 'static,
+        event: M,
     ) -> anyhow::Result<TimerId>
     where
         S: OnErasedEvent<M, C>;
@@ -175,10 +193,10 @@ pub trait ScheduleEventFor<S, C> {
 }
 
 impl<T: ScheduleEvent<UntypedEvent<S, C>>, S, C> ScheduleEventFor<S, C> for Erase<S, C, T> {
-    fn set<M: Send + 'static>(
+    fn set<M: Clone + Send + 'static>(
         &mut self,
         period: Duration,
-        event: impl Fn() -> M + Send + 'static,
+        event: M,
     ) -> anyhow::Result<TimerId>
     where
         S: OnErasedEvent<M, C>,

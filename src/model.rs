@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt::Debug, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, fmt::Debug, time::Duration};
 
 use derive_where::derive_where;
 
@@ -26,12 +26,9 @@ pub struct ScheduleState<M> {
     count: u32,
 }
 
-#[derive(Clone)]
-#[derive_where(Debug, PartialEq, Eq, Hash; M)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct TimerEnvelop<M> {
     id: u32,
-    #[derive_where(skip)]
-    generate: Arc<dyn Fn() -> M + Send>,
     period: Duration,
     event: M,
 }
@@ -43,21 +40,24 @@ impl<M> ScheduleState<M> {
 }
 
 impl<M: Into<N>, N> ScheduleEvent<M> for ScheduleState<N> {
-    fn set(
-        &mut self,
-        period: Duration,
-        event: impl Fn() -> M + Send + 'static,
-    ) -> anyhow::Result<TimerId> {
+    fn set(&mut self, period: Duration, event: M) -> anyhow::Result<TimerId> {
         self.count += 1;
         let id = self.count;
         let envelop = TimerEnvelop {
             id,
-            event: event().into(),
-            generate: Arc::new(move || event().into()),
+            event: event.into(),
             period,
         };
         self.envelops.push(envelop);
         Ok(TimerId(id))
+    }
+
+    fn set_internal(
+        &mut self,
+        _: Duration,
+        _: impl FnMut() -> M + Send + 'static,
+    ) -> anyhow::Result<TimerId> {
+        anyhow::bail!("unimplemented")
     }
 
     fn unset(&mut self, TimerId(id): TimerId) -> anyhow::Result<()> {
