@@ -446,6 +446,7 @@ fn random_depth_first_worker<S, I, G, P>(
         search_finished.2.store(true, SeqCst);
         search_finished.1.notify_all()
     };
+    let mut rng = thread_rng();
     while !search_finished.2.load(SeqCst) {
         num_probe.fetch_add(1, SeqCst);
         let mut state = initial_state.clone();
@@ -453,7 +454,7 @@ fn random_depth_first_worker<S, I, G, P>(
         // TODO check initial state
         for depth in 0.. {
             let events = state.events();
-            let Some(event) = events.choose(&mut thread_rng()).cloned() else {
+            let Some(event) = events.choose(&mut rng).cloned() else {
                 break;
             };
             if let Err(err) = step(&mut state, event.clone()) {

@@ -401,15 +401,23 @@ pub mod model {
         }
     }
 
+    impl<W> Default for State<W> {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl<W> State<W> {
-        pub fn new() -> anyhow::Result<Self> {
+        pub fn new() -> Self {
             let mut network = NetworkState::new();
-            network.register(Addr::Server)?;
-            Ok(Self {
+            network
+                .register(Addr::Server)
+                .expect("server has not been registered");
+            Self {
                 server: ServerState::new(Decode::json(Encode::json(KVStore::new()))),
                 clients: Default::default(),
                 network,
-            })
+            }
         }
     }
 
@@ -425,16 +433,17 @@ pub mod model {
     impl<W: Workload<Op = kvstore::Op, Result = kvstore::Result>>
         State<Decode<kvstore::Result, Encode<kvstore::Op, W>>>
     {
-        pub fn push_client(&mut self, workload: W) -> anyhow::Result<()> {
+        pub fn push_client(&mut self, workload: W) {
             let index = self.clients.len();
             let client = ClientState::new(index as _, Addr::Client(index as _));
-            self.network.register(Addr::Client(index as _))?;
+            self.network
+                .register(Addr::Client(index as _))
+                .expect("client {index} has not been registered");
             let context = ClientLocalContext {
                 upcall: CloseLoop::new(Decode::json(Encode::json(workload)), None),
                 schedule: ScheduleState::new(),
             };
             self.clients.push((client, context));
-            Ok(())
         }
     }
 }

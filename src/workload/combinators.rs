@@ -17,9 +17,9 @@ pub struct Iter<I, R> {
 }
 
 impl<I, R> Iter<I, R> {
-    pub fn new(generate: I) -> Self {
+    pub fn new(generate: impl IntoIterator<IntoIter = I>) -> Self {
         Self {
-            generate,
+            generate: generate.into_iter(),
             expected_result: None,
             done: false,
         }
@@ -86,9 +86,9 @@ pub struct UncheckedIter<I, R> {
 }
 
 impl<I, R> UncheckedIter<I, R> {
-    pub fn new(generate: I) -> Self {
+    pub fn new(generate: impl IntoIterator<IntoIter = I>) -> Self {
         Self {
-            generate,
+            generate: generate.into_iter(),
             done: false,
             _m: Default::default(),
         }

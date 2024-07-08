@@ -21,18 +21,15 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn main() -> anyhow::Result<()> {
     println!("* Single client; Put, Append, Get");
-    let mut state = State::new()?;
-    state.push_client(Iter::new(
-        [
-            (Put(String::from("foo"), String::from("bar")), PutOk),
-            (
-                Append(String::from("foo"), String::from("baz")),
-                AppendResult(String::from("barbaz")),
-            ),
-            (Get(String::from("foo")), GetResult(String::from("barbaz"))),
-        ]
-        .into_iter(),
-    ))?;
+    let mut state = State::new();
+    state.push_client(Iter::new([
+        (Put(String::from("foo"), String::from("bar")), PutOk),
+        (
+            Append(String::from("foo"), String::from("baz")),
+            AppendResult(String::from("barbaz")),
+        ),
+        (Get(String::from("foo")), GetResult(String::from("barbaz"))),
+    ]));
     state.init()?;
 
     type O = kvstore::Op;
@@ -64,14 +61,14 @@ fn main() -> anyhow::Result<()> {
     println!("{result:?}");
 
     println!("* Multi-client different keys");
-    let mut state = State::new()?;
+    let mut state = State::new();
     for i in 0..2 {
         state.push_client(Iter::new((0..3).map(move |x| {
             (
                 Append(format!("KEY-{i}"), x.to_string()),
                 AppendResult((0..=x).map(|x| x.to_string()).collect::<Vec<_>>().concat()),
             )
-        })))?
+        })))
     }
     state.init()?;
 
@@ -99,11 +96,11 @@ fn main() -> anyhow::Result<()> {
     println!("{result:?}");
 
     println!("* Multi-client same key");
-    let mut state = State::new()?;
+    let mut state = State::new();
     for _ in 0..2 {
         state.push_client(Record::new(UncheckedIter::new(
             (0..3).map(move |x| (Append(String::from("foo"), x.to_string()))),
-        )))?
+        )))
     }
     state.init()?;
 
@@ -162,9 +159,9 @@ fn main() -> anyhow::Result<()> {
     println!("{result:?}");
 
     println!("* Infinite workload searches (with 2 clients)");
-    let mut state = State::new()?;
-    state.push_client(Iter::new(InfinitePutGet::new("KEY1", &mut thread_rng())?))?;
-    state.push_client(Iter::new(InfinitePutGet::new("KEY2", &mut thread_rng())?))?;
+    let mut state = State::new();
+    state.push_client(Iter::new(InfinitePutGet::new("KEY1", &mut thread_rng())?));
+    state.push_client(Iter::new(InfinitePutGet::new("KEY2", &mut thread_rng())?));
     state.init()?;
     let mut settings = Settings {
         invariant: |_: &_| Ok(()),
