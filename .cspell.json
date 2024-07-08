@@ -14,6 +14,8 @@
         "consts",
         "endianness",
         "Hasher",
+        "Jemalloc",
+        "jemallocator",
         "keypair",
         "kvstore",
         "linearizable",
@@ -30,6 +32,7 @@
         "Secp256k1",
         "seedable",
         "serde",
+        "tikv",
         "unreplicated",
         "upcall",
         "upcalls"

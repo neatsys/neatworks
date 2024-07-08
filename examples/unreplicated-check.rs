@@ -16,6 +16,9 @@ use neatworks::{
 };
 use rand::thread_rng;
 
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 fn main() -> anyhow::Result<()> {
     println!("* Single client; Put, Append, Get");
     let mut state = State::new()?;
