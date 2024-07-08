@@ -24,7 +24,7 @@ use super::State;
 
 fn step<S: State>(state: &mut S, event: S::Event) -> anyhow::Result<()> {
     // TODO revise whether this panic safety reasoning is correct
-    catch_unwind(AssertUnwindSafe(|| state.step(event)))
+    catch_unwind(AssertUnwindSafe(|| state.send(event)))
         .map_err(error_from_panic)
         .and_then(identity)?;
     state.fix()

@@ -253,7 +253,7 @@ pub mod model {
     use derive_more::From;
 
     use crate::{
-        model::{NetworkState, State as _, TimerState},
+        model::{NetworkState, ScheduleState, State as _},
         workload::{
             app::{
                 combinators::Typed,
@@ -300,13 +300,13 @@ pub mod model {
     #[derive(Debug, Clone)]
     pub struct ClientLocalContext<W> {
         pub upcall: CloseLoop<W, Option<Invoke<Bytes>>>,
-        schedule: TimerState<Timer>,
+        schedule: ScheduleState<Timer>,
     }
 
     struct ClientContextCarrier;
 
     impl<'a, W> super::context::On<ClientContext<'a, W>> for ClientContextCarrier {
-        type Schedule = &'a mut TimerState<Timer>;
+        type Schedule = &'a mut ScheduleState<Timer>;
     }
 
     type ClientContext<'a, W> = super::context::Client<
@@ -335,6 +335,23 @@ pub mod model {
         Timer(u8, Timer),
     }
 
+    impl<W: Workload<Op = Bytes, Result = Bytes>> SendEvent<Event> for State<W> {
+        fn send(&mut self, event: Event) -> anyhow::Result<()> {
+            match event {
+                Event::Message(Addr::Client(index), Message::Reply(message)) => {
+                    self.on_client_event(index, Recv(message))
+                }
+                Event::Message(Addr::Server, Message::Request(message)) => {
+                    self.server.on_event(Recv(message), &mut self.network)
+                }
+                Event::Timer(index, Timer::ClientResend) => {
+                    self.on_client_event(index, client::Resend)
+                }
+                _ => anyhow::bail!("unexpected event {event:?}"),
+            }
+        }
+    }
+
     impl<W: Workload<Op = Bytes, Result = Bytes>> crate::model::State for State<W> {
         type Event = Event;
 
@@ -349,21 +366,6 @@ pub mod model {
             self.network
                 .generate_events(|addr, message| events.push(Event::Message(addr, message)));
             events
-        }
-
-        fn step(&mut self, event: Self::Event) -> anyhow::Result<()> {
-            match event {
-                Event::Message(Addr::Client(index), Message::Reply(message)) => {
-                    self.on_client_event(index, Recv(message))
-                }
-                Event::Message(Addr::Server, Message::Request(message)) => {
-                    self.server.on_event(Recv(message), &mut self.network)
-                }
-                Event::Timer(index, Timer::ClientResend) => {
-                    self.on_client_event(index, client::Resend)
-                }
-                _ => anyhow::bail!("unexpected event {event:?}"),
-            }
         }
 
         fn fix(&mut self) -> anyhow::Result<()> {
@@ -412,7 +414,7 @@ pub mod model {
             let client = ClientState::new(index as _, Addr::Client(index as _));
             let context = ClientLocalContext {
                 upcall: CloseLoop::new(workload, None),
-                schedule: TimerState::new(),
+                schedule: ScheduleState::new(),
             };
             self.clients.push((client, context));
         }

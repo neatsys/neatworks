@@ -9,12 +9,10 @@ use crate::{
 
 pub mod search;
 
-pub trait State {
+pub trait State: SendEvent<Self::Event> {
     type Event;
 
     fn events(&self) -> Vec<Self::Event>;
-
-    fn step(&mut self, event: Self::Event) -> anyhow::Result<()>;
 
     fn fix(&mut self) -> anyhow::Result<()> {
         Ok(())
@@ -23,7 +21,7 @@ pub trait State {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[derive_where(Default)]
-pub struct TimerState<M> {
+pub struct ScheduleState<M> {
     envelops: Vec<TimerEnvelop<M>>,
     count: u32,
 }
@@ -38,13 +36,13 @@ struct TimerEnvelop<M> {
     event: M,
 }
 
-impl<M> TimerState<M> {
+impl<M> ScheduleState<M> {
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-impl<M: Into<N>, N> ScheduleEvent<M> for TimerState<N> {
+impl<M: Into<N>, N> ScheduleEvent<M> for ScheduleState<N> {
     fn set(
         &mut self,
         period: Duration,
@@ -71,7 +69,7 @@ impl<M: Into<N>, N> ScheduleEvent<M> for TimerState<N> {
     }
 }
 
-impl<M: Clone> TimerState<M> {
+impl<M: Clone> ScheduleState<M> {
     pub fn generate_events(&self, mut on_event: impl FnMut(M)) {
         let mut limit = Duration::MAX;
         for envelop in &self.envelops {
@@ -81,6 +79,10 @@ impl<M: Clone> TimerState<M> {
             on_event(envelop.event.clone());
             limit = envelop.period;
         }
+    }
+
+    pub fn tick(&mut self, event: M) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 
