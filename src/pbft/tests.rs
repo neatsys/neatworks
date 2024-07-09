@@ -1,5 +1,3 @@
-use std::marker::PhantomData;
-
 use bytes::Bytes;
 use derive_more::From;
 use derive_where::derive_where;
@@ -8,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     crypto::{Crypto, Verifiable},
     event::{
-        combinators::{work::Inline, Transient},
+        combinators::{Inline, Transient},
         Erase, UntypedEvent,
     },
     model::{NetworkState, ScheduleState},
@@ -86,6 +84,8 @@ pub struct State<W> {
     pub replicas: Vec<(ReplicaState, ReplicaLocalContext)>,
 }
 
+type ReplicaState = replica::State<kvstore::App, Addr>;
+
 #[derive(Debug, Clone)]
 #[derive_where(PartialEq, Eq, Hash)]
 pub struct ClientLocalContext<W> {
@@ -94,7 +94,18 @@ pub struct ClientLocalContext<W> {
     schedule: ScheduleState<Timer>,
 }
 
-type ReplicaState = replica::State<kvstore::App, Addr>;
+struct ClientContextCarrier;
+
+impl<'a, W> client::context::On<ClientContext<'a, W>> for ClientContextCarrier {
+    type Schedule = &'a mut ScheduleState<Timer>;
+}
+
+type ClientContext<'a, W> = client::context::Context<
+    ClientContextCarrier,
+    &'a mut NetworkState<Addr, Message>,
+    &'a mut CloseLoop<W, Option<Invoke<Bytes>>>,
+    Addr,
+>;
 
 #[derive(Debug, Clone)]
 #[derive_where(PartialEq, Eq, Hash)]
@@ -105,16 +116,20 @@ pub struct ReplicaLocalContext {
 }
 
 #[derive(Debug)]
-pub struct ReplicaContextCarrier<'a>(PhantomData<&'a ()>);
+pub struct ReplicaContextCarrier;
 
-impl<'a, C: 'static> replica::context::On<C, ReplicaState> for ReplicaContextCarrier<'a> {
-    type CryptoWorker = Inline<'a, Crypto, Self::CryptoContext>;
-    type CryptoContext = Erase<ReplicaState, C, Transient<UntypedEvent<ReplicaState, C>>>;
-    type Schedule = ScheduleState<Timer>;
+impl<'a> replica::context::On<ReplicaContext<'a>, ReplicaState> for ReplicaContextCarrier {
+    type CryptoWorker = Inline<&'a mut Crypto, &'a mut Self::CryptoContext>;
+    type CryptoContext = Erase<
+        ReplicaState,
+        ReplicaContext<'a>,
+        Transient<UntypedEvent<ReplicaState, ReplicaContext<'a>>>,
+    >;
+    type Schedule = &'a mut ScheduleState<Timer>;
 }
 
 pub type ReplicaContext<'a> = replica::context::Context<
-    ReplicaContextCarrier<'a>,
+    ReplicaContextCarrier,
     &'a mut NetworkState<Addr, Message>,
     &'a mut NetworkState<Addr, Message>,
     ReplicaState,
