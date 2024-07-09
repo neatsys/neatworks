@@ -1157,6 +1157,7 @@ pub mod context {
 
     use super::*;
 
+    #[derive(Debug)]
     pub struct Context<O: On<Self, S>, PN, DN, S> {
         pub peer_net: PN,
         pub downlink_net: DN,
@@ -1211,7 +1212,7 @@ pub mod context {
         use crate::event::{
             task::{
                 erase::{ScheduleState, Sender},
-                Context as Task,
+                ContextCarrier as Task,
             },
             UntypedEvent,
         };

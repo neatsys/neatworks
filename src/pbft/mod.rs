@@ -3,6 +3,8 @@ use std::time::Duration;
 pub mod client;
 pub mod messages;
 pub mod replica;
+#[cfg(test)]
+pub mod tests;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PublicParameters {
@@ -31,8 +33,8 @@ impl PublicParameters {
             // primary to continue trying
             view_change_delay: client_resend_interval / 2,
             // for periodically resending ViewChange after `DoViewChange` is alarmed
-            // it is ok this is shorter than `ProgressPrepared`, as this is not enabled before
-            // `DoViewChange` timeout, which is longer than `ProgressPrepared`
+            // it is ok this is shorter than `ProgressPrepare`, as this is not enabled before
+            // `DoViewChange` timeout, which is longer than `ProgressPrepare`
             progress_view_change_interval: client_resend_interval / 10,
             state_transfer_delay: client_resend_interval * 10, // TODO
 

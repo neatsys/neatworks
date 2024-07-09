@@ -6,9 +6,15 @@ use super::{OnEvent, SendEvent};
 #[derive(Debug)]
 pub struct Inline<S, C>(pub S, pub C);
 
-impl<S: OnEvent<C>, C> SendEvent<S::Event> for Inline<S, C> {
+// impl<S: OnEvent<C>, C> SendEvent<S::Event> for Inline<S, C> {
+//     fn send(&mut self, event: S::Event) -> anyhow::Result<()> {
+//         self.0.on_event(event, &mut self.1)
+//     }
+// }
+
+impl<S: OnEvent<C>, C> SendEvent<S::Event> for Inline<&'_ mut S, &'_ mut C> {
     fn send(&mut self, event: S::Event) -> anyhow::Result<()> {
-        self.0.on_event(event, &mut self.1)
+        self.0.on_event(event, self.1)
     }
 }
 
@@ -48,13 +54,25 @@ impl<F: FnMut(M) -> N, M, N, E: SendEvent<N>> SendEvent<M> for Map<F, E> {
 }
 
 pub mod work {
-    use crate::event::Untyped;
+    use crate::event::{OnEvent as _, Submit, Untyped, UntypedEvent};
 
-    pub type Inline<S, C> = super::Inline<Untyped<C, S>, C>;
+    pub type Inline<'a, S, C> = super::Inline<Untyped<&'a mut C, &'a mut S>, &'a mut C>;
 
-    impl<S, C> Inline<S, C> {
-        pub fn new_worker(state: S, context: C) -> Self {
+    impl<'a, S, C> Inline<'a, S, C> {
+        pub fn new_worker(state: &'a mut S, context: &'a mut C) -> Self {
             Self(Untyped::new(state), context)
+        }
+    }
+
+    // fix to 'static because UntypedEvent takes a Box<_ + 'static>
+    // it is possible for UntypedEvent to be `struct UntypedEvent<'a>(Box<_ + 'a>)` but that is too
+    // overly engineered
+    impl<'a, S: 'static, C: 'static> Submit<S, C> for Inline<'a, S, C> {
+        fn submit(&mut self, work: crate::event::Work<S, C>) -> anyhow::Result<()> {
+            self.0.on_event(
+                UntypedEvent(Box::new(move |state, context| work(*state, *context))),
+                &mut self.1,
+            )
         }
     }
 }
@@ -67,7 +85,9 @@ mod tests {
 
     #[test]
     fn inline_worker() -> anyhow::Result<()> {
-        let mut inline = Inline::new_worker(1, 0);
+        let mut state = 1;
+        let mut context = 0;
+        let mut inline = Inline::new_worker(&mut state, &mut context);
         for _ in 0..10 {
             inline.submit(Box::new(move |state, context| {
                 let old_state = *state;
@@ -76,7 +96,7 @@ mod tests {
                 anyhow::Ok(())
             }))?
         }
-        anyhow::ensure!(inline.1 == 55);
+        anyhow::ensure!(context == 55);
         Ok(())
     }
 }

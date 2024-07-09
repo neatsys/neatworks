@@ -26,8 +26,7 @@ fn step<S: State>(state: &mut S, event: S::Event) -> anyhow::Result<()> {
     // TODO revise whether this panic safety reasoning is correct
     catch_unwind(AssertUnwindSafe(|| state.send(event)))
         .map_err(error_from_panic)
-        .and_then(identity)?;
-    state.fix()
+        .and_then(identity)
 }
 
 #[derive(Debug, Clone)]

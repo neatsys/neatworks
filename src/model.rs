@@ -17,10 +17,6 @@ pub trait State: SendEvent<Self::Event> {
     type Event;
 
     fn events(&self) -> Vec<Self::Event>;
-
-    fn fix(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

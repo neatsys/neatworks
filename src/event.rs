@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, time::Duration};
+use std::{any::type_name, fmt::Debug, marker::PhantomData, time::Duration};
 
 use derive_more::{Deref, DerefMut, Display, Error};
 use derive_where::derive_where;
@@ -74,7 +74,7 @@ impl<T: ScheduleEvent<M>, M> ScheduleEvent<M> for &mut T {
     }
 }
 
-#[derive_where(Debug; S)]
+#[derive_where(Debug, Clone; S)]
 #[derive(Deref, DerefMut)]
 pub struct Untyped<C, S>(
     #[deref]
@@ -89,12 +89,23 @@ impl<C, S> Untyped<C, S> {
     }
 }
 
-pub type UntypedEvent<S, C> = Box<dyn FnOnce(&mut S, &mut C) -> anyhow::Result<()> + Send>;
+#[allow(clippy::type_complexity)]
+pub struct UntypedEvent<S, C>(Box<dyn FnOnce(&mut S, &mut C) -> anyhow::Result<()> + Send>);
+
+impl<S, C> Debug for UntypedEvent<S, C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}(_)", type_name::<Self>())
+    }
+}
 
 impl<S, C> OnEvent<C> for Untyped<C, S> {
     type Event = UntypedEvent<S, C>;
 
-    fn on_event(&mut self, event: Self::Event, context: &mut C) -> anyhow::Result<()> {
+    fn on_event(
+        &mut self,
+        UntypedEvent(event): Self::Event,
+        context: &mut C,
+    ) -> anyhow::Result<()> {
         event(&mut self.0, context)
     }
 }
@@ -103,7 +114,7 @@ pub trait OnErasedEvent<M, C> {
     fn on_event(&mut self, event: M, context: &mut C) -> anyhow::Result<()>;
 }
 
-#[derive_where(Debug, Clone; E)]
+#[derive_where(Debug, Clone, Default; E)]
 #[derive(Deref, DerefMut)]
 pub struct Erase<S, C, E>(
     #[deref]
@@ -122,9 +133,9 @@ impl<E: SendEvent<UntypedEvent<S, C>>, S: OnErasedEvent<M, C>, C, M: Send + 'sta
     for Erase<S, C, E>
 {
     fn send(&mut self, event: M) -> anyhow::Result<()> {
-        self.0.send(Box::new(move |state, context| {
+        self.0.send(UntypedEvent(Box::new(move |state, context| {
             state.on_event(event, context)
-        }))
+        })))
     }
 }
 
@@ -142,7 +153,9 @@ impl<
     ) -> anyhow::Result<TimerId> {
         self.0.set_internal(period, move || {
             let event = event();
-            Box::new(move |state, context| state.on_event(event, context))
+            UntypedEvent(Box::new(move |state, context| {
+                state.on_event(event, context)
+            }))
         })
     }
 
@@ -151,19 +164,19 @@ impl<
     }
 }
 
-pub type Work<S, C> = UntypedEvent<S, C>;
+pub type Work<S, C> = Box<dyn FnOnce(&mut S, &mut C) -> anyhow::Result<()> + Send>;
 
 pub trait Submit<S, C> {
     // the ergonomics here breaks some, so hold on it
-    // fn submit(&mut self, work: impl Into<Event<S, C>>) -> anyhow::Result<()>;
+    // fn submit(&mut self, work: impl Into<Work<S, C>>) -> anyhow::Result<()>;
     fn submit(&mut self, work: Work<S, C>) -> anyhow::Result<()>;
 }
 
-impl<E: SendEvent<Work<S, C>>, S, C> Submit<S, C> for E {
-    fn submit(&mut self, work: Work<S, C>) -> anyhow::Result<()> {
-        self.send(work)
-    }
-}
+// impl<E: SendEvent<UntypedEvent<S, C>>, S, C> Submit<S, C> for E {
+//     fn submit(&mut self, work: Work<S, C>) -> anyhow::Result<()> {
+//         self.send(UntypedEvent(work))
+//     }
+// }
 
 pub trait SendEventFor<S, C> {
     fn send<M: Send + 'static>(&mut self, event: M) -> anyhow::Result<()>

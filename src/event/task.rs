@@ -8,7 +8,7 @@ use tokio::{
     time::interval,
 };
 
-use super::{OnEvent, ScheduleEvent, SendEvent, TimerId, Work};
+use super::{OnEvent, ScheduleEvent, SendEvent, Submit, TimerId, UntypedEvent};
 
 pub mod erase {
     use crate::event::{Erase, UntypedEvent};
@@ -67,12 +67,18 @@ pub mod erase {
 // to be generic over state (or anything). the (becoming unnecessary)
 // PhantomData<_> is saved to continue preventing `Context` value being
 // constructed, which is still desired despiting the workaround
-pub struct Context(PhantomData<()>);
+pub struct ContextCarrier(PhantomData<()>);
 
 impl<M: Into<N>, N> SendEvent<M> for UnboundedSender<N> {
     fn send(&mut self, event: M) -> anyhow::Result<()> {
         UnboundedSender::send(self, event.into())
             .map_err(|_| anyhow::format_err!("unexpected send channel closed"))
+    }
+}
+
+impl<S, C> Submit<S, C> for UnboundedSender<UntypedEvent<S, C>> {
+    fn submit(&mut self, work: super::Work<S, C>) -> anyhow::Result<()> {
+        SendEvent::send(self, UntypedEvent(work))
     }
 }
 
@@ -184,7 +190,7 @@ pub async fn run<M, C>(
 pub async fn run_worker<S: Clone + Send + 'static, C: Clone + Send + 'static>(
     state: S,
     context: C,
-    receiver: &mut UnboundedReceiver<Work<S, C>>,
+    receiver: &mut UnboundedReceiver<UntypedEvent<S, C>>,
 ) -> anyhow::Result<()> {
     let mut tasks = JoinSet::new();
     loop {
@@ -196,7 +202,7 @@ pub async fn run_worker<S: Clone + Send + 'static, C: Clone + Send + 'static>(
             recv = must_recv(receiver) => Select::Recv(recv?),
             Some(result) = tasks.join_next() => Select::JoinNext(result??)
         } {
-            Select::Recv(event) => {
+            Select::Recv(UntypedEvent(event)) => {
                 let mut state = state.clone();
                 let mut context = context.clone();
                 tasks.spawn(async move { event(&mut state, &mut context) });

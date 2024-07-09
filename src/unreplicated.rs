@@ -209,11 +209,11 @@ pub mod context {
     }
 
     mod task {
-        use crate::event::task::{erase::ScheduleState, Context};
+        use crate::event::task::{erase::ScheduleState, ContextCarrier};
 
         use super::*;
 
-        impl<N, U, A: Addr> On<Client<Self, N, U, A>> for Context
+        impl<N, U, A: Addr> On<Client<Self, N, U, A>> for ContextCarrier
         where
             N: SendEvent<Cast<(), Request<A>>> + 'static,
             U: SendEvent<InvokeOk<Bytes>> + 'static,
@@ -255,7 +255,7 @@ pub mod model {
 
     use crate::{
         codec::{Decode, Encode},
-        model::{NetworkState, ScheduleState, State as _},
+        model::{NetworkState, ScheduleState},
         workload::{
             app::kvstore::{self, KVStore},
             CloseLoop, Workload,
@@ -300,6 +300,10 @@ pub mod model {
     #[derive(Debug, Clone)]
     #[derive_where(PartialEq, Eq, Hash)]
     pub struct ClientLocalContext<W> {
+        // it is possible to only skip the workload `W` inside CloseLoop
+        // but the `E` part (i.e. the `Option<_>`) is expected to be always None whenever Eq and
+        // Hash are leveraged, so it's mostly pointless to get it involved
+        // also try to keep the rationale local, not affect the CloseLoop side
         #[derive_where(skip)]
         pub upcall: CloseLoop<W, Option<Invoke<Bytes>>>,
         schedule: ScheduleState<Timer>,
@@ -365,7 +369,32 @@ pub mod model {
                     self.server.on_event(Recv(message), &mut self.network)
                 }
                 _ => anyhow::bail!("unexpected event {event:?}"),
+            }?;
+            self.fix()
+        }
+    }
+
+    impl<W: Workload<Op = Bytes, Result = Bytes>> State<W> {
+        pub fn init(&mut self) -> anyhow::Result<()> {
+            for (_, context) in &mut self.clients {
+                context.upcall.init()?
             }
+            self.fix()
+        }
+
+        fn fix(&mut self) -> anyhow::Result<()> {
+            for (client, context) in &mut self.clients {
+                if let Some(invoke) = context.upcall.sender.take() {
+                    let mut context = ClientContext {
+                        net: &mut self.network,
+                        upcall: &mut context.upcall,
+                        schedule: &mut context.schedule,
+                        _m: Default::default(),
+                    };
+                    client.on_event(invoke, &mut context)?
+                }
+            }
+            Ok(())
         }
     }
 
@@ -383,21 +412,6 @@ pub mod model {
             self.network
                 .generate_events(|addr, message| events.push(Event::Message(addr, message)));
             events
-        }
-
-        fn fix(&mut self) -> anyhow::Result<()> {
-            for (client, context) in &mut self.clients {
-                if let Some(invoke) = context.upcall.sender.take() {
-                    let mut context = ClientContext {
-                        net: &mut self.network,
-                        upcall: &mut context.upcall,
-                        schedule: &mut context.schedule,
-                        _m: Default::default(),
-                    };
-                    client.on_event(invoke, &mut context)?
-                }
-            }
-            Ok(())
         }
     }
 
@@ -418,15 +432,6 @@ pub mod model {
                 clients: Default::default(),
                 network,
             }
-        }
-    }
-
-    impl<W: Workload<Op = Bytes, Result = Bytes>> State<W> {
-        pub fn init(&mut self) -> anyhow::Result<()> {
-            for (_, context) in &mut self.clients {
-                context.upcall.init()?
-            }
-            self.fix()
         }
     }
 

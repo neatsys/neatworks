@@ -3,7 +3,7 @@ use std::{future::Future, net::SocketAddr, sync::Arc};
 use bytes::Bytes;
 use neatworks::{
     event::{
-        task::{run_with_schedule, Context, ScheduleState},
+        task::{run_with_schedule, ContextCarrier, ScheduleState},
         Erase, SendEvent, Untyped,
     },
     net::{
@@ -43,7 +43,7 @@ pub async fn unreplicated(invoke_task: impl InvokeTask) -> anyhow::Result<()> {
         unreplicated::codec::client_decode(Erase::new(sender.clone())),
     );
 
-    let mut context = unreplicated::context::Client::<Context, _, _, _> {
+    let mut context = unreplicated::context::Client::<ContextCarrier, _, _, _> {
         net: unreplicated::codec::client_encode(Forward(
             ([127, 0, 0, 1], 3000).into(),
             socket.clone(),
@@ -88,7 +88,7 @@ pub async fn pbft(
         pbft::messages::codec::to_client_decode(Erase::new(sender.clone())),
     );
 
-    let mut context = pbft::client::context::Context::<Context, _, _, _> {
+    let mut context = pbft::client::context::Context::<ContextCarrier, _, _, _> {
         net: pbft::messages::codec::to_replica_encode(IndexNet::new(
             replica_addrs,
             None,

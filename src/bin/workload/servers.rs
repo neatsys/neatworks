@@ -3,7 +3,7 @@ use std::{net::SocketAddr, sync::Arc};
 use neatworks::{
     crypto::{Crypto, CryptoFlavor},
     event::{
-        task::{run, run_with_schedule, run_worker, Context, ScheduleState},
+        task::{run, run_with_schedule, run_worker, ContextCarrier, ScheduleState},
         Erase, Untyped,
     },
     net::{combinators::IndexNet, task::udp},
@@ -46,7 +46,7 @@ pub async fn pbft(
     let (schedule_sender, mut schedule_receiver) = unbounded_channel();
     let (sender, mut receiver) = unbounded_channel();
 
-    let mut context = pbft::replica::context::Context::<Context, _, _, _> {
+    let mut context = pbft::replica::context::Context::<ContextCarrier, _, _, _> {
         peer_net: pbft::messages::codec::to_replica_encode(IndexNet::new(
             addrs,
             index,

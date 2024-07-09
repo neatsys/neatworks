@@ -166,7 +166,7 @@ pub mod context {
     }
 
     mod task {
-        use crate::event::task::{erase::ScheduleState, Context as Task};
+        use crate::event::task::{erase::ScheduleState, ContextCarrier as Task};
 
         use super::*;
 
