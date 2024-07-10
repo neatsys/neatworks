@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Debug,
+    iter::repeat,
     time::Duration,
 };
 
@@ -16,8 +17,23 @@ pub mod search;
 pub trait State: SendEvent<Self::Event> {
     type Event;
 
-    fn events(&self) -> Vec<Self::Event>;
+    fn events(&self) -> impl Iterator<Item = Self::Event> + '_;
 }
+
+// the alternative `State` interface
+//   trait State = OnEvent<C> where C: Context<Self::Event>
+pub trait Context<M> {
+    fn register(&mut self, event: M) -> anyhow::Result<()>;
+}
+// the custom `events` method can be removed then, results in more compact
+// interface
+//
+// the downside of this alternation
+// * bootstrapping. the every first event(s) that applied to the initial state
+//   is hard to be provided
+// * it doesn't fit the current searching workflows. it may be possible to
+//   adjust the workflows to maintain a buffer of not yet applied events, but
+//   in my opinion that complicates things
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[derive_where(Default)]
@@ -82,15 +98,15 @@ impl<M> ScheduleState<M> {
 }
 
 impl<M: Clone> ScheduleState<M> {
-    pub fn generate_events(&self, mut on_event: impl FnMut(TimerId, M)) {
+    pub fn events(&self) -> impl Iterator<Item = (TimerId, M)> + '_ {
         let mut limit = Duration::MAX;
-        for envelop in &self.envelops {
+        self.envelops.iter().map_while(move |envelop| {
             if envelop.period >= limit {
-                break;
+                return None;
             }
-            on_event(TimerId(envelop.id), envelop.event.clone());
             limit = envelop.period;
-        }
+            Some((TimerId(envelop.id), envelop.event.clone()))
+        })
     }
 }
 
@@ -125,11 +141,9 @@ impl<A: Ord, M> NetworkState<A, M> {
 }
 
 impl<A: Clone, M: Clone> NetworkState<A, M> {
-    pub fn generate_events(&self, mut on_event: impl FnMut(A, M)) {
-        for (addr, inbox) in &self.messages {
-            for message in inbox {
-                on_event(addr.clone(), message.clone())
-            }
-        }
+    pub fn events(&self) -> impl Iterator<Item = (A, M)> + '_ {
+        self.messages
+            .iter()
+            .flat_map(|(addr, inbox)| repeat(addr.clone()).zip(inbox.iter().cloned()))
     }
 }

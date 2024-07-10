@@ -15,7 +15,7 @@ use std::{
 
 use crossbeam_queue::SegQueue;
 use derive_where::derive_where;
-use rand::{seq::SliceRandom, thread_rng};
+use rand::{seq::IteratorRandom as _, thread_rng};
 use rustc_hash::FxHasher;
 use scc::HashMap;
 
@@ -452,8 +452,7 @@ fn random_depth_first_worker<S, I, G, P>(
         let mut trace = Vec::new();
         // TODO check initial state
         for depth in 0.. {
-            let events = state.events();
-            let Some(event) = events.choose(&mut rng).cloned() else {
+            let Some(event) = state.events().choose(&mut rng).clone() else {
                 break;
             };
             if let Err(err) = step(&mut state, event.clone()) {

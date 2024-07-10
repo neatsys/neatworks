@@ -401,17 +401,22 @@ pub mod model {
     impl<W: Workload<Op = Bytes, Result = Bytes>> crate::model::State for State<W> {
         type Event = Event;
 
-        fn events(&self) -> Vec<Self::Event> {
-            let mut events = Vec::new();
-            for (index, (_, context)) in self.clients.iter().enumerate() {
-                assert!(context.upcall.sender.is_none());
-                context
-                    .schedule
-                    .generate_events(|id, event| events.push(Event::Timer(index as _, id, event)))
-            }
+        fn events(&self) -> impl Iterator<Item = Self::Event> + '_ {
+            let timers = self
+                .clients
+                .iter()
+                .enumerate()
+                .flat_map(|(index, (_, context))| {
+                    assert!(context.upcall.sender.is_none());
+                    context
+                        .schedule
+                        .events()
+                        .map(move |(id, event)| Event::Timer(index as _, id, event))
+                });
             self.network
-                .generate_events(|addr, message| events.push(Event::Message(addr, message)));
-            events
+                .events()
+                .map(|(addr, message)| Event::Message(addr, message))
+                .chain(timers)
         }
     }
 
