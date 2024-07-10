@@ -90,7 +90,7 @@ impl<C, S> Untyped<C, S> {
 }
 
 #[allow(clippy::type_complexity)]
-pub struct UntypedEvent<S, C>(Box<dyn FnOnce(&mut S, &mut C) -> anyhow::Result<()> + Send>);
+pub struct UntypedEvent<S, C>(pub Box<dyn FnOnce(&mut S, &mut C) -> anyhow::Result<()> + Send>);
 
 impl<S, C> Debug for UntypedEvent<S, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

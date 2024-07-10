@@ -57,6 +57,13 @@ impl<M: Into<N>, N> SendEvent<M> for Transient<N> {
     }
 }
 
+impl<S, C> Submit<S, C> for Transient<super::Work<S, C>> {
+    fn submit(&mut self, work: super::Work<S, C>) -> anyhow::Result<()> {
+        self.push(work);
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub struct Map<F, E>(pub F, pub E);
 
