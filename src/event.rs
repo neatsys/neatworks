@@ -129,6 +129,14 @@ impl<S, C, E> Erase<S, C, E> {
     }
 }
 
+// something i really want
+//   type EraseOf<T> = type<S, C> Erase<S, C, T<S, C>>
+// Rust does not have (real) higher rank types, either on parameter or on return
+// position. the probably only way to simulate is through macros, but i don't
+// think that worth
+// so i will just repeat this type alias pattern for various `T`s everywhere in
+// the codebase
+
 impl<E: SendEvent<UntypedEvent<S, C>>, S: OnErasedEvent<M, C>, C, M: Send + 'static> SendEvent<M>
     for Erase<S, C, E>
 {

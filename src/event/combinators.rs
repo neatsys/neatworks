@@ -3,6 +3,12 @@ use derive_where::derive_where;
 
 use super::{OnEvent, SendEvent, Submit};
 
+pub mod erase {
+    use crate::event::{Erase, UntypedEvent};
+
+    pub type Transient<S, C> = Erase<S, C, super::Transient<UntypedEvent<S, C>>>;
+}
+
 // the alternative definition would be Inline<'a, S, C>(&'a mut S, &'a mut C)
 // (or two distinct lifetimes if preferred)
 // there may be some benefits by not fixing the inners to references in the

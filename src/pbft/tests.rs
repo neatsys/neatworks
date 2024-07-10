@@ -80,8 +80,8 @@ impl From<replica::events::StateTransfer> for Timer {
 
 #[derive(Debug)]
 pub struct State<W> {
-    pub clients: Vec<(client::State<Addr>, ClientLocalContext<W>)>,
-    pub replicas: Vec<(ReplicaState, ReplicaLocalContext)>,
+    pub clients: Vec<(client::State<Addr>, ClientContextState<W>)>,
+    pub replicas: Vec<(ReplicaState, ReplicaContextState)>,
     network: NetworkState<Addr, Message>,
 }
 
@@ -89,7 +89,7 @@ type ReplicaState = replica::State<kvstore::App, Addr>;
 
 #[derive(Debug, Clone)]
 #[derive_where(PartialEq, Eq, Hash)]
-pub struct ClientLocalContext<W> {
+pub struct ClientContextState<W> {
     #[derive_where(skip)]
     pub upcall: CloseLoop<W, Option<Invoke<Bytes>>>,
     schedule: ScheduleState<Timer>,
@@ -110,7 +110,7 @@ type ClientContext<'a, W> = client::context::Context<
 
 #[derive(Debug, Clone)]
 #[derive_where(PartialEq, Eq, Hash)]
-pub struct ReplicaLocalContext {
+pub struct ReplicaContextState {
     #[derive_where(skip)]
     crypto: Crypto,
     schedule: ScheduleState<Timer>,
@@ -121,11 +121,8 @@ pub struct ReplicaContextCarrier;
 
 impl<'a> replica::context::On<ReplicaContext<'a, Self>, ReplicaState> for ReplicaContextCarrier {
     type CryptoWorker = Transient<Work<Crypto, Self::CryptoContext>>;
-    type CryptoContext = Erase<
-        ReplicaState,
-        ReplicaContext<'a, Self>,
-        Transient<UntypedEvent<ReplicaState, ReplicaContext<'a, Self>>>,
-    >;
+    type CryptoContext =
+        crate::event::combinators::erase::Transient<ReplicaState, ReplicaContext<'a, Self>>;
     type Schedule = ScheduleState<Timer>;
 }
 
@@ -307,6 +304,8 @@ impl<W: Workload<Op = Bytes, Result = Bytes>> State<W> {
             // probably unavoidable but two is very likely redundant
             // that said, these are test code, should not go too paranoid on the principles (and
             // performance)...
+            // (that said, i will tried, but eventually denied by lifetimes. well that i would
+            // accept to not fight against)
             let mut sender = Erase::new(Transient::new());
             work(context.crypto, &mut sender)?;
             for UntypedEvent(event) in sender.drain(..) {

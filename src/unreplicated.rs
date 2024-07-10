@@ -292,14 +292,14 @@ pub mod model {
     #[derive(Debug, Clone)]
     #[derive_where(PartialEq, Eq, Hash)]
     pub struct State<W> {
-        pub clients: Vec<(ClientState<Addr>, ClientLocalContext<W>)>,
+        pub clients: Vec<(ClientState<Addr>, ClientContextState<W>)>,
         server: ServerState<kvstore::App>,
         network: NetworkState<Addr, Message>,
     }
 
     #[derive(Debug, Clone)]
     #[derive_where(PartialEq, Eq, Hash)]
-    pub struct ClientLocalContext<W> {
+    pub struct ClientContextState<W> {
         // it is possible to only skip the workload `W` inside CloseLoop
         // but the `E` part (i.e. the `Option<_>`) is expected to be always None whenever Eq and
         // Hash are leveraged, so it's mostly pointless to get it involved
@@ -444,7 +444,7 @@ pub mod model {
             self.network
                 .register(Addr::Client(index as _))
                 .expect("client {index} has not been registered");
-            let context = ClientLocalContext {
+            let context = ClientContextState {
                 upcall: CloseLoop::new(Decode::json(Encode::json(workload)), None),
                 schedule: ScheduleState::new(),
             };

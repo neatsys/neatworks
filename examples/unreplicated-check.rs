@@ -3,7 +3,7 @@ use std::{thread::available_parallelism, time::Duration};
 use neatworks::{
     codec::{Decode, Encode},
     model::search::{breadth_first, random_depth_first, Settings},
-    unreplicated::model::{ClientLocalContext, State},
+    unreplicated::model::{ClientContextState, State},
     workload::{
         app::kvstore::{
             self, InfinitePutGet,
@@ -35,7 +35,7 @@ fn main() -> anyhow::Result<()> {
     type O = kvstore::Op;
     type R = kvstore::Result;
     type CodecW<W> = Decode<R, Encode<O, W>>;
-    type C<W> = ClientLocalContext<CodecW<W>>;
+    type C<W> = ClientContextState<CodecW<W>>;
 
     let settings = Settings {
         invariant: |_: &_| Ok(()),
