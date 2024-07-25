@@ -428,14 +428,10 @@ pub mod model {
 
     impl<W> State<W> {
         pub fn new() -> Self {
-            let mut network = NetworkState::new();
-            network
-                .register(Addr::Server)
-                .expect("server has not been registered");
             Self {
                 server: ServerState::new(Decode::json(Encode::json(KVStore::new()))),
                 clients: Default::default(),
-                network,
+                network: NetworkState::new(),
             }
         }
     }
@@ -446,9 +442,6 @@ pub mod model {
         pub fn push_client(&mut self, workload: W) {
             let index = self.clients.len();
             let client = ClientState::new(index as _, Addr::Client(index as _));
-            self.network
-                .register(Addr::Client(index as _))
-                .expect("client {index} has not been registered");
             let context = ClientContextState {
                 upcall: CloseLoop::new(Decode::json(Encode::json(workload)), None),
                 schedule: ScheduleState::new(),

@@ -1,9 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt::Debug,
-    iter::repeat,
-    time::Duration,
-};
+use std::{collections::BTreeSet, fmt::Debug, time::Duration};
 
 use derive_where::derive_where;
 
@@ -13,6 +8,7 @@ use crate::{
 };
 
 pub mod search;
+pub mod simulate;
 
 pub trait State: SendEvent<Self::Event> {
     type Event;
@@ -113,7 +109,7 @@ impl<M: Clone> ScheduleState<M> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[derive_where(Default)]
 pub struct NetworkState<A, M> {
-    messages: BTreeMap<A, BTreeSet<M>>,
+    messages: BTreeSet<(A, M)>,
 }
 
 impl<A, M> NetworkState<A, M> {
@@ -124,26 +120,30 @@ impl<A, M> NetworkState<A, M> {
 
 impl<A: Ord + Debug, M: Into<N>, N: Ord> SendEvent<Cast<A, M>> for NetworkState<A, N> {
     fn send(&mut self, Cast(remote, message): Cast<A, M>) -> anyhow::Result<()> {
-        let Some(inbox) = self.messages.get_mut(&remote) else {
-            anyhow::bail!("missing inbox for addr {remote:?}")
-        };
-        inbox.insert(message.into());
-        Ok(())
-    }
-}
-
-impl<A: Ord, M> NetworkState<A, M> {
-    pub fn register(&mut self, addr: A) -> anyhow::Result<()> {
-        let replaced = self.messages.insert(addr, Default::default());
-        anyhow::ensure!(replaced.is_none());
+        self.messages.insert((remote, message.into()));
         Ok(())
     }
 }
 
 impl<A: Clone, M: Clone> NetworkState<A, M> {
     pub fn events(&self) -> impl Iterator<Item = (A, M)> + '_ {
-        self.messages
-            .iter()
-            .flat_map(|(addr, inbox)| repeat(addr.clone()).zip(inbox.iter().cloned()))
+        self.messages.iter().cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use arbtest::arbtest;
+
+    #[test]
+    fn pigeonhole() {
+        arbtest(|u| {
+            let buf = u.arbitrary::<[u8; 257]>()?;
+            assert!(buf
+                .iter()
+                .enumerate()
+                .any(|(i, b1)| buf.iter().skip(i + 1).any(|b2| b2 == b1)));
+            Ok(())
+        });
     }
 }

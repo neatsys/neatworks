@@ -48,33 +48,39 @@ pub enum Timer {
     StateTransfer(u32),
 }
 
-impl From<client::events::Resend> for Timer {
-    fn from(client::events::Resend: client::events::Resend) -> Self {
-        Self::ClientResend
-    }
-}
+mod timer {
+    use crate::pbft::{client::events::*, replica::events::*};
 
-impl From<replica::events::DoViewChange> for Timer {
-    fn from(replica::events::DoViewChange(view_num): replica::events::DoViewChange) -> Self {
-        Self::DoViewChange(view_num)
-    }
-}
+    use super::Timer;
 
-impl From<replica::events::ProgressPrepare> for Timer {
-    fn from(replica::events::ProgressPrepare(op_num): replica::events::ProgressPrepare) -> Self {
-        Self::ProgressPrepare(op_num)
+    impl From<Resend> for Timer {
+        fn from(Resend: Resend) -> Self {
+            Self::ClientResend
+        }
     }
-}
 
-impl From<replica::events::ProgressViewChange> for Timer {
-    fn from(replica::events::ProgressViewChange: replica::events::ProgressViewChange) -> Self {
-        Self::ProgressViewChange
+    impl From<DoViewChange> for Timer {
+        fn from(DoViewChange(view_num): DoViewChange) -> Self {
+            Self::DoViewChange(view_num)
+        }
     }
-}
 
-impl From<replica::events::StateTransfer> for Timer {
-    fn from(replica::events::StateTransfer(op_num): replica::events::StateTransfer) -> Self {
-        Self::StateTransfer(op_num)
+    impl From<ProgressPrepare> for Timer {
+        fn from(ProgressPrepare(op_num): ProgressPrepare) -> Self {
+            Self::ProgressPrepare(op_num)
+        }
+    }
+
+    impl From<ProgressViewChange> for Timer {
+        fn from(ProgressViewChange: ProgressViewChange) -> Self {
+            Self::ProgressViewChange
+        }
+    }
+
+    impl From<StateTransfer> for Timer {
+        fn from(StateTransfer(op_num): StateTransfer) -> Self {
+            Self::StateTransfer(op_num)
+        }
     }
 }
 
