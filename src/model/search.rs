@@ -19,10 +19,32 @@ use rand::{seq::IteratorRandom as _, thread_rng};
 use rustc_hash::FxHasher;
 use scc::HashMap;
 
-use super::State;
+use crate::event::SendEvent;
+
 // use scc::HashIndex as HashMap;
 
 pub mod state;
+
+pub trait State: SendEvent<Self::Event> {
+    type Event;
+
+    fn events(&self) -> impl Iterator<Item = Self::Event> + '_;
+}
+
+// the alternative `State` interface
+//   trait State = OnEvent<C> where C: Context<Self::Event>
+//   pub trait Context<M> {
+//       fn register(&mut self, event: M) -> anyhow::Result<()>;
+//   }
+// the custom `events` method can be removed then, results in more compact
+// interface
+//
+// the downside of this alternation
+// * bootstrapping. the every first event(s) that applied to the initial state
+//   is hard to be provided
+// * it doesn't fit the current searching workflows. it may be possible to
+//   adjust the workflows to maintain a buffer of not yet applied events, but
+//   in my opinion that complicates things
 
 fn step<S: State>(state: &mut S, event: S::Event) -> anyhow::Result<()> {
     // TODO revise whether this panic safety reasoning is correct

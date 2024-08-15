@@ -398,7 +398,7 @@ pub mod model {
         }
     }
 
-    impl<W: Workload<Op = Bytes, Result = Bytes>> crate::model::State for State<W> {
+    impl<W: Workload<Op = Bytes, Result = Bytes>> crate::model::search::State for State<W> {
         type Event = Event;
 
         fn events(&self) -> impl Iterator<Item = Self::Event> + '_ {
