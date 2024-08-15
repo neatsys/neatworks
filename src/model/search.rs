@@ -22,6 +22,8 @@ use scc::HashMap;
 use super::State;
 // use scc::HashIndex as HashMap;
 
+pub mod state;
+
 fn step<S: State>(state: &mut S, event: S::Event) -> anyhow::Result<()> {
     // TODO revise whether this panic safety reasoning is correct
     catch_unwind(AssertUnwindSafe(|| state.send(event)))

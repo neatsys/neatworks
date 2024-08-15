@@ -255,7 +255,7 @@ pub mod model {
 
     use crate::{
         codec::{Decode, Encode},
-        model::{NetworkState, ScheduleState},
+        model::search::state::{Network, Schedule},
         workload::{
             app::kvstore::{self, KVStore},
             CloseLoop, Workload,
@@ -294,7 +294,7 @@ pub mod model {
     pub struct State<W> {
         pub clients: Vec<(ClientState<Addr>, ClientContextState<W>)>,
         server: ServerState<kvstore::App>,
-        network: NetworkState<Addr, Message>,
+        network: Network<Addr, Message>,
     }
 
     #[derive(Debug, Clone)]
@@ -306,29 +306,29 @@ pub mod model {
         // also try to keep the rationale local, not affect the CloseLoop side
         #[derive_where(skip)]
         pub upcall: CloseLoop<W, Option<Invoke<Bytes>>>,
-        schedule: ScheduleState<Timer>,
+        schedule: Schedule<Timer>,
     }
 
     struct ClientContextCarrier;
 
     impl<'a, W> super::context::On<ClientContext<'a, W>> for ClientContextCarrier {
-        type Schedule = &'a mut ScheduleState<Timer>;
+        type Schedule = &'a mut Schedule<Timer>;
     }
 
     type ClientContext<'a, W> = super::context::Client<
         ClientContextCarrier,
-        &'a mut NetworkState<Addr, Message>,
+        &'a mut Network<Addr, Message>,
         &'a mut CloseLoop<W, Option<Invoke<Bytes>>>,
         Addr,
     >;
 
-    impl SendEvent<Cast<(), Request<Addr>>> for NetworkState<Addr, Message> {
+    impl SendEvent<Cast<(), Request<Addr>>> for Network<Addr, Message> {
         fn send(&mut self, Cast((), message): Cast<(), Request<Addr>>) -> anyhow::Result<()> {
             self.send(Cast(Addr::Server, message))
         }
     }
 
-    impl ServerContext<Addr> for NetworkState<Addr, Message> {
+    impl ServerContext<Addr> for Network<Addr, Message> {
         type Net = Self;
         fn net(&mut self) -> &mut Self::Net {
             self
@@ -431,7 +431,7 @@ pub mod model {
             Self {
                 server: ServerState::new(Decode::json(Encode::json(KVStore::new()))),
                 clients: Default::default(),
-                network: NetworkState::new(),
+                network: Network::new(),
             }
         }
     }
@@ -444,7 +444,7 @@ pub mod model {
             let client = ClientState::new(index as _, Addr::Client(index as _));
             let context = ClientContextState {
                 upcall: CloseLoop::new(Decode::json(Encode::json(workload)), None),
-                schedule: ScheduleState::new(),
+                schedule: Schedule::new(),
             };
             self.clients.push((client, context));
         }

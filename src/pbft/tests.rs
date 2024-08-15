@@ -8,7 +8,7 @@ use crate::{
     event::{
         combinators::Transient, Erase, OnErasedEvent as _, SendEvent, TimerId, UntypedEvent, Work,
     },
-    model::{NetworkState, ScheduleState},
+    model::search::state::{Network, Schedule},
     net::{combinators::All, events::Recv, SendMessage},
     workload::{app::kvstore, events::Invoke, CloseLoop, Workload},
 };
@@ -88,7 +88,7 @@ mod timer {
 pub struct State<W> {
     pub clients: Vec<(client::State<Addr>, ClientContextState<W>)>,
     pub replicas: Vec<(ReplicaState, ReplicaContextState)>,
-    network: NetworkState<Addr, Message>,
+    network: Network<Addr, Message>,
 }
 
 type ReplicaState = replica::State<kvstore::App, Addr>;
@@ -98,13 +98,13 @@ type ReplicaState = replica::State<kvstore::App, Addr>;
 pub struct ClientContextState<W> {
     #[derive_where(skip)]
     pub upcall: CloseLoop<W, Option<Invoke<Bytes>>>,
-    schedule: ScheduleState<Timer>,
+    schedule: Schedule<Timer>,
 }
 
 struct ClientContextCarrier;
 
 impl<'a, W> client::context::On<ClientContext<'a, W>> for ClientContextCarrier {
-    type Schedule = &'a mut ScheduleState<Timer>;
+    type Schedule = &'a mut Schedule<Timer>;
 }
 
 type ClientContext<'a, W> = client::context::Context<
@@ -119,7 +119,7 @@ type ClientContext<'a, W> = client::context::Context<
 pub struct ReplicaContextState {
     #[derive_where(skip)]
     crypto: Crypto,
-    schedule: ScheduleState<Timer>,
+    schedule: Schedule<Timer>,
 }
 
 #[derive(Debug)]
@@ -129,7 +129,7 @@ impl<'a> replica::context::On<ReplicaContext<'a, Self>, ReplicaState> for Replic
     type CryptoWorker = Transient<Work<Crypto, Self::CryptoContext>>;
     type CryptoContext =
         crate::event::combinators::erase::Transient<ReplicaState, ReplicaContext<'a, Self>>;
-    type Schedule = ScheduleState<Timer>;
+    type Schedule = Schedule<Timer>;
 }
 
 #[derive(Debug)]
@@ -164,7 +164,7 @@ impl<'a> replica::Context<ReplicaState, Addr> for ReplicaContext<'a, ReplicaCont
 
 #[derive(Debug)]
 pub struct NetworkContext<'a> {
-    state: &'a mut NetworkState<Addr, Message>,
+    state: &'a mut Network<Addr, Message>,
     all: Vec<Addr>,
 }
 

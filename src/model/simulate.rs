@@ -1,5 +1,3 @@
-use std::mem::take;
-
 use derive_more::{Display, Error};
 
 use crate::event::SendEvent;
@@ -15,7 +13,9 @@ impl Choose for arbtest::arbitrary::Unstructured<'_> {
         Self::choose(self, choices)
             .or_else(|err| {
                 if matches!(err, arbtest::arbitrary::Error::NotEnoughData) {
-                    choices.get(0).ok_or(arbtest::arbitrary::Error::EmptyChoose)
+                    choices
+                        .first()
+                        .ok_or(arbtest::arbitrary::Error::EmptyChoose)
                 } else {
                     Err(err)
                 }
@@ -56,17 +56,4 @@ pub fn step(
 ) -> anyhow::Result<()> {
     let event = state.pop_event(u)?;
     state.send(event)
-}
-
-impl<A: Clone + Ord, M: Clone + Ord> super::NetworkState<A, M> {
-    pub fn pop_event(&mut self, choose: &mut impl Choose) -> anyhow::Result<(A, M)> {
-        // this looks silly and inefficient
-        // both arbitrary::Unstructured and BTreeSet have bad interfaces, nothing much I can do
-        let index = choose.choose_index(self.messages.len())?;
-        let mut messages = take(&mut self.messages).into_iter();
-        self.messages.extend(messages.by_ref().take(index));
-        let event = messages.next().unwrap();
-        self.messages.extend(messages);
-        Ok(event)
-    }
 }
