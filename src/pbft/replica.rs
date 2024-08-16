@@ -120,7 +120,7 @@ pub mod events {
     pub struct StateTransfer(pub u32);
 }
 
-pub trait Context<S, A>: Sized {
+pub trait Context<S, A> {
     type PeerNet: SendMessage<u8, Request<A>> // for relaying to (seemingly unresponsive) primary
         + SendMessage<All, (Verifiable<PrePrepare>, Vec<Request<A>>)>
         + SendMessage<All, Verifiable<Prepare>>

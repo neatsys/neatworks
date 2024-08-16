@@ -90,7 +90,9 @@ impl<C, S> Untyped<C, S> {
 }
 
 #[allow(clippy::type_complexity)]
-pub struct UntypedEvent<S, C>(pub Box<dyn FnOnce(&mut S, &mut C) -> anyhow::Result<()> + Send>);
+pub struct UntypedEvent<S, C: ?Sized>(
+    pub Box<dyn FnOnce(&mut S, &mut C) -> anyhow::Result<()> + Send>,
+);
 
 impl<S, C> Debug for UntypedEvent<S, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -110,13 +112,13 @@ impl<S, C> OnEvent<C> for Untyped<C, S> {
     }
 }
 
-pub trait OnErasedEvent<M, C> {
+pub trait OnErasedEvent<M, C: ?Sized> {
     fn on_event(&mut self, event: M, context: &mut C) -> anyhow::Result<()>;
 }
 
 #[derive_where(Debug, Clone, Default; E)]
 #[derive(Deref, DerefMut)]
-pub struct Erase<S, C, E>(
+pub struct Erase<S, C: ?Sized, E>(
     #[deref]
     #[deref_mut]
     E,
@@ -137,8 +139,8 @@ impl<S, C, E> Erase<S, C, E> {
 // so i will just repeat this type alias pattern for various `T`s everywhere in
 // the codebase
 
-impl<E: SendEvent<UntypedEvent<S, C>>, S: OnErasedEvent<M, C>, C, M: Send + 'static> SendEvent<M>
-    for Erase<S, C, E>
+impl<E: SendEvent<UntypedEvent<S, C>>, S: OnErasedEvent<M, C>, C: ?Sized, M: Send + 'static>
+    SendEvent<M> for Erase<S, C, E>
 {
     fn send(&mut self, event: M) -> anyhow::Result<()> {
         self.0.send(UntypedEvent(Box::new(move |state, context| {
@@ -186,13 +188,13 @@ pub trait Submit<S, C> {
 //     }
 // }
 
-pub trait SendEventFor<S, C> {
+pub trait SendEventFor<S, C: ?Sized> {
     fn send<M: Send + 'static>(&mut self, event: M) -> anyhow::Result<()>
     where
         S: OnErasedEvent<M, C>;
 }
 
-impl<E: SendEvent<UntypedEvent<S, C>>, S, C> SendEventFor<S, C> for Erase<S, C, E> {
+impl<E: SendEvent<UntypedEvent<S, C>>, S, C: ?Sized> SendEventFor<S, C> for Erase<S, C, E> {
     fn send<M: Send + 'static>(&mut self, event: M) -> anyhow::Result<()>
     where
         S: OnErasedEvent<M, C>,
