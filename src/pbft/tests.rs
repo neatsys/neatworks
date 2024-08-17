@@ -81,106 +81,6 @@ mod timer {
 }
 
 #[derive(Debug)]
-pub struct State<CC, RC, N> {
-    pub clients: Vec<(client::State<Addr>, CC)>,
-    pub replicas: Vec<(ReplicaState, RC)>,
-    network: N,
-}
-
-type ReplicaState = replica::State<kvstore::App, Addr>;
-
-mod search {
-    use bytes::Bytes;
-    use derive_where::derive_where;
-
-    use crate::{
-        crypto::Crypto,
-        event::{combinators::Transient, Work},
-        model::search::state::{Network, Schedule},
-        pbft::{client, replica},
-        workload::{events::Invoke, CloseLoop},
-    };
-
-    use super::{Addr, Message, ReplicaState, Timer};
-
-    pub type State<W> =
-        super::State<ClientContextState<W>, ReplicaContextState, Network<Addr, Message>>;
-
-    pub type NetworkContext<'a> = super::NetworkContext<'a, Network<Addr, Message>>;
-
-    #[derive(Debug, Clone)]
-    #[derive_where(PartialEq, Eq, Hash)]
-    pub struct ClientContextState<W> {
-        #[derive_where(skip)]
-        pub upcall: CloseLoop<W, Option<Invoke<Bytes>>>,
-        pub schedule: Schedule<Timer>,
-    }
-
-    #[derive(Debug)]
-    pub struct ClientContextCarrier;
-
-    impl<'a, W> client::context::On<ClientContext<'a, W>> for ClientContextCarrier {
-        type Schedule = &'a mut Schedule<Timer>;
-    }
-
-    pub type ClientContext<'a, W> = client::context::Context<
-        ClientContextCarrier,
-        NetworkContext<'a>,
-        &'a mut CloseLoop<W, Option<Invoke<Bytes>>>,
-        Addr,
-    >;
-
-    #[derive(Debug, Clone)]
-    #[derive_where(PartialEq, Eq, Hash)]
-    pub struct ReplicaContextState {
-        #[derive_where(skip)]
-        pub crypto: Crypto,
-        pub schedule: Schedule<Timer>,
-    }
-
-    #[derive(Debug)]
-    pub struct ReplicaContextCarrier;
-
-    impl<'a> replica::context::On<ReplicaContext<'a, Self>, ReplicaState> for ReplicaContextCarrier {
-        type CryptoWorker = Transient<Work<Crypto, Self::CryptoContext>>;
-        type CryptoContext =
-            crate::event::combinators::erase::Transient<ReplicaState, ReplicaContext<'a, Self>>;
-        type Schedule = Schedule<Timer>;
-    }
-
-    #[derive(Debug)]
-    pub struct ReplicaContext<'a, O: replica::context::On<Self, ReplicaState>> {
-        pub net: NetworkContext<'a>,
-        pub crypto_worker: O::CryptoWorker,
-        pub schedule: &'a mut O::Schedule,
-        pub crypto: &'a mut Crypto,
-    }
-
-    impl<'a> replica::Context<ReplicaState, Addr> for ReplicaContext<'a, ReplicaContextCarrier> {
-        type PeerNet = NetworkContext<'a>;
-        type DownlinkNet = NetworkContext<'a>;
-        type CryptoWorker =
-            <ReplicaContextCarrier as replica::context::On<Self, ReplicaState>>::CryptoWorker;
-        type CryptoContext =
-            <ReplicaContextCarrier as replica::context::On<Self, ReplicaState>>::CryptoContext;
-        type Schedule =
-            <ReplicaContextCarrier as replica::context::On<Self, ReplicaState>>::Schedule;
-        fn peer_net(&mut self) -> &mut Self::PeerNet {
-            &mut self.net
-        }
-        fn downlink_net(&mut self) -> &mut Self::DownlinkNet {
-            &mut self.net
-        }
-        fn crypto_worker(&mut self) -> &mut Self::CryptoWorker {
-            &mut self.crypto_worker
-        }
-        fn schedule(&mut self) -> &mut Self::Schedule {
-            self.schedule
-        }
-    }
-}
-
-#[derive(Debug)]
 pub struct NetworkContext<'a, N> {
     state: &'a mut N,
     all: Vec<Addr>,
@@ -208,6 +108,102 @@ impl<N: SendMessage<Addr, M>, M> SendMessage<Addr, M> for NetworkContext<'_, N> 
     }
 }
 
+#[derive(Debug)]
+pub struct State<CC, RC, N> {
+    pub clients: Vec<(client::State<Addr>, CC)>,
+    pub replicas: Vec<(ReplicaState, RC)>,
+    network: N,
+}
+
+type ReplicaState = replica::State<kvstore::App, Addr>;
+
+mod search {
+    use bytes::Bytes;
+    use derive_where::derive_where;
+
+    use crate::{
+        crypto::Crypto,
+        event::{
+            combinators::{erase::Transient as EraseTransient, Transient},
+            Work,
+        },
+        model::search::state::{Network, Schedule},
+        pbft::{client, replica},
+        workload::{events::Invoke, CloseLoop, Workload},
+    };
+
+    use super::{Addr, Message, ReplicaState, Timer};
+
+    pub type State<W> =
+        super::State<ClientContextState<W>, ReplicaContextState, Network<Addr, Message>>;
+
+    pub type NetworkContext<'a> = super::NetworkContext<'a, Network<Addr, Message>>;
+
+    #[derive(Debug, Clone)]
+    #[derive_where(PartialEq, Eq, Hash)]
+    pub struct ClientContextState<W> {
+        #[derive_where(skip)]
+        pub upcall: CloseLoop<W, Option<Invoke<Bytes>>>,
+        pub schedule: Schedule<Timer>,
+    }
+
+    pub struct ClientContext<'a, W> {
+        pub net: NetworkContext<'a>,
+        pub upcall: &'a mut CloseLoop<W, Option<Invoke<Bytes>>>,
+        pub schedule: &'a mut Schedule<Timer>,
+    }
+
+    impl<'a, W: Workload<Op = Bytes, Result = Bytes>> client::Context<Addr> for ClientContext<'a, W> {
+        type Net = NetworkContext<'a>;
+        type Upcall = CloseLoop<W, Option<Invoke<Bytes>>>;
+        type Schedule = Schedule<Timer>;
+        fn net(&mut self) -> &mut Self::Net {
+            &mut self.net
+        }
+        fn upcall(&mut self) -> &mut Self::Upcall {
+            self.upcall
+        }
+        fn schedule(&mut self) -> &mut Self::Schedule {
+            self.schedule
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    #[derive_where(PartialEq, Eq, Hash)]
+    pub struct ReplicaContextState {
+        #[derive_where(skip)]
+        pub crypto: Crypto,
+        pub schedule: Schedule<Timer>,
+    }
+
+    pub struct ReplicaContext<'a> {
+        pub net: NetworkContext<'a>,
+        pub crypto: &'a mut Crypto,
+        pub crypto_worker: Transient<Work<Crypto, EraseTransient<ReplicaState, Self>>>,
+        pub schedule: &'a mut Schedule<Timer>,
+    }
+
+    impl<'a> replica::Context<ReplicaState, Addr> for ReplicaContext<'a> {
+        type PeerNet = NetworkContext<'a>;
+        type DownlinkNet = NetworkContext<'a>;
+        type CryptoWorker = Transient<Work<Crypto, Self::CryptoContext>>;
+        type CryptoContext = EraseTransient<ReplicaState, Self>;
+        type Schedule = Schedule<Timer>;
+        fn peer_net(&mut self) -> &mut Self::PeerNet {
+            &mut self.net
+        }
+        fn downlink_net(&mut self) -> &mut Self::DownlinkNet {
+            &mut self.net
+        }
+        fn crypto_worker(&mut self) -> &mut Self::CryptoWorker {
+            &mut self.crypto_worker
+        }
+        fn schedule(&mut self) -> &mut Self::Schedule {
+            self.schedule
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Event {
     Message(Addr, Message),
@@ -228,7 +224,6 @@ impl<W: Workload<Op = Bytes, Result = Bytes>> SendEvent<Event> for search::State
                     },
                     upcall: &mut context.upcall,
                     schedule: &mut context.schedule,
-                    _m: Default::default(),
                 };
                 match event {
                     Event::Message(_, Message::Reply(message)) => {
@@ -318,7 +313,7 @@ impl<W: Workload<Op = Bytes, Result = Bytes>> search::State<W> {
 
     fn fix_submit(
         replica: &mut ReplicaState,
-        mut context: search::ReplicaContext<'_, search::ReplicaContextCarrier>,
+        mut context: search::ReplicaContext<'_>,
     ) -> anyhow::Result<()> {
         // is it critical to preserve FIFO ordering?
         while let Some(work) = context.crypto_worker.pop() {
