@@ -1,9 +1,10 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use neatworks::{
+    codec::Encode,
     crypto::{Crypto, CryptoFlavor},
     event::{
-        task::{run, run_with_schedule, run_worker, ContextCarrier, ScheduleState},
+        task::{self, run, run_with_schedule, run_worker, ScheduleState},
         Erase, Untyped,
     },
     net::{combinators::IndexNet, task::udp},
@@ -46,7 +47,37 @@ pub async fn pbft(
     let (schedule_sender, mut schedule_receiver) = unbounded_channel();
     let (sender, mut receiver) = unbounded_channel();
 
-    let mut context = pbft::replica::context::Context::<ContextCarrier, _, _, _> {
+    type S = pbft::replica::State<Null, SocketAddr>;
+    type PeerNet =
+        Encode<pbft::messages::codec::ToReplica<SocketAddr>, IndexNet<SocketAddr, Arc<UdpSocket>>>;
+    type DownlinkNet = Encode<pbft::messages::codec::ToClient, Arc<UdpSocket>>;
+    struct Context {
+        peer_net: PeerNet,
+        downlink_net: DownlinkNet,
+        crypto_worker: task::work::Sender<Crypto, task::erase::Sender<S, Self>>,
+        schedule: task::erase::ScheduleState<S, Self>,
+    }
+    impl pbft::replica::Context<S, SocketAddr> for Context {
+        type PeerNet = PeerNet;
+        type DownlinkNet = DownlinkNet;
+        type CryptoWorker = task::work::Sender<Crypto, Self::CryptoContext>;
+        type CryptoContext = task::erase::Sender<S, Self>;
+        type Schedule = task::erase::ScheduleState<S, Self>;
+        fn peer_net(&mut self) -> &mut Self::PeerNet {
+            &mut self.peer_net
+        }
+        fn downlink_net(&mut self) -> &mut Self::DownlinkNet {
+            &mut self.downlink_net
+        }
+        fn crypto_worker(&mut self) -> &mut Self::CryptoWorker {
+            &mut self.crypto_worker
+        }
+        fn schedule(&mut self) -> &mut Self::Schedule {
+            &mut self.schedule
+        }
+    }
+
+    let mut context = Context {
         peer_net: pbft::messages::codec::to_replica_encode(IndexNet::new(
             addrs,
             index,
@@ -55,7 +86,6 @@ pub async fn pbft(
         downlink_net: pbft::messages::codec::to_client_encode(socket.clone()),
         crypto_worker: crypto_sender,
         schedule: Erase::new(ScheduleState::new(schedule_sender)),
-        _m: Default::default(),
     };
     let server_task = run_with_schedule(
         Untyped::new(pbft::replica::State::new(index as _, Null, config.clone())),

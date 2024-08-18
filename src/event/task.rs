@@ -8,7 +8,7 @@ use tokio::{
     time::interval,
 };
 
-use super::{OnEvent, ScheduleEvent, SendEvent, Submit, ActiveTimer, UntypedEvent};
+use super::{ActiveTimer, OnEvent, ScheduleEvent, SendEvent, UntypedEvent};
 
 pub mod erase {
     use crate::event::{Erase, UntypedEvent};
@@ -76,9 +76,15 @@ impl<M: Into<N>, N> SendEvent<M> for UnboundedSender<N> {
     }
 }
 
-impl<S, C> Submit<S, C> for UnboundedSender<UntypedEvent<S, C>> {
-    fn submit(&mut self, work: super::Work<S, C>) -> anyhow::Result<()> {
-        SendEvent::send(self, UntypedEvent(work))
+pub mod work {
+    use crate::event::{SendEvent, Submit, UntypedEvent, Work};
+
+    pub type Sender<S, C> = super::UnboundedSender<UntypedEvent<S, C>>;
+
+    impl<S, C> Submit<S, C> for Sender<S, C> {
+        fn submit(&mut self, work: Work<S, C>) -> anyhow::Result<()> {
+            SendEvent::send(self, UntypedEvent(work))
+        }
     }
 }
 
