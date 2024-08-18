@@ -113,6 +113,92 @@ where
     }
 }
 
+impl<'a, N, T, D> OnErasedEvent<Event<D>, ReplicaContext<'a, N, T>> for ReplicaState
+where
+    ReplicaContext<'a, N, T>: replica::Context<ReplicaState, Addr>,
+{
+    fn on_event(
+        &mut self,
+        event: Event<D>,
+        context: &mut ReplicaContext<'a, N, T>,
+    ) -> anyhow::Result<()> {
+        match event {
+            Event::Message(_, Message::Request(message)) => self.on_event(Recv(message), context),
+            Event::Message(_, Message::PrePrepare(message, requests)) => {
+                self.on_event(Recv((message, requests)), context)
+            }
+            Event::Message(_, Message::Prepare(message)) => self.on_event(Recv(message), context),
+            Event::Message(_, Message::Commit(message)) => self.on_event(Recv(message), context),
+            Event::Message(_, Message::ViewChange(message)) => {
+                self.on_event(Recv(message), context)
+            }
+            Event::Message(_, Message::NewView(message)) => self.on_event(Recv(message), context),
+            Event::Message(_, Message::QueryNewView(message)) => {
+                self.on_event(Recv(message), context)
+            }
+            Event::Timer(_, _, timer) => {
+                // context.schedule.tick(id)?;
+                match timer {
+                    Timer::ProgressPrepare(op_num) => {
+                        self.on_event(replica::events::ProgressPrepare(op_num), context)
+                    }
+                    Timer::DoViewChange(view_num) => {
+                        self.on_event(replica::events::DoViewChange(view_num), context)
+                    }
+                    Timer::ProgressViewChange => {
+                        self.on_event(replica::events::ProgressViewChange, context)
+                    }
+                    Timer::StateTransfer(op_num) => {
+                        self.on_event(replica::events::StateTransfer(op_num), context)
+                    }
+                    _ => anyhow::bail!("unimplemented"),
+                }
+            }
+            _ => anyhow::bail!("unimplemented"),
+        }?;
+        fix_submit(self, context)
+    }
+}
+
+fn fix_invoke<'a, N, W: Workload<Op = Bytes, Result = Bytes>, T>(
+    client: &mut client::State<Addr>,
+    context: &mut ClientContext<'a, N, W, T>,
+) -> anyhow::Result<()>
+where
+    ClientContext<'a, N, W, T>: client::Context<Addr>,
+{
+    if let Some(invoke) = context.upcall.sender.take() {
+        client.on_event(invoke, context)?
+    }
+    Ok(())
+}
+
+fn fix_submit<'a, N, T>(
+    replica: &mut ReplicaState,
+    context: &mut ReplicaContext<'a, N, T>,
+) -> anyhow::Result<()>
+where
+    ReplicaContext<'a, N, T>: replica::Context<ReplicaState, Addr>,
+{
+    // is it critical to preserve FIFO ordering?
+    while let Some(work) = context.crypto_worker.pop() {
+        // feels like there are definitely some trait impl that can be reused here, replacing
+        // either the direct call to `work` or to `event`, or both
+        // also, feel like there's definitely a way to express without dual Transient, one is
+        // probably unavoidable but two is very likely redundant
+        // that said, these are test code, should not go too paranoid on the principles (and
+        // performance)...
+        // (that said, i still tried but eventually got denied by lifetimes. well that i would
+        // accept to not fight against)
+        let mut sender = Erase::new(Transient::new());
+        work(context.crypto, &mut sender)?;
+        for UntypedEvent(event) in sender.drain(..) {
+            event(replica, context)?
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct NetworkContext<'a, N> {
     state: &'a mut N,
@@ -229,8 +315,6 @@ mod search {
     use crate::{
         event::{combinators::Transient, OnErasedEvent as _, SendEvent},
         model::search::state::{Network, Schedule, TimerId},
-        net::events::Recv,
-        pbft::replica,
         workload::Workload,
     };
 
@@ -277,6 +361,9 @@ mod search {
                     let Some((replica, context)) = self.replicas.get_mut(index as usize) else {
                         anyhow::bail!("missing replica for index {index}")
                     };
+                    if let Event::Timer(_, id, _) = event {
+                        context.schedule.tick(id)?
+                    }
                     let mut context = ReplicaContext {
                         net: NetworkContext {
                             state: &mut self.network,
@@ -286,88 +373,10 @@ mod search {
                         schedule: &mut context.schedule,
                         crypto: &mut context.crypto,
                     };
-                    match event {
-                        Event::Message(_, Message::Request(message)) => {
-                            replica.on_event(Recv(message), &mut context)
-                        }
-                        Event::Message(_, Message::PrePrepare(message, requests)) => {
-                            replica.on_event(Recv((message, requests)), &mut context)
-                        }
-                        Event::Message(_, Message::Prepare(message)) => {
-                            replica.on_event(Recv(message), &mut context)
-                        }
-                        Event::Message(_, Message::Commit(message)) => {
-                            replica.on_event(Recv(message), &mut context)
-                        }
-                        Event::Message(_, Message::ViewChange(message)) => {
-                            replica.on_event(Recv(message), &mut context)
-                        }
-                        Event::Message(_, Message::NewView(message)) => {
-                            replica.on_event(Recv(message), &mut context)
-                        }
-                        Event::Message(_, Message::QueryNewView(message)) => {
-                            replica.on_event(Recv(message), &mut context)
-                        }
-                        Event::Timer(_, id, timer) => {
-                            context.schedule.tick(id)?;
-                            match timer {
-                                Timer::ProgressPrepare(op_num) => replica.on_event(
-                                    replica::events::ProgressPrepare(op_num),
-                                    &mut context,
-                                ),
-                                Timer::DoViewChange(view_num) => replica.on_event(
-                                    replica::events::DoViewChange(view_num),
-                                    &mut context,
-                                ),
-                                Timer::ProgressViewChange => replica
-                                    .on_event(replica::events::ProgressViewChange, &mut context),
-                                Timer::StateTransfer(op_num) => replica
-                                    .on_event(replica::events::StateTransfer(op_num), &mut context),
-                                _ => anyhow::bail!("unimplemented"),
-                            }
-                        }
-                        _ => anyhow::bail!("unimplemented"),
-                    }?;
-                    super::fix_submit(replica, context)
+                    replica.on_event(event, &mut context)
                 }
             }?;
             Ok(())
         }
     }
-}
-
-fn fix_invoke<'a, N, W: Workload<Op = Bytes, Result = Bytes>, T>(
-    client: &mut client::State<Addr>,
-    context: &mut ClientContext<'a, N, W, T>,
-) -> anyhow::Result<()>
-where
-    ClientContext<'a, N, W, T>: client::Context<Addr>,
-{
-    if let Some(invoke) = context.upcall.sender.take() {
-        client.on_event(invoke, context)?
-    }
-    Ok(())
-}
-
-fn fix_submit<N, T>(
-    replica: &mut ReplicaState,
-    mut context: ReplicaContext<'_, N, T>,
-) -> anyhow::Result<()> {
-    // is it critical to preserve FIFO ordering?
-    while let Some(work) = context.crypto_worker.pop() {
-        // feels like there are definitely some trait impl that can be reused here, replacing
-        // either the direct call to `work` or to `event`, or both
-        // also, feel like there's definitely a way to express without dual Transient, one is
-        // probably unavoidable but two is very likely redundant
-        // that said, these are test code, should not go too paranoid on the principles (and
-        // performance)...
-        // (that said, i still tried but eventually got denied by lifetimes. well that i would
-        // accept to not fight against)
-        let mut sender = Erase::new(Transient::new());
-        work(context.crypto, &mut sender)?;
-        for UntypedEvent(event) in sender.drain(..) {
-            event(replica, &mut context)?
-        }
-    }
-    Ok(())
 }
