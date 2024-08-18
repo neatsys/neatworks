@@ -17,18 +17,25 @@ pub async fn unreplicated() -> anyhow::Result<()> {
     let socket = Arc::new(UdpSocket::bind("localhost:3000").await?);
     let (sender, mut receiver) = unbounded_channel();
 
-    let mut context = unreplicated::context::Server {
-        net: unreplicated::codec::server_encode(socket.clone()),
-    };
-    let net_task = udp::run(
-        &socket,
-        unreplicated::codec::server_decode(Erase::new(sender)),
-    );
+    type Net = Encode<unreplicated::Reply, Arc<UdpSocket>>;
+    struct Context(Net);
+    impl unreplicated::ServerContext<SocketAddr> for Context {
+        type Net = Net;
+        fn net(&mut self) -> &mut Self::Net {
+            &mut self.0
+        }
+    }
+    let mut context = Context(unreplicated::codec::server_encode(socket.clone()));
     let server_task = run(
         Untyped::new(unreplicated::ServerState::new(Null)),
         &mut context,
         &mut receiver,
     );
+    let net_task = udp::run(
+        &socket,
+        unreplicated::codec::server_decode(Erase::new(sender)),
+    );
+
     select! {
         result = net_task => result?,
         result = server_task => result?,

@@ -159,70 +159,6 @@ impl<S: App, A, C: ServerContext<A>> OnErasedEvent<Recv<Request<A>>, C> for Serv
     }
 }
 
-pub mod context {
-    use std::marker::PhantomData;
-
-    use super::*;
-
-    pub struct Client<O: On<Self>, N, U, A> {
-        pub net: N,
-        pub upcall: U,
-        pub schedule: O::Schedule,
-        pub _m: PhantomData<A>,
-    }
-
-    pub trait On<C> {
-        type Schedule: ScheduleEvent<client::Resend>;
-    }
-
-    impl<O: On<Self>, N, U, A> super::ClientContext<A> for Client<O, N, U, A>
-    where
-        N: SendEvent<Cast<(), Request<A>>>,
-        U: SendEvent<InvokeOk<Bytes>>,
-    {
-        type Net = N;
-        type Upcall = U;
-        type Schedule = O::Schedule;
-        fn net(&mut self) -> &mut Self::Net {
-            &mut self.net
-        }
-        fn upcall(&mut self) -> &mut Self::Upcall {
-            &mut self.upcall
-        }
-        fn schedule(&mut self) -> &mut Self::Schedule {
-            &mut self.schedule
-        }
-    }
-
-    pub struct Server<N> {
-        pub net: N,
-    }
-
-    impl<N, A> ServerContext<A> for Server<N>
-    where
-        N: SendEvent<Cast<A, Reply>>,
-    {
-        type Net = N;
-        fn net(&mut self) -> &mut Self::Net {
-            &mut self.net
-        }
-    }
-
-    mod task {
-        use crate::event::task::{erase::ScheduleState, ContextCarrier};
-
-        use super::*;
-
-        impl<N, U, A: Addr> On<Client<Self, N, U, A>> for ContextCarrier
-        where
-            N: SendEvent<Cast<(), Request<A>>> + 'static,
-            U: SendEvent<InvokeOk<Bytes>> + 'static,
-        {
-            type Schedule = ScheduleState<ClientState<A>, Client<Self, N, U, A>>;
-        }
-    }
-}
-
 pub mod codec {
     use crate::codec::{bincode, Encode};
 
@@ -330,7 +266,7 @@ pub mod model {
     }
 
     impl super::ServerContext<Addr> for Network<Addr, Message> {
-        type Net = Network<Addr, Message>;
+        type Net = Self;
         fn net(&mut self) -> &mut Self::Net {
             self
         }
