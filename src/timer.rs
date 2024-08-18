@@ -2,11 +2,11 @@ use std::{marker::PhantomData, time::Duration};
 
 use derive_where::derive_where;
 
-use crate::event::{ScheduleEvent, TimerId};
+use crate::event::{ScheduleEvent, ActiveTimer};
 
 #[derive_where(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Timer<M> {
-    id: Option<TimerId>,
+    id: Option<ActiveTimer>,
     period: Duration,
     _m: PhantomData<M>,
 }

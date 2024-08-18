@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, fmt::Debug, time::Duration};
 use derive_where::derive_where;
 
 use crate::{
-    event::{ScheduleEvent, SendEvent, TimerId},
+    event::{ActiveTimer, ScheduleEvent, SendEvent},
     net::events::Cast,
 };
 
@@ -28,7 +28,7 @@ impl<M> Schedule<M> {
 }
 
 impl<M: Into<N>, N> ScheduleEvent<M> for Schedule<N> {
-    fn set(&mut self, period: Duration, event: M) -> anyhow::Result<TimerId> {
+    fn set(&mut self, period: Duration, event: M) -> anyhow::Result<ActiveTimer> {
         self.count += 1;
         let id = self.count;
         let envelop = TimerEnvelop {
@@ -37,32 +37,34 @@ impl<M: Into<N>, N> ScheduleEvent<M> for Schedule<N> {
             period,
         };
         self.envelops.push(envelop);
-        Ok(TimerId(id))
+        Ok(ActiveTimer(id))
     }
 
     fn set_internal(
         &mut self,
         _: Duration,
         _: impl FnMut() -> M + Send + 'static,
-    ) -> anyhow::Result<TimerId> {
+    ) -> anyhow::Result<ActiveTimer> {
         anyhow::bail!("unimplemented")
     }
 
-    fn unset(&mut self, TimerId(id): TimerId) -> anyhow::Result<()> {
+    fn unset(&mut self, ActiveTimer(id): ActiveTimer) -> anyhow::Result<()> {
         self.remove(id)?;
         Ok(())
     }
 }
 
+pub type TimerId = u32;
+
 impl<M> Schedule<M> {
     fn remove(&mut self, id: u32) -> anyhow::Result<TimerEnvelop<M>> {
         let Some(pos) = self.envelops.iter().position(|envelop| envelop.id == id) else {
-            anyhow::bail!("missing timer of {:?}", TimerId(id))
+            anyhow::bail!("missing timer of {:?}", ActiveTimer(id))
         };
         Ok(self.envelops.remove(pos))
     }
 
-    pub fn tick(&mut self, TimerId(id): TimerId) -> anyhow::Result<()> {
+    pub fn tick(&mut self, id: TimerId) -> anyhow::Result<()> {
         let ticked = self.remove(id)?;
         self.envelops.push(ticked);
         Ok(())
@@ -77,7 +79,7 @@ impl<M: Clone> Schedule<M> {
                 return None;
             }
             limit = envelop.period;
-            Some((TimerId(envelop.id), envelop.event.clone()))
+            Some((envelop.id, envelop.event.clone()))
         })
     }
 }

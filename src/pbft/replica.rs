@@ -121,25 +121,53 @@ pub mod events {
 }
 
 pub trait Context<S, A> {
-    type PeerNet: SendMessage<u8, Request<A>> // for relaying to (seemingly unresponsive) primary
-        + SendMessage<All, (Verifiable<PrePrepare>, Vec<Request<A>>)>
-        + SendMessage<All, Verifiable<Prepare>>
-        + SendMessage<All, Verifiable<Commit>>
-        + SendMessage<All, Verifiable<ViewChange>>
-        + SendMessage<All, Verifiable<NewView>>
-        + SendMessage<u8, QueryNewView>
-        + SendMessage<u8, Verifiable<NewView>>;
+    type PeerNet: PeerNet<A>;
     type DownlinkNet: SendMessage<A, Reply>;
     type CryptoWorker: Submit<Crypto, Self::CryptoContext>;
     type CryptoContext: SendEventFor<S, Self>;
-    type Schedule: ScheduleEvent<events::ProgressPrepare>
-        + ScheduleEvent<events::DoViewChange>
-        + ScheduleEvent<events::ProgressViewChange>
-        + ScheduleEvent<events::StateTransfer>;
+    type Schedule: Schedule;
     fn peer_net(&mut self) -> &mut Self::PeerNet;
     fn downlink_net(&mut self) -> &mut Self::DownlinkNet;
     fn crypto_worker(&mut self) -> &mut Self::CryptoWorker;
     fn schedule(&mut self) -> &mut Self::Schedule;
+}
+
+pub trait PeerNet<A>: SendMessage<u8, Request<A>> // for relaying to (seemingly unresponsive) primary
++ SendMessage<All, (Verifiable<PrePrepare>, Vec<Request<A>>)>
++ SendMessage<All, Verifiable<Prepare>>
++ SendMessage<All, Verifiable<Commit>>
++ SendMessage<All, Verifiable<ViewChange>>
++ SendMessage<All, Verifiable<NewView>>
++ SendMessage<u8, QueryNewView>
++ SendMessage<u8, Verifiable<NewView>> {}
+impl<
+        N: SendMessage<u8, Request<A>> // for relaying to (seemingly unresponsive) primary
+            + SendMessage<All, (Verifiable<PrePrepare>, Vec<Request<A>>)>
+            + SendMessage<All, Verifiable<Prepare>>
+            + SendMessage<All, Verifiable<Commit>>
+            + SendMessage<All, Verifiable<ViewChange>>
+            + SendMessage<All, Verifiable<NewView>>
+            + SendMessage<u8, QueryNewView>
+            + SendMessage<u8, Verifiable<NewView>>,
+        A,
+    > PeerNet<A> for N
+{
+}
+
+pub trait Schedule:
+    ScheduleEvent<events::ProgressPrepare>
+    + ScheduleEvent<events::DoViewChange>
+    + ScheduleEvent<events::ProgressViewChange>
+    + ScheduleEvent<events::StateTransfer>
+{
+}
+impl<
+        T: ScheduleEvent<events::ProgressPrepare>
+            + ScheduleEvent<events::DoViewChange>
+            + ScheduleEvent<events::ProgressViewChange>
+            + ScheduleEvent<events::StateTransfer>,
+    > Schedule for T
+{
 }
 
 trait ContextExt<S, A>: Context<S, A> {

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     codec::Payload,
-    event::{OnErasedEvent, ScheduleEvent, SendEvent, TimerId},
+    event::{OnErasedEvent, ScheduleEvent, SendEvent, ActiveTimer},
     net::{
         events::{Cast, Recv},
         Addr,
@@ -41,7 +41,7 @@ pub struct ClientState<A> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Outstanding {
     op: Payload,
-    timer: TimerId,
+    timer: ActiveTimer,
 }
 
 impl<A> ClientState<A> {
@@ -255,7 +255,7 @@ pub mod model {
 
     use crate::{
         codec::{Decode, Encode},
-        model::search::state::{Network, Schedule},
+        model::search::state::{Network, Schedule, TimerId},
         workload::{
             app::kvstore::{self, KVStore},
             CloseLoop, Workload,

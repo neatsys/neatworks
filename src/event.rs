@@ -33,11 +33,36 @@ impl<S: OnEvent<C>, C> OnEvent<C> for &mut S {
 #[derive(Debug, Display, Error)]
 pub struct Exit;
 
+// the abstraction of *activated timer as a resource*, though leaky
+// as long as an instance of ActiveTimer is around and owned by someone, the
+// context that allocated the instance will keep scheduling the timer i.e.
+// call OnEvent::on_event on someone
+//
+// (well in most sensible cases the owner "someone" and the callee "someone" is
+// probably the same "one". some fact that neither enforced nor reflected in the
+// types for now)
+//
+// the instances of ActiveTimer should never be dropped externally. instead pass
+// them into ScheduleEvent::unset, complete the resource management circle. also
+// ideally they should not be `Clone`, to prevent double free problems
+//
+// neither of above is enforced by types for now. the reason of impl `Clone` is
+// for model checking: the ActiveTimer instances, as part of the checked system
+// states, is preferred to be able to be simply `Clone`d. in another word, i
+// don't want the ActiveTimer itself to be `Clone` but any state that contains
+// it to be so. no such expressiveness in Rust as far as i know
+//
+// for the drop thing i just feel lazy to code for it, maybe later
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TimerId(pub u32);
+pub struct ActiveTimer(pub u32);
 
 pub trait ScheduleEvent<M> {
-    fn set(&mut self, period: Duration, event: M) -> anyhow::Result<TimerId>
+    // the actual "user facing" interface. `OnEvent` implementations should always play with this
+    // one, since certain ScheduleEvent implementations (e.g. search timer state) do not support
+    // `set_internal`
+    // the (currently) sole reason for `set_internal` to be part of ScheduleEvent is that the below
+    // adaption of ScheduleEvent impl on Erase<...> can only be performed on `set_internal` layer
+    fn set(&mut self, period: Duration, event: M) -> anyhow::Result<ActiveTimer>
     where
         M: Send + Clone + 'static,
     {
@@ -48,13 +73,13 @@ pub trait ScheduleEvent<M> {
         &mut self,
         period: Duration,
         event: impl FnMut() -> M + Send + 'static,
-    ) -> anyhow::Result<TimerId>;
+    ) -> anyhow::Result<ActiveTimer>;
 
-    fn unset(&mut self, id: TimerId) -> anyhow::Result<()>;
+    fn unset(&mut self, id: ActiveTimer) -> anyhow::Result<()>;
 }
 
 impl<T: ScheduleEvent<M>, M> ScheduleEvent<M> for &mut T {
-    fn set(&mut self, period: Duration, event: M) -> anyhow::Result<TimerId>
+    fn set(&mut self, period: Duration, event: M) -> anyhow::Result<ActiveTimer>
     where
         M: Clone + Send + 'static,
     {
@@ -65,11 +90,11 @@ impl<T: ScheduleEvent<M>, M> ScheduleEvent<M> for &mut T {
         &mut self,
         period: Duration,
         event: impl FnMut() -> M + Send + 'static,
-    ) -> anyhow::Result<TimerId> {
+    ) -> anyhow::Result<ActiveTimer> {
         T::set_internal(self, period, event)
     }
 
-    fn unset(&mut self, id: TimerId) -> anyhow::Result<()> {
+    fn unset(&mut self, id: ActiveTimer) -> anyhow::Result<()> {
         T::unset(self, id)
     }
 }
@@ -160,7 +185,7 @@ impl<
         &mut self,
         period: Duration,
         mut event: impl FnMut() -> M + Send + 'static,
-    ) -> anyhow::Result<TimerId> {
+    ) -> anyhow::Result<ActiveTimer> {
         self.0.set_internal(period, move || {
             let event = event();
             UntypedEvent(Box::new(move |state, context| {
@@ -169,7 +194,7 @@ impl<
         })
     }
 
-    fn unset(&mut self, id: TimerId) -> anyhow::Result<()> {
+    fn unset(&mut self, id: ActiveTimer) -> anyhow::Result<()> {
         self.0.unset(id)
     }
 }
@@ -208,11 +233,11 @@ pub trait ScheduleEventFor<S, C> {
         &mut self,
         period: Duration,
         event: M,
-    ) -> anyhow::Result<TimerId>
+    ) -> anyhow::Result<ActiveTimer>
     where
         S: OnErasedEvent<M, C>;
 
-    fn unset(&mut self, id: TimerId) -> anyhow::Result<()>;
+    fn unset(&mut self, id: ActiveTimer) -> anyhow::Result<()>;
 }
 
 impl<T: ScheduleEvent<UntypedEvent<S, C>>, S, C> ScheduleEventFor<S, C> for Erase<S, C, T> {
@@ -220,14 +245,14 @@ impl<T: ScheduleEvent<UntypedEvent<S, C>>, S, C> ScheduleEventFor<S, C> for Eras
         &mut self,
         period: Duration,
         event: M,
-    ) -> anyhow::Result<TimerId>
+    ) -> anyhow::Result<ActiveTimer>
     where
         S: OnErasedEvent<M, C>,
     {
         ScheduleEvent::set(self, period, event)
     }
 
-    fn unset(&mut self, id: TimerId) -> anyhow::Result<()> {
+    fn unset(&mut self, id: ActiveTimer) -> anyhow::Result<()> {
         // cannot just forward from `self`, because that `ScheduleEvent` is bounded on
         // `S: OnErasedEvent<..>` as a whole, though that is unnecessary for `unset`
         // consider switch to opposite, implement `set` and `unset` here and forward to there

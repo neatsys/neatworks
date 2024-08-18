@@ -8,7 +8,7 @@ use tokio::{
     time::interval,
 };
 
-use super::{OnEvent, ScheduleEvent, SendEvent, Submit, TimerId, UntypedEvent};
+use super::{OnEvent, ScheduleEvent, SendEvent, Submit, ActiveTimer, UntypedEvent};
 
 pub mod erase {
     use crate::event::{Erase, UntypedEvent};
@@ -114,7 +114,7 @@ impl<M: Into<N> + Send + 'static, N> ScheduleEvent<M> for ScheduleState<N> {
         &mut self,
         period: std::time::Duration,
         mut event: impl FnMut() -> M + Send + 'static,
-    ) -> anyhow::Result<TimerId> {
+    ) -> anyhow::Result<ActiveTimer> {
         self.count += 1;
         let id = self.count;
         let sender = self.sender.clone();
@@ -132,12 +132,12 @@ impl<M: Into<N> + Send + 'static, N> ScheduleEvent<M> for ScheduleState<N> {
         .abort_handle();
         self.events
             .insert(id, (handle, Box::new(move || event().into())));
-        Ok(TimerId(id))
+        Ok(ActiveTimer(id))
     }
 
-    fn unset(&mut self, TimerId(id): TimerId) -> anyhow::Result<()> {
+    fn unset(&mut self, ActiveTimer(id): ActiveTimer) -> anyhow::Result<()> {
         let Some((handle, _)) = self.events.remove(&id) else {
-            anyhow::bail!("missing event for {:?}", TimerId(id))
+            anyhow::bail!("missing event for {:?}", ActiveTimer(id))
         };
         handle.abort();
         Ok(())

@@ -4,7 +4,7 @@ use bytes::Bytes;
 
 use crate::{
     codec::Payload,
-    event::{OnErasedEvent, ScheduleEvent, SendEvent, TimerId},
+    event::{OnErasedEvent, ScheduleEvent, SendEvent, ActiveTimer},
     net::{combinators::All, events::Recv, Addr, SendMessage},
     workload::events::{Invoke, InvokeOk},
 };
@@ -29,7 +29,7 @@ pub struct State<A> {
 struct Outstanding {
     op: Payload,
     replies: BTreeMap<u8, Reply>,
-    timer: TimerId,
+    timer: ActiveTimer,
 }
 
 impl<A> State<A> {
