@@ -4,7 +4,7 @@ use bytes::Bytes;
 
 use crate::{
     codec::Payload,
-    event::{OnErasedEvent, ScheduleEvent, SendEvent, ActiveTimer},
+    event::{ActiveTimer, OnErasedEvent, ScheduleEvent, SendEvent},
     net::{combinators::All, events::Recv, Addr, SendMessage},
     workload::events::{Invoke, InvokeOk},
 };
@@ -127,55 +127,5 @@ impl<A: Addr> State<A> {
             op: self.outstanding.as_ref().unwrap().op.clone(),
         };
         context.net().send(dest, request)
-    }
-}
-
-pub mod context {
-    use std::marker::PhantomData;
-
-    use super::*;
-
-    pub struct Context<O: On<Self>, N, U, A> {
-        pub net: N,
-        pub upcall: U,
-        pub schedule: O::Schedule,
-        pub _m: PhantomData<A>,
-    }
-
-    pub trait On<C> {
-        type Schedule: ScheduleEvent<events::Resend>;
-    }
-
-    impl<O: On<Self>, N, U, A> super::Context<A> for Context<O, N, U, A>
-    where
-        N: SendMessage<u8, Request<A>> + SendMessage<All, Request<A>>,
-        U: SendEvent<InvokeOk<Bytes>>,
-    {
-        type Net = N;
-        type Upcall = U;
-        type Schedule = O::Schedule;
-        fn net(&mut self) -> &mut Self::Net {
-            &mut self.net
-        }
-        fn upcall(&mut self) -> &mut Self::Upcall {
-            &mut self.upcall
-        }
-        fn schedule(&mut self) -> &mut Self::Schedule {
-            &mut self.schedule
-        }
-    }
-
-    mod task {
-        use crate::event::task::{erase::ScheduleState, ContextCarrier as Task};
-
-        use super::*;
-
-        impl<N, U, A: Addr> On<Context<Self, N, U, A>> for Task
-        where
-            N: SendMessage<u8, Request<A>> + SendMessage<All, Request<A>> + 'static,
-            U: SendEvent<InvokeOk<Bytes>> + 'static,
-        {
-            type Schedule = ScheduleState<State<A>, Context<Self, N, U, A>>;
-        }
     }
 }

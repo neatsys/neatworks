@@ -4,7 +4,7 @@ use bytes::Bytes;
 use neatworks::{
     codec::Encode,
     event::{
-        task::{self, run_with_schedule, ContextCarrier, ScheduleState},
+        task::{self, run_with_schedule, ScheduleState},
         Erase, SendEvent, Untyped,
     },
     net::{
@@ -105,12 +105,31 @@ pub async fn pbft(
     let (schedule_sender, mut schedule_receiver) = unbounded_channel();
     let (sender, mut receiver) = unbounded_channel();
 
-    let net_task = udp::run(
-        &socket,
-        pbft::messages::codec::to_client_decode(Erase::new(sender.clone())),
-    );
-
-    let mut context = pbft::client::context::Context::<ContextCarrier, _, _, _> {
+    type S = pbft::client::State<SocketAddr>;
+    type Net =
+        Encode<pbft::messages::codec::ToReplica<SocketAddr>, IndexNet<SocketAddr, Arc<UdpSocket>>>;
+    type Upcall = UnboundedSender<InvokeOk<Bytes>>;
+    type Schedule = task::erase::ScheduleState<S, Context>;
+    struct Context {
+        net: Net,
+        upcall: Upcall,
+        schedule: Schedule,
+    }
+    impl pbft::client::Context<SocketAddr> for Context {
+        type Net = Net;
+        type Upcall = Upcall;
+        type Schedule = Schedule;
+        fn net(&mut self) -> &mut Self::Net {
+            &mut self.net
+        }
+        fn upcall(&mut self) -> &mut Self::Upcall {
+            &mut self.upcall
+        }
+        fn schedule(&mut self) -> &mut Self::Schedule {
+            &mut self.schedule
+        }
+    }
+    let mut context = Context {
         net: pbft::messages::codec::to_replica_encode(IndexNet::new(
             replica_addrs,
             None,
@@ -118,7 +137,6 @@ pub async fn pbft(
         )),
         upcall: upcall_sender,
         schedule: Erase::new(ScheduleState::new(schedule_sender)),
-        _m: Default::default(),
     };
     let client_task = run_with_schedule(
         Untyped::new(pbft::client::State::new(random(), addr, config)),
@@ -126,6 +144,10 @@ pub async fn pbft(
         &mut receiver,
         &mut schedule_receiver,
         |context| &mut *context.schedule,
+    );
+    let net_task = udp::run(
+        &socket,
+        pbft::messages::codec::to_client_decode(Erase::new(sender.clone())),
     );
 
     run_until(

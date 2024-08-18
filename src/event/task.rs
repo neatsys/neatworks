@@ -1,4 +1,4 @@
-use std::{collections::HashMap, marker::PhantomData};
+use std::collections::HashMap;
 
 use derive_where::derive_where;
 use tokio::{
@@ -17,57 +17,6 @@ pub mod erase {
 
     pub type ScheduleState<S, C> = Erase<S, C, super::ScheduleState<UntypedEvent<S, C>>>;
 }
-
-// a "stub", or marker type that indicates the task based context is being used
-// in a context type that refers to itself (on type level, not memory reference)
-//
-// the private PhantomData<()> prevents it from being constructed anywhere
-// outside. and it indeed should not be ever constructed; it only shows up in
-// type annotations, as a "placeholder" to take place for the actual generics
-// that would refer the context's own type and cannot be written out directly
-// anywhere outside the context definition
-//
-// the marker type seems to have no implementation. ideally it should have
-// several implementation "blanket over" a generic state e.g. for schedule
-//
-// struct ContextOf<S>(PhantomData<S>) // the desired form of `Context`
-//
-// trait On<Context> {
-//     type Out;
-// }
-//
-// impl<State, Context> On<Context> for ContextOf<State>
-// where
-//     /* whatever bounds the state and context */
-// {
-//     type Out = erase::ScheduleState<State, Context>
-// }
-//
-// this would not work (at least for now) because of the limitations by how
-// compiler deals with `where` clauses involving types refer to each other (the
-// details do not fit here but in short it will probably result in
-// "error[E0275]: overflow evaluating the requirement"). the current workaround
-// comes with three parts
-// * move bounds in `where` clauses to associated types
-// * `impl` on specialization instead of blanket to avoid explicitly writing out
-//   the `where` clauses, but relying on the requirements trivially hold for the
-//   specialized states and contexts
-// * because the `On<_>::Out` has context-specified bounds (for the first
-//   point), and one context type can have at most one `On<Self>` bound (or the
-//   `impl`s of those bounds will need to `where` on each other again), invent
-//   dedicated `On<_>` trait for every context that produces all types that
-//   refer back to the context type, instead of one universal trait for
-//   schedule, one for worker upcall, etc
-//
-// as the result, the `impl`s of `ContextOf<_>` all lives in the use sites and
-// are for some specialization. but in sprite those `impl`s are together
-// recovering the necessary part of the blanket above
-//
-// since the `impl`s are becoming specialized, it is unnecessary for this marker
-// to be generic over state (or anything). the (becoming unnecessary)
-// PhantomData<_> is saved to continue preventing `Context` value being
-// constructed, which is still desired despiting the workaround
-pub struct ContextCarrier(PhantomData<()>);
 
 impl<M: Into<N>, N> SendEvent<M> for UnboundedSender<N> {
     fn send(&mut self, event: M) -> anyhow::Result<()> {
