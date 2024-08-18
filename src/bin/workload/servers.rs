@@ -17,13 +17,13 @@ pub async fn unreplicated() -> anyhow::Result<()> {
     let socket = Arc::new(UdpSocket::bind("localhost:3000").await?);
     let (sender, mut receiver) = unbounded_channel();
 
+    let mut context = unreplicated::context::Server {
+        net: unreplicated::codec::server_encode(socket.clone()),
+    };
     let net_task = udp::run(
         &socket,
         unreplicated::codec::server_decode(Erase::new(sender)),
     );
-    let mut context = unreplicated::context::Server {
-        net: unreplicated::codec::server_encode(socket.clone()),
-    };
     let server_task = run(
         Untyped::new(unreplicated::ServerState::new(Null)),
         &mut context,
@@ -51,18 +51,21 @@ pub async fn pbft(
     type PeerNet =
         Encode<pbft::messages::codec::ToReplica<SocketAddr>, IndexNet<SocketAddr, Arc<UdpSocket>>>;
     type DownlinkNet = Encode<pbft::messages::codec::ToClient, Arc<UdpSocket>>;
+    type CryptoWorker = task::work::Sender<Crypto, CryptoContext>;
+    type CryptoContext = task::erase::Sender<S, Context>;
+    type Schedule = task::erase::ScheduleState<S, Context>;
     struct Context {
         peer_net: PeerNet,
         downlink_net: DownlinkNet,
-        crypto_worker: task::work::Sender<Crypto, task::erase::Sender<S, Self>>,
-        schedule: task::erase::ScheduleState<S, Self>,
+        crypto_worker: CryptoWorker,
+        schedule: Schedule,
     }
     impl pbft::replica::Context<S, SocketAddr> for Context {
         type PeerNet = PeerNet;
         type DownlinkNet = DownlinkNet;
-        type CryptoWorker = task::work::Sender<Crypto, Self::CryptoContext>;
-        type CryptoContext = task::erase::Sender<S, Self>;
-        type Schedule = task::erase::ScheduleState<S, Self>;
+        type CryptoWorker = CryptoWorker;
+        type CryptoContext = CryptoContext;
+        type Schedule = Schedule;
         fn peer_net(&mut self) -> &mut Self::PeerNet {
             &mut self.peer_net
         }
@@ -76,7 +79,6 @@ pub async fn pbft(
             &mut self.schedule
         }
     }
-
     let mut context = Context {
         peer_net: pbft::messages::codec::to_replica_encode(IndexNet::new(
             addrs,

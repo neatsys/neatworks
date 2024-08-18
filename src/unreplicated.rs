@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     codec::Payload,
-    event::{OnErasedEvent, ScheduleEvent, SendEvent, ActiveTimer},
+    event::{ActiveTimer, OnErasedEvent, ScheduleEvent, SendEvent},
     net::{
         events::{Cast, Recv},
         Addr,
@@ -309,29 +309,36 @@ pub mod model {
         schedule: Schedule<Timer>,
     }
 
-    struct ClientContextCarrier;
+    pub struct ClientContext<'a, W>(
+        &'a mut ClientContextState<W>,
+        &'a mut Network<Addr, Message>,
+    );
 
-    impl<'a, W> super::context::On<ClientContext<'a, W>> for ClientContextCarrier {
-        type Schedule = &'a mut Schedule<Timer>;
+    impl<W: Workload<Op = Bytes, Result = Bytes>> super::ClientContext<Addr> for ClientContext<'_, W> {
+        type Net = Network<Addr, Message>;
+        type Upcall = CloseLoop<W, Option<Invoke<Bytes>>>;
+        type Schedule = Schedule<Timer>;
+        fn net(&mut self) -> &mut Self::Net {
+            self.1
+        }
+        fn upcall(&mut self) -> &mut Self::Upcall {
+            &mut self.0.upcall
+        }
+        fn schedule(&mut self) -> &mut Self::Schedule {
+            &mut self.0.schedule
+        }
     }
 
-    type ClientContext<'a, W> = super::context::Client<
-        ClientContextCarrier,
-        &'a mut Network<Addr, Message>,
-        &'a mut CloseLoop<W, Option<Invoke<Bytes>>>,
-        Addr,
-    >;
+    impl super::ServerContext<Addr> for Network<Addr, Message> {
+        type Net = Network<Addr, Message>;
+        fn net(&mut self) -> &mut Self::Net {
+            self
+        }
+    }
 
     impl SendEvent<Cast<(), Request<Addr>>> for Network<Addr, Message> {
         fn send(&mut self, Cast((), message): Cast<(), Request<Addr>>) -> anyhow::Result<()> {
             self.send(Cast(Addr::Server, message))
-        }
-    }
-
-    impl ServerContext<Addr> for Network<Addr, Message> {
-        type Net = Self;
-        fn net(&mut self) -> &mut Self::Net {
-            self
         }
     }
 
@@ -348,18 +355,13 @@ pub mod model {
                     let Some((client, context)) = self.clients.get_mut(index as usize) else {
                         anyhow::bail!("unexpected client index {index}")
                     };
-                    let mut context = ClientContext {
-                        net: &mut self.network,
-                        upcall: &mut context.upcall,
-                        schedule: &mut context.schedule,
-                        _m: Default::default(),
-                    };
+                    let mut context = ClientContext(context, &mut self.network);
                     match event {
                         Event::Message(_, Message::Reply(message)) => {
                             client.on_event(Recv(message), &mut context)
                         }
                         Event::Timer(_, id, Timer::ClientResend) => {
-                            context.schedule.tick(id)?;
+                            context.0.schedule.tick(id)?;
                             client.on_event(client::Resend, &mut context)
                         }
                         _ => anyhow::bail!("unexpected event {event:?}"),
@@ -385,12 +387,7 @@ pub mod model {
         fn fix(&mut self) -> anyhow::Result<()> {
             for (client, context) in &mut self.clients {
                 if let Some(invoke) = context.upcall.sender.take() {
-                    let mut context = ClientContext {
-                        net: &mut self.network,
-                        upcall: &mut context.upcall,
-                        schedule: &mut context.schedule,
-                        _m: Default::default(),
-                    };
+                    let mut context = ClientContext(context, &mut self.network);
                     client.on_event(invoke, &mut context)?
                 }
             }
