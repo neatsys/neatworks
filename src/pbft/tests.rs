@@ -380,3 +380,5 @@ mod search {
         }
     }
 }
+
+mod simulate {}

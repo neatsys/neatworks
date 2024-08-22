@@ -11,15 +11,17 @@ use crate::{
 #[derive_where(Default)]
 pub struct Schedule<M> {
     envelops: Vec<TimerEnvelop<M>>,
-    count: u32,
+    count: TimerId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct TimerEnvelop<M> {
-    id: u32,
+    id: TimerId,
     period: Duration,
     event: M,
 }
+
+pub type TimerId = u32;
 
 impl<M> Schedule<M> {
     pub fn new() -> Self {
@@ -53,8 +55,6 @@ impl<M: Into<N>, N> ScheduleEvent<M> for Schedule<N> {
         Ok(())
     }
 }
-
-pub type TimerId = u32;
 
 impl<M> Schedule<M> {
     fn remove(&mut self, id: u32) -> anyhow::Result<TimerEnvelop<M>> {
