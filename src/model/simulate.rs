@@ -14,21 +14,6 @@ use crate::{
 #[derive(Debug, Display, Error)]
 pub struct ProgressExhausted;
 
-pub trait State {
-    type Event;
-
-    fn step(&mut self, temporal: &mut Temporal<Self::Event>) -> anyhow::Result<()>;
-
-    fn progress(&mut self, temporal: &mut Temporal<Self::Event>) -> anyhow::Result<()> {
-        loop {
-            match self.step(temporal) {
-                Err(err) if err.is::<ProgressExhausted>() => return Ok(()),
-                result => result?,
-            }
-        }
-    }
-}
-
 pub type TimerId = u32;
 
 #[derive_where(Default)]
@@ -59,14 +44,6 @@ impl<M> ScheduleEvent<M> for Temporal<M> {
         let inserted = self.timeline.insert((at, id));
         assert!(inserted);
         Ok(ActiveTimer(id))
-    }
-
-    fn set_internal(
-        &mut self,
-        _: Duration,
-        _: impl FnMut() -> M + Send + 'static,
-    ) -> anyhow::Result<ActiveTimer> {
-        anyhow::bail!("unimplemented")
     }
 
     fn unset(&mut self, ActiveTimer(id): ActiveTimer) -> anyhow::Result<()> {

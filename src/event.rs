@@ -69,11 +69,14 @@ pub trait ScheduleEvent<M> {
         self.set_internal(period, move || event.clone())
     }
 
+    #[allow(unused)]
     fn set_internal(
         &mut self,
         period: Duration,
         event: impl FnMut() -> M + Send + 'static,
-    ) -> anyhow::Result<ActiveTimer>;
+    ) -> anyhow::Result<ActiveTimer> {
+        anyhow::bail!("unimplemented")
+    }
 
     fn unset(&mut self, id: ActiveTimer) -> anyhow::Result<()>;
 }

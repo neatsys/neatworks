@@ -42,14 +42,6 @@ impl<M: Into<N>, N> ScheduleEvent<M> for Schedule<N> {
         Ok(ActiveTimer(id))
     }
 
-    fn set_internal(
-        &mut self,
-        _: Duration,
-        _: impl FnMut() -> M + Send + 'static,
-    ) -> anyhow::Result<ActiveTimer> {
-        anyhow::bail!("unimplemented")
-    }
-
     fn unset(&mut self, ActiveTimer(id): ActiveTimer) -> anyhow::Result<()> {
         self.remove(id)?;
         Ok(())
