@@ -16,6 +16,7 @@ pub struct ProgressExhausted;
 
 pub type TimerId = u32;
 
+#[derive(Debug)]
 #[derive_where(Default)]
 pub struct Temporal<M> {
     now: Duration,
@@ -24,6 +25,7 @@ pub struct Temporal<M> {
     timers: HashMap<TimerId, TimerEnvelop<M>>,
 }
 
+#[derive(Debug)]
 struct TimerEnvelop<M> {
     event: M,
     period: Duration,
@@ -94,7 +96,9 @@ impl<A, M> NetworkState<A, M> {
     #[cfg(test)]
     pub fn choose(&mut self, u: &mut arbtest::arbitrary::Unstructured) -> anyhow::Result<(A, M)> {
         anyhow::ensure!(!self.messages.is_empty(), ProgressExhausted);
-        let i = u.choose_index(self.messages.len()).unwrap();
+        let i = u
+            .choose_index(self.messages.len())
+            .expect("choose_index never error with insufficient random bytes");
         Ok(self.messages.swap_remove(i))
     }
 }

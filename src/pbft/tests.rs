@@ -1,6 +1,5 @@
 use bytes::Bytes;
 use derive_more::From;
-use derive_where::derive_where;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -227,22 +226,7 @@ impl<N: SendMessage<Addr, M>, M> SendMessage<Addr, M> for NetworkContext<'_, N> 
     }
 }
 
-#[derive(Debug)]
-pub struct State<CC, RC, N> {
-    pub clients: Vec<(client::State<Addr>, CC)>,
-    pub replicas: Vec<(ReplicaState, RC)>,
-    network: N,
-}
-
 type ReplicaState = replica::State<kvstore::App, Addr>;
-
-#[derive(Debug, Clone)]
-#[derive_where(PartialEq, Eq, Hash; T)]
-pub struct ClientContextState<W, T> {
-    #[derive_where(skip)]
-    pub upcall: CloseLoop<W, Option<Invoke<Bytes>>>,
-    pub schedule: T,
-}
 
 pub struct ClientContext<'a, N, W, T> {
     pub net: N,
@@ -268,14 +252,6 @@ where
     fn schedule(&mut self) -> &mut Self::Schedule {
         self.schedule
     }
-}
-
-#[derive(Debug, Clone)]
-#[derive_where(PartialEq, Eq, Hash; T)]
-pub struct ReplicaContextState<T> {
-    #[derive_where(skip)]
-    pub crypto: Crypto,
-    pub schedule: T,
 }
 
 pub struct ReplicaContext<'a, N, T> {
@@ -310,29 +286,56 @@ where
 }
 
 mod search {
+    use std::borrow::Borrow;
+
     use bytes::Bytes;
+    use derive_where::derive_where;
 
     use crate::{
+        crypto::Crypto,
         event::{combinators::Transient, OnErasedEvent as _, SendEvent},
         model::search::state::{Network, Schedule, TimerId},
-        workload::Workload,
+        pbft::{client, replica},
+        workload::{events::Invoke, CloseLoop, Workload},
     };
 
-    use super::{Addr, Message, Timer};
+    use super::{Addr, Message, NetworkContext, ReplicaState, Timer};
 
-    pub type State<W> =
-        super::State<ClientContextState<W>, ReplicaContextState, Network<Addr, Message>>;
-    pub type ClientContextState<W> = super::ClientContextState<W, Schedule<Timer>>;
-    pub type ReplicaContextState = super::ReplicaContextState<Schedule<Timer>>;
+    #[derive(Debug)]
+    pub struct State<W, N> {
+        pub clients: Vec<(client::State<Addr>, ClientContextState<W>)>,
+        pub replicas: Vec<(ReplicaState, ReplicaContextState)>,
+        network: N,
+    }
 
-    pub type NetworkContext<'a> = super::NetworkContext<'a, Network<Addr, Message>>;
-    pub type ClientContext<'a, W> =
-        super::ClientContext<'a, NetworkContext<'a>, W, Schedule<Timer>>;
-    pub type ReplicaContext<'a> = super::ReplicaContext<'a, NetworkContext<'a>, Schedule<Timer>>;
+    #[derive(Debug, Clone)]
+    #[derive_where(PartialEq, Eq, Hash)]
+    pub struct ClientContextState<W> {
+        #[derive_where(skip)]
+        pub upcall: CloseLoop<W, Option<Invoke<Bytes>>>,
+        pub schedule: Schedule<Timer>,
+    }
+
+    #[derive(Debug, Clone)]
+    #[derive_where(PartialEq, Eq, Hash)]
+    pub struct ReplicaContextState {
+        #[derive_where(skip)]
+        pub crypto: Crypto,
+        pub schedule: Schedule<Timer>,
+    }
+
+    pub type ClientContext<'a, N, W> =
+        super::ClientContext<'a, NetworkContext<'a, N>, W, Schedule<Timer>>;
+    pub type ReplicaContext<'a, N> =
+        super::ReplicaContext<'a, NetworkContext<'a, N>, Schedule<Timer>>;
 
     pub type Event = super::Event<TimerId>;
 
-    impl<W: Workload<Op = Bytes, Result = Bytes>> SendEvent<Event> for State<W> {
+    impl<W: Workload<Op = Bytes, Result = Bytes>, N> SendEvent<Event> for State<W, N>
+    where
+        for<'a> ClientContext<'a, N, W>: client::Context<Addr>,
+        for<'a> ReplicaContext<'a, N>: replica::Context<ReplicaState, Addr>,
+    {
         fn send(&mut self, event: Event) -> anyhow::Result<()> {
             match event {
                 Event::Message(Addr::Client(index), _) | Event::Timer(Addr::Client(index), ..) => {
@@ -380,7 +383,12 @@ mod search {
         }
     }
 
-    impl<W: Workload<Op = Bytes, Result = Bytes>> crate::model::search::State for State<W> {
+    impl<W: Workload<Op = Bytes, Result = Bytes>, N> crate::model::search::State for State<W, N>
+    where
+        for<'a> ClientContext<'a, N, W>: client::Context<Addr>,
+        for<'a> ReplicaContext<'a, N>: replica::Context<ReplicaState, Addr>,
+        N: Borrow<Network<Addr, Message>>,
+    {
         type Event = Event;
 
         fn events(&self) -> impl Iterator<Item = Self::Event> + '_ {
@@ -404,6 +412,7 @@ mod search {
                         })
                     });
             self.network
+                .borrow()
                 .events()
                 .map(|(addr, message)| Event::Message(addr, message))
                 .chain(client_timers)
@@ -413,25 +422,47 @@ mod search {
 }
 
 mod simulate {
+    use std::borrow::BorrowMut;
+
     use arbtest::arbitrary::Unstructured;
     use bytes::Bytes;
+    use derive_where::derive_where;
 
     use crate::{
+        crypto::Crypto,
         event::{combinators::Transient, OnErasedEvent as _, ScheduleEvent},
         model::simulate::{NetworkState, ProgressExhausted, Temporal},
-        workload::Workload,
+        pbft::{client, replica},
+        workload::{events::Invoke, CloseLoop, Workload},
     };
 
-    use super::{Addr, Message, Timer};
+    use super::{Addr, Message, NetworkContext, ReplicaState, Timer};
 
-    pub type State<W> =
-        super::State<ClientContextState<W>, ReplicaContextState, NetworkState<Addr, Message>>;
-    pub type ClientContextState<W> = super::ClientContextState<W, ()>;
-    pub type ReplicaContextState = super::ReplicaContextState<()>;
+    #[derive(Debug)]
+    pub struct State<W, N> {
+        pub clients: Vec<(client::State<Addr>, ClientContextState<W>)>,
+        pub replicas: Vec<(ReplicaState, ReplicaContextState)>,
+        network: N,
+        schedule: Temporal<Event>,
+    }
 
-    pub type NetworkContext<'a> = super::NetworkContext<'a, NetworkState<Addr, Message>>;
-    pub type ClientContext<'a, W> = super::ClientContext<'a, NetworkContext<'a>, W, Schedule<'a>>;
-    pub type ReplicaContext<'a> = super::ReplicaContext<'a, NetworkContext<'a>, Schedule<'a>>;
+    #[derive(Debug, Clone)]
+    #[derive_where(PartialEq, Eq, Hash)]
+    pub struct ClientContextState<W> {
+        #[derive_where(skip)]
+        pub upcall: CloseLoop<W, Option<Invoke<Bytes>>>,
+    }
+
+    #[derive(Debug, Clone)]
+    #[derive_where(PartialEq, Eq, Hash)]
+    pub struct ReplicaContextState {
+        #[derive_where(skip)]
+        pub crypto: Crypto,
+    }
+
+    pub type ClientContext<'a, N, W> =
+        super::ClientContext<'a, NetworkContext<'a, N>, W, Schedule<'a>>;
+    pub type ReplicaContext<'a, N> = super::ReplicaContext<'a, NetworkContext<'a, N>, Schedule<'a>>;
 
     pub type Event = super::Event<()>;
 
@@ -458,13 +489,18 @@ mod simulate {
         }
     }
 
-    impl<W: Workload<Op = Bytes, Result = Bytes>> State<W> {
+    impl<W: Workload<Op = Bytes, Result = Bytes>, N> State<W, N>
+    where
+        for<'a> ClientContext<'a, N, W>: client::Context<Addr>,
+        for<'a> ReplicaContext<'a, N>: replica::Context<ReplicaState, Addr>,
+        N: BorrowMut<NetworkState<Addr, Message>>,
+    {
         pub fn step(
             &mut self,
             u: &mut Unstructured,
             temporal: &mut Temporal<Event>,
         ) -> anyhow::Result<()> {
-            let event = match self.network.choose(u) {
+            let event = match self.network.borrow_mut().choose(u) {
                 Ok((addr, message)) => Event::Message(addr, message),
                 Err(err) if err.is::<ProgressExhausted>() => temporal.pop()?,
                 Err(err) => return Err(err),
